@@ -597,18 +597,44 @@ func (m *model) wrap(s string, w int) []string {
 	return out
 }
 
+// userPrefix opens a submitted line the same way the composer's own prompt
+// does, so the transcript reads as a continuation of what was typed (Part 9).
+const userPrefix = "❯ "
+
+// renderUser renders a submitted turn with the Part 9 treatment: no role
+// label — a full-width background tint is the only signal a human typed
+// this line. This is the one background fill reserved for user-authored
+// text; nothing agent-generated may ever use it (see TestUserTintNeverOnAgentTurn).
 func (m *model) renderUser(text string) []string {
 	w := m.regions.Chat.W
 	if w == 0 {
 		w = 80
 	}
-	lines := []string{m.fg(m.theme.Palette.Muted, m.theme.Label("you"))}
-	for _, l := range m.wrap(text, w-2) {
-		lines = append(lines, "  "+l)
+	tint, tintErr := m.theme.Palette.UserTint()
+	var lines []string
+	for i, l := range m.wrap(text, w-2) {
+		prefix := "  "
+		if i == 0 {
+			prefix = userPrefix
+		}
+		s := prefix + l
+		if pad := w - ansi.StringWidth(s); pad > 0 {
+			s += strings.Repeat(" ", pad)
+		}
+		s = m.fg(m.theme.Palette.Foreground, s)
+		if tintErr == nil {
+			s = m.styler.BgTint(tint, s)
+		}
+		lines = append(lines, s)
 	}
 	return append(lines, "")
 }
 
+// renderReply renders an agent turn: role header in its accent colour, then
+// (when this turn made a traced mechanical call) one muted operation-summary
+// line, then the reply prose. The agent turn never carries the user tint —
+// that one hard rule (enforced by TestUserTintNeverOnAgentTurn) is what
+// keeps the tint legible as "a human typed this" and nothing else.
 func (m *model) renderReply(t Turn) []string {
 	w := m.regions.Chat.W
 	if w == 0 {
@@ -622,6 +648,9 @@ func (m *model) renderReply(t Turn) []string {
 		label += " " + m.theme.Label("untrusted input")
 	}
 	lines := []string{m.fg(m.theme.Palette.Accent, label)}
+	if op := operationSummary(t); op != "" {
+		lines = append(lines, m.fg(m.theme.Palette.Muted, "  · "+op))
+	}
 	for _, l := range m.wrap(t.Reply, w-2) {
 		lines = append(lines, "  "+m.fg(m.theme.Palette.Foreground, l))
 	}

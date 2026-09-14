@@ -175,6 +175,37 @@ func (c RGB) Color() color.Color { return color.RGBA{c.R, c.G, c.B, 0xff} }
 // Hex renders #rrggbb.
 func (c RGB) Hex() string { return fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B) }
 
+// Lighten shifts c toward white by delta per channel (clamped to 0..255).
+func (c RGB) Lighten(delta int) RGB {
+	add := func(v uint8) uint8 {
+		n := int(v) + delta
+		if n > 255 {
+			n = 255
+		}
+		if n < 0 {
+			n = 0
+		}
+		return uint8(n)
+	}
+	return RGB{add(c.R), add(c.G), add(c.B)}
+}
+
+// userTintDelta is how many steps (of 255) lighter than Background the
+// Part 9 user-turn tint is: a strip, not a panel.
+const userTintDelta = 22
+
+// UserTint returns the background fill for a user-authored transcript line
+// (Part 9): Background lightened a few steps. It deliberately never reuses
+// Panel — themes use Panel for header/status chrome and it can be a
+// saturated accent (water-base's is blue), not the subtle strip this needs.
+func (p Palette) UserTint() (RGB, error) {
+	bg, err := ParseHex(p.Background)
+	if err != nil {
+		return RGB{}, err
+	}
+	return bg.Lighten(userTintDelta), nil
+}
+
 // Profile is the colour capability detected for the terminal (7.4: detect,
 // never assume). Degradation order: TrueColor → ANSI256 → ANSI16 → None.
 type Profile int
@@ -300,6 +331,18 @@ func (st Styler) Bg(hex, s string) string {
 		return s
 	}
 	return "\x1b[48;" + Degrade(c, st.Profile) + "m" + s + "\x1b[49m"
+}
+
+// BgTint fills s with the Part 9 user-turn tint, TrueColor terminals only.
+// Below TrueColor it degrades to no fill at all: a few-steps-lighter strip
+// doesn't survive ANSI256/16 quantization without reading as a mismatched
+// patch, so at those tiers the caller's own glyph prefix carries the
+// user/agent distinction alone.
+func (st Styler) BgTint(c RGB, s string) string {
+	if st.Profile != TrueColor {
+		return s
+	}
+	return "\x1b[48;" + Degrade(c, TrueColor) + "m" + s + "\x1b[49m"
 }
 
 // Bold applies bold when any colour capability exists.

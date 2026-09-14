@@ -142,6 +142,28 @@ No code changes in this pass beyond the three commits above; the PDF and demo ki
 presentation artifacts, generated and verified (rehearsed end-to-end on this Mac) but outside
 the `water` repo.
 
+## Part 9: message rendering — user/agent distinction (same day)
+
+Rendering-only change to the chat TUI transcript (`internal/chat/tui.go`), following a spec
+comparing Water's transcript against Claude Code's. Does not touch the input editor (Part 4.1) —
+only how a *submitted* turn is displayed after the fact.
+
+- User turns drop the `YOU` label; a `❯ ` prefix plus a full-width background tint (Background
+  lightened a fixed 22/255 per channel — `theme.RGB.Lighten`, `Palette.UserTint`) is now the only
+  signal a human typed the line. The tint is TrueColor-only (`Styler.BgTint`); below that it
+  degrades to nothing, and the `❯` prefix alone carries the distinction.
+- Agent turns are unchanged (role-coloured header) except for one addition: a new muted
+  operation-summary line between the header and the reply prose when the turn made a real tool
+  call — `· read 1 file under ~/…` — computed in `internal/chat/render.go` directly from
+  `Turn.ToolEvents` (now populated from `backend.Response.ToolEvents` in `Session.Send`), never a
+  separately written description. Delegation-style summary lines are part of the same rendering
+  convention but have no live data source yet — chat sessions (`agent.RunTurn`) never delegate;
+  only the orchestrator's `HierarchyNode` does.
+- Gate: `TestUserTintNeverOnAgentTurn`, `TestOperationLineSourcedFromTrace`,
+  `TestDegradesWithoutTint` in `internal/chat/render_test.go`. Manual check done via a throwaway
+  dump of real ANSI output (not committed) confirming the tint wraps only user lines. Full
+  `go test ./...` (27 packages) and `go vet`/`gofmt` clean after the change.
+
 
 ## Infrastructure judgment pass v2 (same day, afternoon)
 

@@ -23,6 +23,7 @@ import (
 	"water/internal/persona"
 	"water/internal/roles"
 	"water/internal/session"
+	"water/internal/tools"
 )
 
 // Turn is one completed exchange kept in the active context.
@@ -40,6 +41,12 @@ type Turn struct {
 	// Context accounting from the backend (0 = unknown).
 	InputTokens   int
 	ContextWindow int
+	// ToolEvents are the traced tool invocations this turn actually made
+	// (Part 5). The Part 9 transcript renders a muted summary line from
+	// these directly — the same data /why and diagnose already read, not a
+	// separately generated description. Not persisted across a resume: a
+	// reopened turn simply has none, so no line renders for it.
+	ToolEvents []tools.Event
 }
 
 // Session is the live state of one role conversation.
@@ -198,7 +205,7 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	}
 	// Water marks the turn untrusted whenever external content was handed to
 	// the model, whether or not the backend reports delivery (5.5).
-	t := Turn{N: n, User: text, Reply: resp.Text, Prompt: p, Backend: resp.Backend, Model: resp.Model, Duration: time.Since(start), At: start, Untrusted: resp.ConsumedUntrusted() || len(atts) > 0, InputTokens: resp.InputTokens, ContextWindow: resp.ContextWindow}
+	t := Turn{N: n, User: text, Reply: resp.Text, Prompt: p, Backend: resp.Backend, Model: resp.Model, Duration: time.Since(start), At: start, Untrusted: resp.ConsumedUntrusted() || len(atts) > 0, InputTokens: resp.InputTokens, ContextWindow: resp.ContextWindow, ToolEvents: resp.ToolEvents}
 	s.turns = append(s.turns, t)
 	s.lastSkills = p.Skills
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindAssistant, Turn: n, Text: resp.Text, Backend: resp.Backend, Skills: p.Skills, MemoryIDs: p.MemoryIDs, InboxIDs: p.InboxIDs})
