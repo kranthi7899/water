@@ -65,7 +65,9 @@ tar -xzf "$tmp/$name" -C "$tmp"
 
 if [ "$GLOBAL" = 1 ]; then dest=/usr/local/bin; else dest="${XDG_BIN_HOME:-$HOME/.local/bin}"; fi
 mkdir -p "$dest"
-if [ -w "$dest" ]; then install -m 0755 "$tmp/water" "$dest/water"; else sudo install -m 0755 "$tmp/water" "$dest/water"; fi
+# Install via rename onto a fresh inode: overwriting a running binary in place
+# makes new launches hang in the loader on macOS.
+if [ -w "$dest" ]; then install -m 0755 "$tmp/water" "$dest/water.new" && mv -f "$dest/water.new" "$dest/water"; else sudo install -m 0755 "$tmp/water" "$dest/water.new" && sudo mv -f "$dest/water.new" "$dest/water"; fi
 echo "water: installed $("$dest/water" version 2>/dev/null || echo "$VERSION") to $dest/water"
 case ":$PATH:" in *":$dest:"*) ;; *) echo "water: add $dest to your PATH, e.g.  export PATH=\"$dest:\$PATH\"";; esac
 echo
