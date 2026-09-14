@@ -92,3 +92,52 @@ investigation findings and the Part 10 answers are in `docs/decisions.md`.
   the Homebrew tap.
 - Apply the Part 2 routing rule (delegate only with evidence sources) after re-measuring.
 - Persona content pass on the Danone/Mylan CEO entry (see `docs/decisions.md` Q3).
+
+## Harness cross-check + reporting (same day, evening)
+
+Compared the interactive chat harness section-by-section against the documented Hermes Agent
+CLI (Nous Research) and took the cheap, compatible upgrades — see `docs/decisions.md` for the
+full comparison table and what was deliberately not taken (token streaming, `!` shell
+passthrough, mid-turn redirect — each would change the backend contract, add a second unpoliced
+tool path, or has nothing to redirect into with one-call-per-turn).
+
+- `7e49a2b` — bare `water` now opens the chat picker directly (like typing `claude`), instead of
+  printing help when configured.
+- `df733a3` — slash-command autocomplete dropdown with Tab-complete; exit prints a resume command,
+  session slug, turn count, duration; `/copy` + Ctrl+Y clipboard (mouse capture turned off so the
+  terminal's own selection works); login routing when a subscription CLI is signed out; a voice
+  indicator (♪/○) left of the composer with `/voice` and Ctrl+B; context-fill bar from the
+  backend's reported window; a ticking "thinking…" timer; `/undo /retry /usage /save /title`;
+  `voice.provider` now defaults to `os` instead of `noop`.
+- `fd10919` — `install.sh` installs by renaming a fresh file into place rather than overwriting a
+  running binary in place, after overwriting `~/.local/bin/water` while a chat session was live
+  made every new launch hang in the macOS loader (found and fixed live, see the same-day
+  `docs/decisions.md` entry).
+
+### Deliverables generated for the user (not committed to this repo — see below)
+
+Two PDFs and a rehearsed demo kit, all under `~/twin_pitch/` (a separate, uncommitted directory
+next to `~/water` and `~/twin`; not a git repo):
+
+- `~/twin_pitch/Water - Build, Architecture and Validation Report.pdf` — 35-page architecture,
+  validation and usage report generated from real repo facts (line/test counts, actual trace and
+  checkpoint contents from prior real runs, `twin` project validation results). Built as styled
+  HTML rendered to PDF via headless Chrome; source HTML was in the session scratchpad, not saved
+  to the repo.
+- `~/twin_pitch/demo/` — a rehearsed, scripted live demo (`DEMO.md` / exported PDF) for showing
+  the product to a non-technical audience in four phases: (1) same question to all four roles,
+  showing persona differentiation; (2) per-role memory isolation, chat sessions with
+  `/why`/`/consult`/`/remember`, and one real experience-growth cycle (feedback → new lesson →
+  content-hash mismatch → re-sign → different answer) run against `agents-copy` (a throwaway copy
+  of `~/water/agents`, never the shipped personas); (3) orchestration rules explained plus a
+  single-domain brief showing the CEO answering alone; (4) a full team run on a checkout-redesign
+  brief with real CTO/COO/Design disagreement forwarded verbatim to the CEO. Everything runs
+  under `WATER_HOME=~/twin_pitch/demo/home` (isolated from the user's real `~/.water`) and
+  defaults to `codex-subscription` because the Claude 5-hour window was exhausted (105% used) at
+  the time. `reset.sh` clears the live/mutable parts between run-throughs; `recordings/` holds
+  copied traces/checkpoints from earlier real runs (including the evidence-provenance and
+  dissent/resume runs from the follow-up campaign) as backups if a live call is slow.
+
+No code changes in this pass beyond the three commits above; the PDF and demo kit are
+presentation artifacts, generated and verified (rehearsed end-to-end on this Mac) but outside
+the `water` repo.
