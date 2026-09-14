@@ -1,0 +1,7 @@
+schema: 1
+name: "CTO"
+slug: "cto"
+singleton: false
+orchestrator: false
+description: ""          # placeholder in Phase 1
+skills_enabled: []       # empty = discover all in skills/

@@ -1,0 +1,5 @@
+/bin/
+/dist/
+/.water-test/
+/.agents-dev/
+*.tmp

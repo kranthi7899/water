@@ -1,0 +1,7 @@
+schema: 1
+name: "CEO"
+slug: "ceo"
+singleton: true
+orchestrator: true
+description: ""          # placeholder in Phase 1
+skills_enabled: []       # empty = discover all in skills/

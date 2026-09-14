@@ -1,0 +1,344 @@
+// Package config is a hand-rolled layered configuration:
+// built-in defaults → ~/.water/config.yaml → env (WATER_*) → command flags.
+// Every resolved value remembers which layer set it (`water config`).
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// CurrentSchema is the config file schema this binary writes.
+const CurrentSchema = 1
+
+// Config is the typed, fully-resolved configuration.
+type Config struct {
+	Schema        int                 `yaml:"schema"`
+	Backend       BackendConfig       `yaml:"backend"`
+	Memory        MemoryConfig        `yaml:"memory"`
+	Voice         VoiceConfig         `yaml:"voice"`
+	Orchestration OrchestrationConfig `yaml:"orchestration"`
+	Telemetry     TelemetryConfig     `yaml:"telemetry"`
+	API           APIConfig           `yaml:"api"`
+}
+
+type BackendConfig struct {
+	Preferred    string `yaml:"preferred"` // claude-subscription | codex-subscription | api | auto
+	AllowMetered bool   `yaml:"allow_metered"`
+}
+
+type MemoryConfig struct {
+	Provider   string `yaml:"provider"`
+	MaxEntries int    `yaml:"max_entries"`
+	MaxBytes   int    `yaml:"max_bytes"`
+}
+
+type VoiceConfig struct {
+	Provider string `yaml:"provider"` // os | noop
+}
+
+type OrchestrationConfig struct {
+	Router      string `yaml:"router"`
+	MaxParallel int    `yaml:"max_parallel"`
+	Timeout     string `yaml:"timeout"`
+}
+
+type TelemetryConfig struct {
+	TraceDir string `yaml:"trace_dir"`
+}
+
+// APIConfig holds the metered backend's settings. Key is never written to the
+// environment of any subprocess.
+type APIConfig struct {
+	Key   string `yaml:"key,omitempty"`
+	Model string `yaml:"model,omitempty"`
+}
+
+// TimeoutDuration parses orchestration.timeout.
+func (c *Config) TimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(c.Orchestration.Timeout)
+	if err != nil {
+		return 5 * time.Minute
+	}
+	return d
+}
+
+// Layer names, in precedence order.
+const (
+	LayerDefault = "default"
+	LayerFile    = "file"
+	LayerEnv     = "env"
+	LayerFlag    = "flag"
+)
+
+// Resolved is a Config plus, for every dotted key, the layer that set it.
+type Resolved struct {
+	Config
+	Provenance map[string]string
+	FilePath   string
+	FileExists bool
+}
+
+// Keys lists all known dotted keys.
+func Keys() []string {
+	ks := make([]string, 0, len(defaults()))
+	for k := range defaults() {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
+func defaults() map[string]string {
+	return map[string]string{
+		"schema":                     strconv.Itoa(CurrentSchema),
+		"backend.preferred":          "auto",
+		"backend.allow_metered":      "false",
+		"memory.provider":            "markdown",
+		"memory.max_entries":         "200",
+		"memory.max_bytes":           "32768",
+		"voice.provider":             "noop",
+		"orchestration.router":       "ceo-fanout",
+		"orchestration.max_parallel": "4",
+		"orchestration.timeout":      "5m",
+		"telemetry.trace_dir":        filepath.Join(Home(), "traces"),
+		"api.key":                    "",
+		"api.model":                  "",
+	}
+}
+
+// Load resolves configuration. flags are dotted-key overrides supplied by the
+// CLI (only keys the user actually set).
+func Load(flags map[string]string) (*Resolved, error) {
+	flat := map[string]string{}
+	prov := map[string]string{}
+	for k, v := range defaults() {
+		flat[k], prov[k] = v, LayerDefault
+	}
+	res := &Resolved{Provenance: prov, FilePath: Path()}
+
+	if b, err := os.ReadFile(res.FilePath); err == nil {
+		res.FileExists = true
+		var raw map[string]any
+		if err := yaml.Unmarshal(b, &raw); err != nil {
+			return nil, fmt.Errorf("%s: %w", res.FilePath, err)
+		}
+		raw, err = migrate(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", res.FilePath, err)
+		}
+		for k, v := range flatten("", raw) {
+			if _, known := flat[k]; !known {
+				return nil, fmt.Errorf("%s: unknown key %q", res.FilePath, k)
+			}
+			flat[k], prov[k] = v, LayerFile
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	for k := range flat {
+		if k == "schema" {
+			continue
+		}
+		env := "WATER_" + strings.ToUpper(strings.NewReplacer(".", "_").Replace(k))
+		if v, ok := os.LookupEnv(env); ok {
+			flat[k], prov[k] = v, LayerEnv
+		}
+	}
+	for k, v := range flags {
+		if _, known := flat[k]; !known {
+			return nil, fmt.Errorf("unknown config key %q", k)
+		}
+		flat[k], prov[k] = v, LayerFlag
+	}
+	if err := res.apply(flat); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (r *Resolved) apply(flat map[string]string) error {
+	var err error
+	atoi := func(k string) int {
+		n, e := strconv.Atoi(flat[k])
+		if e != nil && err == nil {
+			err = fmt.Errorf("%s: %q is not an integer (set by %s)", k, flat[k], r.Provenance[k])
+		}
+		return n
+	}
+	abool := func(k string) bool {
+		b, e := strconv.ParseBool(flat[k])
+		if e != nil && err == nil {
+			err = fmt.Errorf("%s: %q is not a boolean (set by %s)", k, flat[k], r.Provenance[k])
+		}
+		return b
+	}
+	r.Schema = atoi("schema")
+	r.Backend.Preferred = flat["backend.preferred"]
+	r.Backend.AllowMetered = abool("backend.allow_metered")
+	r.Memory.Provider = flat["memory.provider"]
+	r.Memory.MaxEntries = atoi("memory.max_entries")
+	r.Memory.MaxBytes = atoi("memory.max_bytes")
+	r.Voice.Provider = flat["voice.provider"]
+	r.Orchestration.Router = flat["orchestration.router"]
+	r.Orchestration.MaxParallel = atoi("orchestration.max_parallel")
+	r.Orchestration.Timeout = flat["orchestration.timeout"]
+	r.Telemetry.TraceDir = Expand(flat["telemetry.trace_dir"])
+	r.API.Key = flat["api.key"]
+	r.API.Model = flat["api.model"]
+	if err != nil {
+		return err
+	}
+	if _, e := time.ParseDuration(r.Orchestration.Timeout); e != nil {
+		return fmt.Errorf("orchestration.timeout: %q is not a duration", r.Orchestration.Timeout)
+	}
+	return nil
+}
+
+// Flat returns the resolved values as dotted keys (for `water config`).
+func (r *Resolved) Flat() map[string]string {
+	return map[string]string{
+		"schema":                     strconv.Itoa(r.Schema),
+		"backend.preferred":          r.Backend.Preferred,
+		"backend.allow_metered":      strconv.FormatBool(r.Backend.AllowMetered),
+		"memory.provider":            r.Memory.Provider,
+		"memory.max_entries":         strconv.Itoa(r.Memory.MaxEntries),
+		"memory.max_bytes":           strconv.Itoa(r.Memory.MaxBytes),
+		"voice.provider":             r.Voice.Provider,
+		"orchestration.router":       r.Orchestration.Router,
+		"orchestration.max_parallel": strconv.Itoa(r.Orchestration.MaxParallel),
+		"orchestration.timeout":      r.Orchestration.Timeout,
+		"telemetry.trace_dir":        r.Telemetry.TraceDir,
+		"api.key":                    mask(r.API.Key),
+		"api.model":                  r.API.Model,
+	}
+}
+
+func mask(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 8 {
+		return "********"
+	}
+	return s[:4] + "…" + s[len(s)-4:]
+}
+
+func flatten(prefix string, m map[string]any) map[string]string {
+	out := map[string]string{}
+	for k, v := range m {
+		key := k
+		if prefix != "" {
+			key = prefix + "." + k
+		}
+		switch t := v.(type) {
+		case map[string]any:
+			for kk, vv := range flatten(key, t) {
+				out[kk] = vv
+			}
+		case nil:
+			out[key] = ""
+		default:
+			out[key] = fmt.Sprint(t)
+		}
+	}
+	return out
+}
+
+// migrate upgrades an on-disk config map to CurrentSchema. Each schema bump
+// adds a case here; the path exists from day one so migrations are additive.
+func migrate(raw map[string]any) (map[string]any, error) {
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	schema := 1
+	if v, ok := raw["schema"]; ok {
+		switch t := v.(type) {
+		case int:
+			schema = t
+		case float64:
+			schema = int(t)
+		case string:
+			n, err := strconv.Atoi(t)
+			if err != nil {
+				return nil, fmt.Errorf("schema: %q is not an integer", t)
+			}
+			schema = n
+		}
+	}
+	for schema < CurrentSchema {
+		switch schema {
+		// case 1: ... upgrade 1→2 here
+		default:
+			return nil, fmt.Errorf("no migration from schema %d", schema)
+		}
+	}
+	if schema > CurrentSchema {
+		return nil, fmt.Errorf("config schema %d is newer than this binary supports (%d); upgrade water", schema, CurrentSchema)
+	}
+	raw["schema"] = CurrentSchema
+	return raw, nil
+}
+
+// Save writes only the file layer: the given key/values merged into the
+// existing file (or a fresh one). It never persists env/flag values.
+func Save(set map[string]string) error {
+	p := Path()
+	raw := map[string]any{}
+	if b, err := os.ReadFile(p); err == nil {
+		if err := yaml.Unmarshal(b, &raw); err != nil {
+			return err
+		}
+	}
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	raw["schema"] = CurrentSchema
+	for k, v := range set {
+		if _, known := defaults()[k]; !known {
+			return fmt.Errorf("unknown config key %q", k)
+		}
+		setNested(raw, strings.Split(k, "."), coerce(v))
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	header := "# water configuration (schema 1). Layers: defaults → this file → WATER_* env → flags.\n"
+	return os.WriteFile(p, append([]byte(header), out...), 0o600)
+}
+
+func setNested(m map[string]any, path []string, v any) {
+	if len(path) == 1 {
+		m[path[0]] = v
+		return
+	}
+	child, ok := m[path[0]].(map[string]any)
+	if !ok {
+		child = map[string]any{}
+		m[path[0]] = child
+	}
+	setNested(child, path[1:], v)
+}
+
+func coerce(s string) any {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	if b, err := strconv.ParseBool(s); err == nil {
+		return b
+	}
+	return s
+}

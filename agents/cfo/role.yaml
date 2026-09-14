@@ -1,0 +1,7 @@
+schema: 1
+name: "CFO"
+slug: "cfo"
+singleton: false
+orchestrator: false
+description: ""          # placeholder in Phase 1
+skills_enabled: []       # empty = discover all in skills/
