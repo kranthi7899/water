@@ -17,7 +17,8 @@ One binary. No Docker, no Python, no Node. Prerequisite: `claude` (Claude subscr
 
 ## Use
 
-    water chat                      # agent picker, then an interactive session with one role
+    water                           # like `claude`: the agent picker, then a chat with one role
+    water chat cto                  # straight into a session with one role
     water chat cto --resume <slug>  # continue a transcript
     water orchestrate "<brief>"     # CEO frames → COO assigns → CTO/Design → COO verifies → CEO decides
     water orchestrate --resume <id> # continue a killed run from its checkpoint

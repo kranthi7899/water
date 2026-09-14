@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,13 +42,18 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// No subcommand: status-aware. Onboard if unconfigured, else help.
+			// No subcommand: like `claude`, bare `water` is the chat interface.
+			// Unconfigured → onboard (which ends in the agent picker); no
+			// terminal → help.
 			if _, err := os.Stat(config.Path()); errors.Is(err, os.ErrNotExist) {
 				if !isTTY(os.Stdin) && !a.flags.yes {
 					fmt.Fprintln(os.Stderr, "water is not configured. Run `water onboard` (add --yes for automation).")
 					return exitWith(ExitUnconfigured, errors.New("not configured"))
 				}
 				return a.runOnboard(cmd)
+			}
+			if isTTY(os.Stdin) && isTTY(os.Stdout) {
+				return a.runChat(context.Background(), "", "", true)
 			}
 			return cmd.Help()
 		},
