@@ -88,7 +88,7 @@ func TestReadOutsideRootsFails(t *testing.T) {
 	pol := &tools.Policy{Role: "cto", Filesystem: tools.FSPolicy{Mode: "read-only", Roots: []string{root}}}
 	svc := tools.NewService(pol, nil)
 	ctx := context.Background()
-	if out, err := svc.Call(ctx, tools.ToolReadFile, map[string]any{"path": "ok.txt"}); err != nil || out != "fine" {
+	if out, err := svc.Call(ctx, tools.ToolReadFile, map[string]any{"path": "ok.txt"}); err != nil || !strings.HasSuffix(out, "\nfine") || !strings.HasPrefix(out, "[water call_id: call-cto-") {
 		t.Fatalf("in-root read: %q %v", out, err)
 	}
 	for _, p := range []string{

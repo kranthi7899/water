@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 // duration, error.
 type Event struct {
 	At         time.Time      `json:"at"`
+	CallID     string         `json:"call_id"` // unique per invocation; specialists cite it as evidence
 	RunID      string         `json:"run_id,omitempty"`
 	Role       string         `json:"role"`
 	Tool       string         `json:"tool"`
@@ -97,7 +99,7 @@ func (s *Service) Definitions() []Definition {
 // it can adapt without retrying blindly.
 func (s *Service) Call(ctx context.Context, tool string, args map[string]any) (string, error) {
 	start := time.Now()
-	ev := Event{At: start, Role: s.Policy.Role, RunID: s.Policy.RunID, Tool: tool, Args: args}
+	ev := Event{At: start, CallID: NewCallID(s.Policy.Role), Role: s.Policy.Role, RunID: s.Policy.RunID, Tool: tool, Args: args}
 	dec, resolved := s.Policy.Authorize(tool, args)
 	ev.Allowed, ev.Basis = dec.Allowed, dec.Basis
 	var result string
@@ -127,7 +129,19 @@ func (s *Service) Call(ctx context.Context, tool string, args map[string]any) (s
 	if s.Log != nil {
 		s.Log(ev)
 	}
+	if err == nil {
+		// The call id travels with the result so the model can cite it. It is
+		// the ONLY thing a specialist can attach as evidence (Part 1 follow-up).
+		result = fmt.Sprintf("[water call_id: %s — cite this read as (evidence: %s)]\n%s", ev.CallID, ev.CallID, result)
+	}
 	return result, err
+}
+
+// NewCallID returns a unique, citeable invocation id.
+func NewCallID(role string) string {
+	b := make([]byte, 3)
+	_, _ = rand.Read(b)
+	return "call-" + role + "-" + hex.EncodeToString(b)
 }
 
 func (s *Service) execute(ctx context.Context, tool string, args map[string]any) (string, error) {

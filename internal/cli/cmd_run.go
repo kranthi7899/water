@@ -12,6 +12,7 @@ import (
 	"water/internal/agent"
 	"water/internal/backend"
 	"water/internal/chat"
+	"water/internal/config"
 	"water/internal/orchestrator"
 	"water/internal/trace"
 	"water/internal/voice"
@@ -78,10 +79,14 @@ func (a *App) runCmd() *cobra.Command {
 			}
 			resp, _, err := agent.RunTurn(ctx, role, env, nil, prompt, atts)
 			rec.NodeFinished(role.Slug, resp.Duration, err)
+			_ = backend.SaveRateLimit(config.Home(), resp.RateLimit)
 			if err != nil {
 				sf.NodeFailed(role.Slug, err)
 				rec.Error(err)
 				sf.RunFinished("", rec.Finish())
+				if errors.Is(err, backend.ErrRateLimited) {
+					return exitWith(ExitRateLimited, fmt.Errorf("subscription rate limit reached, not a failure: %w", err))
+				}
 				return exitWith(ExitBackend, err)
 			}
 			sf.NodeFinished(role.Slug, resp)

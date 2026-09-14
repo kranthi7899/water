@@ -131,7 +131,10 @@ var LoadBearingFlags = []string{"--strict-mcp-config", "--tools"}
 // BuildArgs is the pure argument builder, exposed so a guard test can assert
 // the load-bearing flags without spawning anything.
 func (c *ClaudeSubscription) BuildArgs(fs flagSet, req Request, mcpCfg string) ([]string, error) {
-	args := []string{"--print", "--output-format", "json"}
+	// stream-json (with --verbose) is used for every call so the CLI's
+	// rate_limit_event reaches Water; parseClaudeResult reads the final
+	// result line either way.
+	args := []string{"--print", "--output-format", "stream-json", "--verbose"}
 	switch {
 	case fs["--system-prompt"]:
 		args = append(args, "--system-prompt", req.System)
@@ -177,8 +180,7 @@ func (c *ClaudeSubscription) BuildArgs(fs flagSet, req Request, mcpCfg string) (
 	}
 	if len(req.Attachments) > 0 && fs["--input-format"] {
 		// stream-json input carries structured content blocks (Investigation 2).
-		args[2] = "stream-json"
-		args = append(args, "--input-format", "stream-json", "--verbose")
+		args = append(args, "--input-format", "stream-json")
 		return args, nil
 	}
 	args = append(args, "--", req.Prompt)
@@ -252,6 +254,7 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 		resp.ToolEvents, _ = tools.ReadEvents(logPath)
 	}
 
+	resp.RateLimit = parseRateLimit(stdout)
 	if res, ok := parseClaudeResult(stdout); ok {
 		resp.Text = strings.TrimSpace(res.Result)
 		resp.InputTokens = res.Usage.InputTokens + res.Usage.CacheReadInput + res.Usage.CacheCreationInput
@@ -263,6 +266,9 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 			}
 		}
 		if res.IsError {
+			if IsRateLimitText(res.Result) || (resp.RateLimit != nil && resp.RateLimit.Status != "" && resp.RateLimit.Status != "allowed") {
+				return resp, fmt.Errorf("%w: %s", ErrRateLimited, firstLine(res.Result))
+			}
 			return resp, fmt.Errorf("claude returned an error result (%s): %s", res.Subtype, firstLine(res.Result))
 		}
 		return resp, nil
@@ -290,6 +296,47 @@ func parseClaudeResult(stdout string) (claudeResult, bool) {
 		}
 	}
 	return claudeResult{}, false
+}
+
+// parseRateLimit extracts the last rate_limit_event from a stream-json
+// transcript, if any.
+func parseRateLimit(stdout string) *RateLimit {
+	var out *RateLimit
+	for _, line := range strings.Split(stdout, "\n") {
+		if !strings.Contains(line, `"rate_limit_event"`) {
+			continue
+		}
+		var ev struct {
+			Type string `json:"type"`
+			Info struct {
+				Status        string `json:"status"`
+				ResetsAt      int64  `json:"resetsAt"`
+				RateLimitType string `json:"rateLimitType"`
+				Windows       map[string]struct {
+					Utilization float64 `json:"utilization"`
+					ResetsAt    int64   `json:"resetsAt"`
+				} `json:"unifiedWindows"`
+			} `json:"rate_limit_info"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Type != "rate_limit_event" {
+			continue
+		}
+		rl := &RateLimit{Backend: ClaudeSubscriptionName, ObservedAt: time.Now(), Status: ev.Info.Status, WindowType: ev.Info.RateLimitType}
+		if w, ok := ev.Info.Windows["five_hour"]; ok {
+			rl.FiveHourUsed = w.Utilization
+			if w.ResetsAt > 0 {
+				rl.FiveHourResets = time.Unix(w.ResetsAt, 0)
+			}
+		}
+		if w, ok := ev.Info.Windows["seven_day"]; ok {
+			rl.SevenDayUsed = w.Utilization
+			if w.ResetsAt > 0 {
+				rl.SevenDayResets = time.Unix(w.ResetsAt, 0)
+			}
+		}
+		out = rl
+	}
+	return out
 }
 
 // streamJSONUserMessage renders the prompt plus attachments as one

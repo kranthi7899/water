@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"water/internal/backend"
+	"water/internal/config"
 	"water/internal/memory"
 	"water/internal/surface"
 )
@@ -86,6 +87,7 @@ func (a *App) statusCmd() *cobra.Command {
 					"source": reg.Source(), "roles": rows, "backend": selected, "backend_reason": reason,
 					"config": cfg.FilePath, "config_exists": cfg.FileExists, "leaked_keys": backend.LeakedKeys(),
 					"router": cfg.Orchestration.Router, "checkpointer": cfg.Orchestration.Checkpointer, "keyring": a.keys() != nil,
+					"budget": backend.LoadRateLimit(config.Home()),
 				})
 			}
 			fmt.Printf("%s %s\n", surface.StyleDim.Render("roles   "), surface.StyleDim.Render("from "+reg.Source()))
@@ -106,6 +108,7 @@ func (a *App) statusCmd() *cobra.Command {
 			}
 			fmt.Printf("%s %s %s\n", surface.StyleDim.Render("backend "), surface.StyleAccent.Render(selected), surface.StyleDim.Render(reason))
 			fmt.Printf("%s %s · checkpointer %s · rounds %d · steps %d\n", surface.StyleDim.Render("router  "), cfg.Orchestration.Router, cfg.Orchestration.Checkpointer, cfg.Orchestration.MaxRounds, cfg.Orchestration.MaxSteps)
+			fmt.Printf("%s %s\n", surface.StyleDim.Render("budget  "), backend.LoadRateLimit(config.Home()).Summary())
 			fmt.Printf("%s %s\n", surface.StyleDim.Render("config  "), cfg.FilePath)
 			if lk := backend.LeakedKeys(); len(lk) > 0 {
 				fmt.Printf("%s %v exported — see `water doctor`\n", surface.StyleWarn.Render("warning "), lk)

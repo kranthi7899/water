@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"water/internal/backend"
 	"water/internal/orchestrator"
 	"water/internal/tools"
 )
@@ -33,6 +34,7 @@ type Event struct {
 	MemoryIDs  []string                   `json:"memory_ids,omitempty"`
 	InboxIDs   []string                   `json:"inbox_ids,omitempty"`
 	Step       int                        `json:"step,omitempty"`
+	RateLimit  *backend.RateLimit         `json:"rate_limit,omitempty"`
 }
 
 // RoleTiming is per-role wall time and call count.
@@ -44,18 +46,20 @@ type RoleTiming struct {
 
 // Stats is the end-of-run summary.
 type Stats struct {
-	RunID        string        `json:"run_id"`
-	Backends     []string      `json:"backends"`
-	Calls        int           `json:"calls"`
-	MeteredCalls int           `json:"metered_calls"`
-	InputTokens  int           `json:"input_tokens"`
-	OutputTokens int           `json:"output_tokens"`
-	Wall         time.Duration `json:"wall_ns"`
-	Messages     int           `json:"messages"`
-	ToolCalls    int           `json:"tool_calls"`
-	ToolDenials  int           `json:"tool_denials"`
-	Roles        []RoleTiming  `json:"roles"`
-	TracePath    string        `json:"trace_path,omitempty"`
+	RunID         string             `json:"run_id"`
+	Backends      []string           `json:"backends"`
+	Calls         int                `json:"calls"`
+	MeteredCalls  int                `json:"metered_calls"`
+	InputTokens   int                `json:"input_tokens"`
+	OutputTokens  int                `json:"output_tokens"`
+	Wall          time.Duration      `json:"wall_ns"`
+	Messages      int                `json:"messages"`
+	ToolCalls     int                `json:"tool_calls"`
+	ToolDenials   int                `json:"tool_denials"`
+	RateLimited   int                `json:"rate_limited"`
+	LastRateLimit *backend.RateLimit `json:"last_rate_limit,omitempty"`
+	Roles         []RoleTiming       `json:"roles"`
+	TracePath     string             `json:"trace_path,omitempty"`
 }
 
 // Recorder writes events and accumulates Stats. Safe for concurrent use.
@@ -69,12 +73,29 @@ type Recorder struct {
 	backends map[string]bool
 	stats    Stats
 	roles    map[string]*RoleTiming
+	calls    map[string]tools.Event
+}
+
+// RunID returns the run this recorder belongs to.
+func (r *Recorder) RunID() string { return r.runID }
+
+// Resolve looks up a traced tool invocation. It resolves ONLY references to
+// this recorder's own run: a reference into another run is not found even if
+// such a call id exists elsewhere (the COO's scope is the current run).
+func (r *Recorder) Resolve(ref orchestrator.TraceRef) (tools.Event, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ref.RunID != "" && ref.RunID != r.runID {
+		return tools.Event{}, false
+	}
+	ev, ok := r.calls[ref.CallID]
+	return ev, ok && ev.Allowed && ev.Error == ""
 }
 
 // New opens <dir>/<runID>.jsonl. If dir is empty, events are counted but not
 // written.
 func New(dir, runID string) (*Recorder, error) {
-	r := &Recorder{runID: runID, started: time.Now(), backends: map[string]bool{}, roles: map[string]*RoleTiming{}}
+	r := &Recorder{runID: runID, started: time.Now(), backends: map[string]bool{}, roles: map[string]*RoleTiming{}, calls: map[string]tools.Event{}}
 	r.stats.RunID = runID
 	if dir == "" {
 		return r, nil
@@ -206,6 +227,9 @@ func (r *Recorder) ToolCall(ev tools.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e := ev
+	if ev.CallID != "" {
+		r.calls[ev.CallID] = ev
+	}
 	r.emit(Event{Type: "tool_call", Role: ev.Role, Tool: &e, DurationMS: ev.DurationMS, Error: ev.Error})
 	r.stats.ToolCalls++
 	if !ev.Allowed {
@@ -218,6 +242,26 @@ func (r *Recorder) PromptAssembled(role string, skills, memoryIDs, inboxIDs []st
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.emit(Event{Type: "prompt_assembled", Role: role, Skills: skills, MemoryIDs: memoryIDs, InboxIDs: inboxIDs})
+}
+
+// RateLimit records the window state a backend reported, and — when limited —
+// that the run was interrupted by the subscription budget rather than a
+// generic failure. diagnose counts these.
+func (r *Recorder) RateLimit(role string, rl *backend.RateLimit, limited bool) {
+	if rl == nil && !limited {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := Event{Type: "rate_limit", Role: role, RateLimit: rl}
+	if limited {
+		e.Type = "rate_limited"
+		r.stats.RateLimited++
+	}
+	r.emit(e)
+	if rl != nil {
+		r.stats.LastRateLimit = rl
+	}
 }
 
 // Checkpoint records that a durable checkpoint was written.

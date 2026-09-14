@@ -11,13 +11,15 @@ import (
 	"github.com/spf13/cobra"
 
 	"water/internal/agent"
+	"water/internal/backend"
+	"water/internal/config"
 	"water/internal/orchestrator"
 	"water/internal/trace"
 )
 
 func (a *App) orchestrateCmd() *cobra.Command {
 	var resume string
-	var list bool
+	var list, solo bool
 	c := &cobra.Command{
 		Use:   "orchestrate \"<brief>\"",
 		Short: "Full graph run: CEO frames → COO assigns → specialists → COO verifies → CEO decides",
@@ -87,6 +89,11 @@ func (a *App) orchestrateCmd() *cobra.Command {
 			}
 			if h, ok := router.(*orchestrator.HierarchyRouter); ok {
 				h.MaxRounds = cfg.Orchestration.MaxRounds
+				if solo {
+					// Measurement mode (Part 2 follow-up): CEO answers alone,
+					// delegating nothing. Same brief, same persona, no graph.
+					h.COO, h.Specialists = "", nil
+				}
 			}
 			st.SetEdges(orchestrator.EdgesFor(router))
 
@@ -125,9 +132,17 @@ func (a *App) orchestrateCmd() *cobra.Command {
 			}
 			stats := rec.Finish()
 			sf.RunFinished(final, stats)
+			_ = backend.SaveRateLimit(config.Home(), stats.LastRateLimit)
 			if runErr != nil {
 				if cfg.Orchestration.Checkpointer == orchestrator.FileCheckpointerName {
 					fmt.Fprintf(os.Stderr, "checkpoint saved; resume with: water orchestrate --resume %s\n", st.RunID)
+				}
+				if errors.Is(runErr, backend.ErrRateLimited) {
+					msg := "run interrupted by the subscription rate limit, not by a failure"
+					if stats.LastRateLimit != nil && !stats.LastRateLimit.FiveHourResets.IsZero() {
+						msg += " (window resets " + stats.LastRateLimit.FiveHourResets.Local().Format("Mon 15:04") + ")"
+					}
+					return exitWith(ExitRateLimited, fmt.Errorf("%s; `water orchestrate --resume %s` continues it", msg, st.RunID))
 				}
 				return exitWith(ExitBackend, runErr)
 			}
@@ -139,6 +154,7 @@ func (a *App) orchestrateCmd() *cobra.Command {
 	}
 	c.Flags().StringVar(&resume, "resume", "", "resume a checkpointed run by id (the id printed when the run started)")
 	c.Flags().BoolVar(&list, "list", false, "list resumable runs")
+	c.Flags().BoolVar(&solo, "solo", false, "CEO answers alone, delegating nothing (single-agent comparison)")
 	return c
 }
 

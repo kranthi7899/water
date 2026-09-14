@@ -44,6 +44,8 @@ type Options struct {
 	Picker        bool
 	Voice         func(text string) error
 	Profile       theme.Profile
+	BudgetLine    func() string
+	OnRateLimit   func(rl *backend.RateLimit)
 }
 
 type mode int
@@ -157,6 +159,8 @@ func (m *model) enterRole(slug, resume string) error {
 	s.Retention = m.opts.Retention
 	s.Summariser = ModelSummariser(r, env)
 	s.Voice = m.opts.Voice
+	s.BudgetLine = m.opts.BudgetLine
+	s.OnRateLimit = m.opts.OnRateLimit
 	if m.opts.SwitchBackend != nil {
 		s.SwitchBackend = func(name string) (backend.Backend, string, error) { return m.opts.SwitchBackend(r, name) }
 	}

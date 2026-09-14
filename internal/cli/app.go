@@ -32,6 +32,7 @@ const (
 	ExitUsage        = 2 // bad args / prerequisites missing
 	ExitBackend      = 3 // no usable backend or metered refused
 	ExitUnconfigured = 4 // run `water onboard`
+	ExitRateLimited  = 5 // subscription window exhausted; resume later
 )
 
 // ExitError carries a code through cobra's error return.
@@ -249,11 +250,20 @@ func (a *App) roleEnv(ctx context.Context, reg *roles.Registry, def backend.Sele
 		if r.Model != "" {
 			env.RoleModels[r.Slug] = r.Model
 		}
-		if cfg.Tools.Enabled && r.Tools != nil {
+		if r.Tools != nil {
 			pol := tools.FromGrant(r.Slug, r.RoleID, r.Tools, cfg.RootList())
-			if !pol.Empty() {
+			if !cfg.Tools.Enabled {
+				// Subprocess tools stay off until the user enables them; the
+				// in-process trace capability has no such switch (it reads
+				// nothing outside the run).
+				pol.Filesystem, pol.Shell = tools.FSPolicy{}, tools.ShellPolicy{}
+			}
+			if !pol.Empty() || pol.HasTrace() {
 				env.RoleTools[r.Slug] = pol
 				rr.Tools = pol.ToolNames()
+				if pol.HasTrace() {
+					rr.Tools = append(rr.Tools, "trace:current-run")
+				}
 			}
 		}
 		env.Manifests[r.Slug] = r.Capability.Render(r.Slug, r.Name)

@@ -118,3 +118,66 @@ everything else. Every turn that carried an attachment is marked untrusted and r
 - **Linux sandboxing is not implemented.** `sandbox-exec` on macOS is wired for the (currently
   unused) shell tool; Landlock is the planned Linux fit. No role has shell, so nothing is exposed,
   but the doc must not imply confinement exists where it does not.
+
+---
+
+# Follow-up campaign (2026-09-14, afternoon)
+
+## Part 1 — COO evidence provenance (built)
+
+Every tool invocation now carries a `call_id`, returned to the model at the top of the tool
+result. A specialist cites it as `(evidence: call-cto-2d9d79)` on the statements that rest on
+that read; statements resting on reasoning carry nothing. `AgentMessage.Evidence []TraceRef`
+holds the references on deliverables (all cited) and on the COO's status (verified only).
+
+The COO's grant is `tools: trace: current-run` — a new capability kind, served in-process,
+never over MCP. `trace.Recorder.Resolve` refuses a reference whose run id is not its own and a
+reference to a denied call. The COO gets no filesystem or shell tool from it (`TestCOOTraceScope`).
+
+Verification is mechanical: Water splits each fresh deliverable into claims, resolves references,
+and appends a block to the COO's prompt and, verbatim, to the status the CEO receives:
+
+- reference resolves → **VERIFIED** with tool, args, role, basis
+- reference does not resolve → **FAILED VERIFICATION** (dangling ids are raised, never dropped;
+  `TestDanglingEvidenceFails`; `diagnose` reports `failed-verification`)
+- no reference → **UNCONFIRMED** (pure judgment, working as designed; `TestUnconfirmedPropagates`)
+
+Real run (`/tmp/whp1`, brief: double a connection ceiling, config under the CTO's root): the CTO
+ran `list_dir` and `read_file`, cited both ids on nine statements; Design read the same file
+independently; the COO's status marked the config values VERIFIED with the call ids and marked
+"this file is what the deployed process loads" UNCONFIRMED, and the mechanical block reported the
+counts. Six calls, zero metered.
+
+Two things the build surfaced:
+- Both CTO and Design have read-only roots, so both read the file. That is by design (Design's
+  grant is its own), but the COO correctly noted the second read as an independent reproduction.
+- A model can cite a call id on a statement that goes beyond what the read showed; provenance
+  verifies that *a* read happened and was authorised, not that the sentence is entailed by it.
+  That is the stated limit of "verify provenance, not content".
+
+## Part 3 — per-role backend mixing (exercised for real)
+
+`codex` 0.154.0 was installed via npm and was already signed in with ChatGPT on this machine.
+`water run cto --backend codex-subscription` returned `CODEX-OK` (0 metered). With an
+`--agents-dir` overlay setting `backend: codex-subscription` in `cto/role.yaml`, `water status`
+resolved the CTO to codex with the reason `role.yaml backend:` and the others to claude. The
+first orchestration with that overlay never reached the CTO because the CEO answered a build-vs-buy
+brief alone (correct behaviour); see the mixed-run table below for the second.
+
+Context-format compatibility across providers is not an issue by construction: every call is a
+stateless system+prompt pair, and inter-role context travels as text in the outbox.
+
+Still unverified: Water's MCP tools on codex (`-c mcp_servers.*`) — deliberately unwired; codex
+`--image` attachments (flag confirmed present in `codex exec --help`, delivery not exercised).
+
+## Part 5 — rate limits as the real budget (built)
+
+- Every claude call now runs with `--output-format stream-json` so the CLI's `rate_limit_event`
+  reaches Water; `Response.RateLimit` carries the five-hour and seven-day utilisation and reset
+  times, persisted to `~/.water/ratelimit.json` after each call.
+- `water status` prints a `budget` line; `/status` in chat shows the same.
+- A call refused by the window is `backend.ErrRateLimited`: `orchestrate` exits 5 with "interrupted
+  by the subscription rate limit, not by a failure (window resets …); `--resume <id>` continues
+  it"; `run` and chat say the same.
+- The trace records `rate_limit` (observed state) and `rate_limited` (an interruption) events;
+  `diagnose` adds a `rate-limit-interruption` finding with a fan-out recommendation when any occur.

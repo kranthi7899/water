@@ -85,7 +85,9 @@ func (a *App) runChat(ctx context.Context, start, resume string, picker bool) er
 			rr := res[r.Slug]
 			return env, chat.BackendInfo{Name: rr.Backend, Reason: rr.Reason, Auth: auth}, nil
 		},
-		StoreFor: func(r *roles.Role) *session.Store { return session.New(sessionsRoot, r.Slug) },
+		StoreFor:    func(r *roles.Role) *session.Store { return session.New(sessionsRoot, r.Slug) },
+		BudgetLine:  func() string { return backend.LoadRateLimit(config.Home()).Summary() },
+		OnRateLimit: func(rl *backend.RateLimit) { _ = backend.SaveRateLimit(config.Home(), rl) },
 		SwitchBackend: func(r *roles.Role, name string) (backend.Backend, string, error) {
 			sel, err := backend.Select(ctx, backend.Default, backend.SelectConfig{Flag: name, RoleSlug: r.Slug, AllowMetered: cfg.Backend.AllowMetered})
 			if err != nil {

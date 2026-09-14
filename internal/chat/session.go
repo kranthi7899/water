@@ -61,6 +61,10 @@ type Session struct {
 	Summariser func(ctx context.Context, c *session.Context, focus string) (string, error)
 
 	Voice func(text string) error // optional TTS hook (3D)
+	// BudgetLine reports remaining subscription budget for /status (Part 5).
+	BudgetLine func() string
+	// OnRateLimit persists the window state a turn observed.
+	OnRateLimit func(rl *backend.RateLimit)
 
 	turns       []Turn
 	summary     string
@@ -178,8 +182,14 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindUser, Turn: n, Text: text})
 	start := time.Now()
 	resp, p, err := agent.RunTurn(ctx, s.Role, s.Env, s.prior(), prompt, atts)
+	if s.OnRateLimit != nil && resp.RateLimit != nil {
+		s.OnRateLimit(resp.RateLimit)
+	}
 	if err != nil {
 		_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindSystem, Turn: n, Text: "error: " + err.Error()})
+		if errors.Is(err, backend.ErrRateLimited) {
+			return Turn{}, fmt.Errorf("subscription rate limit reached (not a failure); the turn was saved and can be re-sent later: %w", err)
+		}
 		return Turn{}, err
 	}
 	// Water marks the turn untrusted whenever external content was handed to

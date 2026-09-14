@@ -40,6 +40,8 @@ type Report struct {
 	Influence     map[string]float64     `json:"influence"`
 	ToolCalls     int                    `json:"tool_calls"`
 	ToolDenials   int                    `json:"tool_denials"`
+	FailedVerif   int                    `json:"failed_verification_items"`
+	RateLimited   int                    `json:"rate_limit_interruptions"`
 	EdgeViolation []string               `json:"edge_violations,omitempty"`
 	Events        []trace.Event          `json:"-"`
 	Snapshot      *orchestrator.Snapshot `json:"-"`
@@ -113,6 +115,8 @@ func Analyze(runID string, events []trace.Event, snap *orchestrator.Snapshot, ed
 			if e.Tool != nil && !e.Tool.Allowed {
 				r.ToolDenials++
 			}
+		case "rate_limited":
+			r.RateLimited++
 		}
 	}
 	if len(r.VisitCounts) == 0 {
@@ -120,6 +124,9 @@ func Analyze(runID string, events []trace.Event, snap *orchestrator.Snapshot, ed
 	}
 
 	add := func(check, sev, detail string) { r.Findings = append(r.Findings, Finding{check, sev, detail}) }
+	if r.RateLimited > 0 {
+		add("rate-limit-interruption", "warn", fmt.Sprintf("%d call(s) refused by the subscription window; depth is hitting the budget, consider fewer delegates or a higher bar for delegating", r.RateLimited))
+	}
 
 	// 1. Delegate-with-no-influence: did each specialist's deliverable leave a
 	// lexical footprint in the final answer? Measured as the fraction of its
@@ -247,10 +254,19 @@ func Analyze(runID string, events []trace.Event, snap *orchestrator.Snapshot, ed
 		if m.Topic != orchestrator.TopicStatus {
 			continue
 		}
-		v := strings.Count(strings.ToUpper(m.Payload), "VERIFIED:")
-		u := strings.Count(strings.ToUpper(m.Payload), "UNCONFIRMED:")
+		up := strings.ToUpper(m.Payload)
+		f := strings.Count(up, "FAILED VERIFICATION:")
+		v := strings.Count(up, "VERIFIED:") - f // "FAILED VERIFICATION:" contains "VERIFICATION:", not "VERIFIED:"; keep the subtraction defensive
+		if v < 0 {
+			v = 0
+		}
+		u := strings.Count(up, "UNCONFIRMED:")
 		r.Verified += v
 		r.Unconfirmed += u
+		r.FailedVerif += f
+		if f > 0 {
+			add("failed-verification", "fail", fmt.Sprintf("status %s: %d evidence reference(s) did not resolve in this run's trace", m.ID, f))
+		}
 		if v+u == 0 {
 			add("unverified-done", "warn", fmt.Sprintf("status %s from %s carries no VERIFIED/UNCONFIRMED marks", m.ID, m.From))
 		} else {

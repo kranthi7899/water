@@ -34,6 +34,15 @@ type AgentMessage struct {
 	Verbatim      bool      `json:"verbatim,omitempty"`       // forwarding nodes MUST NOT paraphrase
 	Untrusted     bool      `json:"untrusted,omitempty"`      // sender consumed external (tool/attachment) content this turn
 	ForwardedFrom string    `json:"forwarded_from,omitempty"` // original sender when a hub forwards a Verbatim message
+	// Evidence lists the traced tool invocations that back claims in Payload
+	// (Part 1 follow-up). Claims resting on reasoning alone carry none.
+	Evidence []TraceRef `json:"evidence,omitempty"`
+}
+
+// TraceRef points at one traced tool invocation in one run.
+type TraceRef struct {
+	RunID  string `json:"run_id"`
+	CallID string `json:"call_id"`
 }
 
 // UserSender is the From value for the brief injected at graph entry.

@@ -199,6 +199,9 @@ func Dispatch(ctx context.Context, s *Session, line string) Result {
 		} else {
 			sb.WriteString("tools     none\n")
 		}
+		if s.BudgetLine != nil {
+			fmt.Fprintf(&sb, "budget    %s\n", s.BudgetLine())
+		}
 		return Result{Output: strings.TrimRight(sb.String(), "\n")}
 	case "consult":
 		target, q, _ := strings.Cut(rest, " ")

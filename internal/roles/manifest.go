@@ -87,6 +87,9 @@ type ToolGrant struct {
 		Allowlist []string `yaml:"allowlist"`
 	} `yaml:"shell"`
 	Network string `yaml:"network"` // none | (reserved)
+	// Trace: "current-run" grants read-only access to evidence references in
+	// the run the role is participating in (the COO's verification capability).
+	Trace string `yaml:"trace"`
 }
 
 var slugRe = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
@@ -145,6 +148,11 @@ func validateToolGrant(t *ToolGrant) error {
 	default:
 		return fmt.Errorf("network %q: only \"none\" is supported in this build", t.Network)
 	}
+	switch t.Trace {
+	case "", "none", "current-run":
+	default:
+		return fmt.Errorf("trace %q must be none|current-run", t.Trace)
+	}
 	return nil
 }
 
@@ -169,4 +177,11 @@ func (t *ToolGrant) NET() string {
 		return "none"
 	}
 	return t.Network
+}
+
+func (t *ToolGrant) TR() string {
+	if t == nil || t.Trace == "none" {
+		return ""
+	}
+	return t.Trace
 }

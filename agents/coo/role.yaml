@@ -26,3 +26,9 @@ capability:
     - "Decide what the goal is or whether finished work is accepted."
     - "Call downstream work ready because an upstream owner promised their part is done."
     - "Paraphrase, soften, or drop a specialist's dissent or escalation."
+
+# Verification capability: read-only access to the CURRENT run's trace so
+# evidence references in deliverables can be resolved. Not filesystem, not
+# other runs, not other roles' memory.
+tools:
+  trace: current-run

@@ -9,6 +9,8 @@ package backend
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
 	"water/internal/tools"
@@ -64,6 +66,33 @@ type Response struct {
 	// AttachmentsDelivered reports whether attachments reached the model as
 	// structured blocks (false = they were dropped or inlined as text).
 	AttachmentsDelivered bool
+	// RateLimit is the subscription window state the backend reported during
+	// this call, when it exposes one (Part 5 follow-up).
+	RateLimit *RateLimit
+}
+
+// RateLimit is what a subscription CLI reports about its usage windows. Under
+// subscription billing this, not tokens, is the binding budget.
+type RateLimit struct {
+	Backend        string    `json:"backend"`
+	ObservedAt     time.Time `json:"observed_at"`
+	Status         string    `json:"status"` // allowed | limited | …
+	WindowType     string    `json:"window_type,omitempty"`
+	FiveHourUsed   float64   `json:"five_hour_utilization"` // 0..1
+	FiveHourResets time.Time `json:"five_hour_resets_at,omitempty"`
+	SevenDayUsed   float64   `json:"seven_day_utilization"`
+	SevenDayResets time.Time `json:"seven_day_resets_at,omitempty"`
+	Message        string    `json:"message,omitempty"`
+}
+
+// ErrRateLimited marks a call refused because the subscription window is
+// exhausted. Callers say so distinctly and point at --resume.
+var ErrRateLimited = errors.New("subscription rate limit reached")
+
+// IsRateLimitText recognises the CLI's limit messages.
+func IsRateLimitText(s string) bool {
+	l := strings.ToLower(s)
+	return strings.Contains(l, "session limit") || strings.Contains(l, "usage limit") || strings.Contains(l, "rate limit") || strings.Contains(l, "rate_limit") || strings.Contains(l, "limit reached") || strings.Contains(l, "resets ")
 }
 
 // ConsumedUntrusted reports whether external content entered the model's

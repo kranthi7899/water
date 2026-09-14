@@ -36,6 +36,11 @@ type Policy struct {
 	Filesystem FSPolicy    `json:"filesystem"`
 	Shell      ShellPolicy `json:"shell"`
 	Network    string      `json:"network"` // none
+	// Trace is the narrow verification capability (Part 1 follow-up):
+	// "current-run" lets the role resolve evidence references against the
+	// trace of the run it is participating in. Not an MCP tool; it never
+	// reaches the subprocess. "" = none.
+	Trace string `json:"trace,omitempty"`
 
 	// MaxReadBytes caps a single read (default 256 KiB).
 	MaxReadBytes int64 `json:"max_read_bytes,omitempty"`
@@ -57,7 +62,12 @@ type ShellPolicy struct {
 // ErrDenied is the base error for every permission refusal.
 var ErrDenied = errors.New("denied by tool policy")
 
-// Empty reports whether the policy grants nothing at all.
+// HasTrace reports whether the role may resolve evidence references in its
+// own run's trace.
+func (p *Policy) HasTrace() bool { return p != nil && p.Trace == "current-run" }
+
+// Empty reports whether the policy grants no subprocess tools at all. Trace
+// access is deliberately excluded: it is served in-process, never over MCP.
 func (p *Policy) Empty() bool {
 	if p == nil {
 		return true
@@ -287,10 +297,12 @@ func FromGrant(role, roleID string, grant any, configRoots []string) *Policy {
 		FS() (mode string, roots []string)
 		SH() (mode string, allow []string)
 		NET() string
+		TR() string
 	})
 	if !ok || grant == nil {
 		return p
 	}
+	p.Trace = g.TR()
 	mode, roots := g.FS()
 	p.Filesystem.Mode = orNone(mode)
 	if p.Filesystem.Mode != "none" {
