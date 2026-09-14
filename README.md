@@ -2,11 +2,12 @@
 
 A council of role-agents on the subscription you already pay for.
 
-`water` is a single Go binary. It hosts N role-agents (a singleton CEO plus CFO, CTO and a
-fourth role) with isolated per-role personas and memory, orchestrated through a native state
-graph, running on the `claude` / `codex` subscription CLIs rather than metered API billing.
+`water` is a single Go binary. It hosts N role-agents (a singleton CEO plus COO, CTO and Design)
+with isolated per-role personas and memory, orchestrated through a native state graph, running on
+the `claude` / `codex` subscription CLIs rather than metered API billing.
 
-**Status: Phase 1 (skeleton).** Every interface exists; personas are deliberately blank.
+**Status: Phase 2 (persona content).** Every interface exists; all four roles have written
+soul/experience content.
 
 ## Build & run
 

@@ -1,7 +1,0 @@
-schema: 1
-name: "Fourth"
-slug: "fourth"
-singleton: false
-orchestrator: false
-description: ""          # placeholder in Phase 1
-skills_enabled: []       # empty = discover all in skills/

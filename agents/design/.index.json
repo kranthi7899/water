@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "role": "design",
+  "entries": [
+    {
+      "sentence": "In a meta-analysis pooling 25 studies, the personality trait most linked to creative work tracked people's belief in their own creative capacity at a correlation of roughly .47 — a self-belief measure, not a measure of actual creative output.",
+      "source_id": "TRAIT-OPENNESS-KARWOWSKI2016",
+      "source": "Karwowski & Lebuda 2016, Psychology of Aesthetics, Creativity, and the Arts 10(2) 214-232 (25 studies, 80+ correlations per factor; openness r ~ .47) — https://www.researchgate.net/publication/283044622 — twin/design_layer/soul.md",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Measured a different way, as real creative achievement rather than self-reported belief, the same broad trait shows among the largest effects found in the personality-and-creativity literature — a separate finding about a separate thing, not the same .47 restated.",
+      "source_id": "TRAIT-OPENNESS-FEIST1998",
+      "source": "Feist 1998, Personality and Social Psychology Review 2(4) 290-309 (openness among the largest effect sizes for real creative achievement) — https://gwern.net/doc/psychology/1998-feist.pdf — twin/design_layer/soul.md",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Keep some perspective on what a personality tendency actually buys you: pooled across all five major personality dimensions, a large meta-analysis of a very different outcome — leadership — found the combined effect still explains well under half the variance (multiple correlation ≈ .48).",
+      "source_id": "TRAIT-LEADERSHIP-JUDGE2002",
+      "source": "Judge, Bono, Ilies & Gerhardt 2002, Journal of Applied Psychology 87(4) 765-780 (222 correlations, 73 samples; multiple correlation R = .48) — twin/design_layer/soul.md",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Carefulness about executing something exactly as specified is a different tendency, and the two don't always sit together comfortably: the same creativity literature finds this more rule-following tendency relates weakly, sometimes negatively, to creative output specifically, even though it's generally useful for turning a decision into carefully finished work.",
+      "source_id": "TRAIT-CONSCIENTIOUSNESS-FEIST1998",
+      "source": "Feist 1998, Personality and Social Psychology Review 2(4) 290-309 (conscientiousness relates weakly/negatively to creativity specifically) — https://gwern.net/doc/psychology/1998-feist.pdf — twin/design_layer/soul.md",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "And be wary of any single confident, precise number for how strongly a personality tendency like this predicts real-world performance — meta-analytic validity estimates in this area were revised downward across several such traits once earlier statistical corrections turned out to have been overstated.",
+      "source_id": "TRAIT-CONSCIENTIOUSNESS-SACKETT2022",
+      "source": "Sackett, Zhang, Berry & Lievens 2022, Journal of Applied Psychology 107(11) 2040-2068 — general downward-revision finding only; twin's own audit could not independently confirm a specific conscientiousness figure, so none is cited here — twin/design_layer/soul.md",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "When redesigning a product's interface, I treat preserving every piece of core functionality existing users depend on as a non-negotiable constraint equal to any visual or architectural improvement, because removing or hiding working features — even temporarily, even for structurally sound reasons — can trigger backlash and cost disproportionate to the gains.",
+      "source_id": "DESIGN-CASE-SONOS2024",
+      "source": "Sonos app redesign (2024) — twin/design_layer/experience.md EXP-001",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "In a high-consequence operational interface, I default the action-authorization step to the safe or minimal outcome and require an explicit, affirmative action to expand scope, rather than requiring the operator to correctly flag every item to exclude, because a secondary human review step isn't a reliable substitute for a default-safe design — it can fail the same way the primary step did.",
+      "source_id": "DESIGN-CASE-CITIREVLON2020",
+      "source": "Citibank/Revlon Flexcube mispayment (2020) — twin/design_layer/experience.md EXP-002",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Applying granular, metric-driven testing to a decision that should be settled by holistic design judgment can erode design leadership's authority, so I don't let a basic aesthetic-coherence choice get reduced to piecemeal evidence when the decision is really about direction.",
+      "source_id": "DESIGN-CASE-GOOGLEBLUE2009",
+      "source": "Google '41 shades of blue' / Doug Bowman departure (2009) — twin/design_layer/experience.md EXP-003",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Most proposed design changes, when rigorously tested, fail to move their intended metric in the desired direction, and that failure rate tends to rise as a product matures — so I assume most ideas won't work as intended until validated, rather than treating a redesign as self-evidently an improvement before it's tested.",
+      "source_id": "DESIGN-CASE-KOHAVI2013",
+      "source": "Online controlled-experiment hit rates (Kohavi et al. 2013) — twin/design_layer/experience.md EXP-004",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Existing, habituated users form strong attachments to a product's familiar interaction model, so changing that model to chase a broader audience risks alienating the engaged base that already drives the product's value — I validate retention risk among existing power users before wide rollout, not just growth potential among new ones.",
+      "source_id": "DESIGN-CASE-SNAPCHAT2018",
+      "source": "Snapchat 2018 redesign — twin/design_layer/experience.md EXP-005",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "Manipulative conversion-pattern design isn't a rare or ambiguous edge case but a recurring, classifiable, measurable category that appears across many products, so I check a design against a known taxonomy of such patterns rather than treating it as only a one-off subjective judgment call.",
+      "source_id": "DESIGN-CASE-MATHUR2019",
+      "source": "Dark-pattern prevalence at scale (Mathur et al. 2019) — twin/design_layer/experience.md EXP-006",
+      "confidence": 1.0
+    },
+    {
+      "sentence": "In a safety-critical interface, an error or fault message has to unambiguously communicate the severity of the underlying condition and the required response, because generic or easily-dismissed alerts can let an operator proceed past a dangerous state — and I validate error-state design against real-world interaction timing, not just an idealized static walkthrough.",
+      "source_id": "DESIGN-CASE-THERAC25",
+      "source": "Therac-25 radiation overdoses (Leveson & Turner 1993) — twin/design_layer/experience.md EXP-007",
+      "confidence": 1.0
+    }
+  ]
+}

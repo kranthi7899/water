@@ -18,7 +18,7 @@
 |---|---|---|---|
 | 1 | `backend.Backend` | claude-subscription, codex-subscription, api | new file + `Default.Register` |
 | 2 | `memory.Provider` | markdown | `memory.Register(name, factory)` |
-| 3 | Role | ceo, cfo, cto, fourth | add a folder under `agents/` |
+| 3 | Role | ceo, coo, cto, design | add a folder under `agents/` |
 | 4 | `persona.SkillSelector` | keyword | implement + wire in `agent.Env.Selector` |
 | 5 | `orchestrator.Router` | ceo-fanout | `orchestrator.RegisterRouter` |
 | 6 | `voice.Provider` | noop | `voice.Register` |

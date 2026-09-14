@@ -67,7 +67,7 @@ on the Claude or ChatGPT subscription CLIs you already pay for.`,
 
 	root.AddCommand(
 		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.runCmd(), a.orchestrateCmd(),
-		a.memoryCmd(), a.configCmd(), a.versionCmd(), a.voiceCmd(), a.dashboardCmd(),
+		a.memoryCmd(), a.experienceCmd(), a.configCmd(), a.versionCmd(), a.voiceCmd(), a.dashboardCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root

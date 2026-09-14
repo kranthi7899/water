@@ -1,0 +1,7 @@
+schema: 1
+name: "COO"
+slug: "coo"
+singleton: false
+orchestrator: false
+description: "Owns how delegated work moves: sequencing, resourcing, unblocking, and reporting evidence-backed status back to the CEO."
+skills_enabled: []       # empty = discover all in skills/

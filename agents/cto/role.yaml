@@ -3,5 +3,5 @@ name: "CTO"
 slug: "cto"
 singleton: false
 orchestrator: false
-description: ""          # placeholder in Phase 1
+description: "Owns technical judgment: feasibility, cost-to-build, stack fit, and the grounding behind any technical claim reported to the CEO."
 skills_enabled: []       # empty = discover all in skills/

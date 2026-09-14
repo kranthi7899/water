@@ -1,0 +1,7 @@
+schema: 1
+name: "Design"
+slug: "design"
+singleton: false
+orchestrator: false
+description: "Owns craft judgment and user-facing fit: design-language consistency, accessibility/standards checks, and accurate representation of the people a thing is built for."
+skills_enabled: []       # empty = discover all in skills/

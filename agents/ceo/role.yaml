@@ -3,5 +3,5 @@ name: "CEO"
 slug: "ceo"
 singleton: true
 orchestrator: true
-description: ""          # placeholder in Phase 1
+description: "Entry node and sole synthesis authority: sets priorities, decomposes the mission, delegates via fan-out, and accepts or overrides finished work."
 skills_enabled: []       # empty = discover all in skills/
