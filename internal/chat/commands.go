@@ -2,10 +2,13 @@ package chat
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +25,19 @@ const (
 	ActOpenPicker
 	ActConfirmDelete
 	ActOpenEditor
+	ActRedraw // context changed; rebuild the transcript view
+	ActResend // Arg is the message to send again
 )
+
+func kilo(n int) string {
+	switch {
+	case n >= 1000000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return strconv.Itoa(n)
+}
 
 // Result of a dispatched command.
 type Result struct {
@@ -57,7 +72,55 @@ var Commands = []Command{
 	{"flag", "/flag [reason]", "mark the last response bad for the feedback loop"},
 	{"attach", "/attach <path> | /attach list | /attach clear", "attach a file for the rest of the session (@path works per turn)"},
 	{"editor", "/editor", "compose the next message in $EDITOR"},
+	{"copy", "/copy [N]", "copy the last (or Nth-from-last) reply to the clipboard (Ctrl+Y)"},
+	{"undo", "/undo", "drop the last exchange from the active context (transcript is kept)"},
+	{"retry", "/retry", "send the last message again"},
+	{"usage", "/usage", "subscription budget and context usage"},
+	{"save", "/save [file]", "export the active context as markdown"},
+	{"title", "/title <name>", "alias of /name"},
+	{"voice", "/voice [on|off|status]", "speak replies aloud (Ctrl+B toggles)"},
 	{"quit", "/quit", "leave the session"},
+}
+
+// Complete returns the commands whose name starts with the typed prefix
+// (without the slash), for the autocomplete dropdown. Empty prefix = all.
+func Complete(line string) []Command {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "/") || strings.Contains(line, " ") {
+		return nil
+	}
+	prefix := strings.ToLower(strings.TrimPrefix(line, "/"))
+	var out []Command
+	for _, c := range Commands {
+		if strings.HasPrefix(c.Name, prefix) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// CopyToClipboard uses the platform clipboard tool, falling back to the
+// OSC 52 escape (which most terminals honour) when none exists.
+func CopyToClipboard(text string) (how string, err error) {
+	candidates := [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}, {"xsel", "--clipboard", "--input"}}
+	for _, c := range candidates {
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
+		}
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return c[0], nil
+		}
+	}
+	// OSC 52: write to the controlling terminal directly.
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		return "", errors.New("no clipboard tool found (pbcopy, wl-copy, xclip, xsel) and no terminal for OSC 52")
+	}
+	defer tty.Close()
+	_, err = fmt.Fprintf(tty, "\x1b]52;c;%s\x07", base64.StdEncoding.EncodeToString([]byte(text)))
+	return "osc52", err
 }
 
 // IsCommand reports whether a line is a slash command.
@@ -281,6 +344,88 @@ func Dispatch(ctx context.Context, s *Session, line string) Result {
 		return Result{Output: fmt.Sprintf("attached %s (%s, %d bytes) for this session — its contents are untrusted data to the role", a.Name, a.MediaType, len(a.Data))}
 	case "editor":
 		return Result{Action: ActOpenEditor}
+	case "copy":
+		n := 1
+		if rest != "" {
+			if v, err := strconv.Atoi(rest); err == nil && v > 0 {
+				n = v
+			}
+		}
+		text, ok := s.LastReply(n)
+		if !ok {
+			return Result{Err: fmt.Errorf("no reply to copy")}
+		}
+		how, err := CopyToClipboard(text)
+		if err != nil {
+			return Result{Err: err}
+		}
+		return Result{Output: fmt.Sprintf("copied reply (%d words) via %s", len(strings.Fields(text)), how)}
+	case "undo":
+		t, err := s.Undo()
+		if err != nil {
+			return Result{Err: err}
+		}
+		return Result{Output: fmt.Sprintf("removed turn %d from the active context (kept in the transcript)", t.N), Action: ActRedraw}
+	case "retry":
+		last, ok := s.LastUser()
+		if !ok {
+			return Result{Err: fmt.Errorf("nothing to retry")}
+		}
+		return Result{Action: ActResend, Arg: last}
+	case "usage":
+		var sb strings.Builder
+		if s.BudgetLine != nil {
+			sb.WriteString("budget   " + s.BudgetLine() + "\n")
+		}
+		if len(s.turns) > 0 {
+			t := s.turns[len(s.turns)-1]
+			if t.ContextWindow > 0 {
+				fmt.Fprintf(&sb, "context  %s of %s (%.0f%%) on the last turn\n", kilo(t.InputTokens), kilo(t.ContextWindow), 100*float64(t.InputTokens)/float64(t.ContextWindow))
+			} else {
+				fmt.Fprintf(&sb, "context  %s input tokens on the last turn (window unknown for %s)\n", kilo(t.InputTokens), t.Backend)
+			}
+		}
+		turns, words, _ := s.Stats()
+		fmt.Fprintf(&sb, "session  %d turn(s), %d reply words in context", turns, words)
+		return Result{Output: sb.String()}
+	case "save":
+		p := rest
+		if p == "" {
+			p = orDefault(s.Slug, "session") + ".md"
+		}
+		if strings.HasPrefix(p, "~/") {
+			if h, err := os.UserHomeDir(); err == nil {
+				p = h + p[1:]
+			}
+		}
+		if err := os.WriteFile(p, []byte(s.Export()), 0o600); err != nil {
+			return Result{Err: err}
+		}
+		return Result{Output: "saved " + p}
+	case "title":
+		return Dispatch(ctx, s, "/name "+rest)
+	case "voice":
+		switch rest {
+		case "", "status":
+			state := "off"
+			if s.VoiceOn {
+				state = "on"
+			}
+			if s.Voice == nil {
+				return Result{Output: "voice: unavailable in this session (start with --voice, or set voice.provider to \"os\")"}
+			}
+			return Result{Output: "voice: " + state + " (Ctrl+B toggles; listen is a documented no-op, replies are spoken)"}
+		case "on":
+			if s.Voice == nil {
+				return Result{Err: fmt.Errorf("no voice provider; start water with --voice")}
+			}
+			s.VoiceOn = true
+			return Result{Output: "voice on: replies will be spoken", Action: ActRedraw}
+		case "off":
+			s.VoiceOn = false
+			return Result{Output: "voice off", Action: ActRedraw}
+		}
+		return Result{Err: fmt.Errorf("usage: /voice [on|off|status]")}
 	}
 	return Result{Err: fmt.Errorf("unknown command /%s (try /help)", name)}
 }

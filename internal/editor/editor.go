@@ -170,6 +170,16 @@ func (e *TextArea) contentWidth() int {
 	return w
 }
 
+// SetPrompt changes the prompt glyphs (used for the voice indicator). Width
+// math is recomputed so wrapping stays exact.
+func (e *TextArea) SetPrompt(p string) {
+	e.ta.Prompt = p
+	e.ta.SetWidth(e.width)
+}
+
+// PromptWidth is the prompt's cell width (cursor x offset).
+func (e *TextArea) PromptWidth() int { return ansi.StringWidth(e.ta.Prompt) }
+
 func (e *TextArea) Value() string     { return e.ta.Value() }
 func (e *TextArea) SetValue(s string) { e.ta.SetValue(s); e.fitHeight() }
 func (e *TextArea) Reset()            { e.ta.Reset(); e.fitHeight() }
@@ -232,9 +242,9 @@ func (e *TextArea) CursorRow() int {
 // Hint renders the multiline hint; Shift+Enter appears only when detected.
 func (e *TextArea) Hint() string {
 	if e.kitty {
-		return "enter send · ctrl+j / shift+enter newline · ctrl+x $EDITOR"
+		return "enter send · ctrl+j / shift+enter newline · / commands · ctrl+y copy · ctrl+x $EDITOR"
 	}
-	return "enter send · ctrl+j newline · ctrl+x $EDITOR"
+	return "enter send · ctrl+j newline · / commands · ctrl+y copy · ctrl+x $EDITOR"
 }
 
 // Handle maps a key to an action. Widget keys fall through to the textarea.

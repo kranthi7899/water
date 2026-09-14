@@ -37,6 +37,9 @@ type Turn struct {
 	At        time.Time
 	Flagged   bool
 	Untrusted bool
+	// Context accounting from the backend (0 = unknown).
+	InputTokens   int
+	ContextWindow int
 }
 
 // Session is the live state of one role conversation.
@@ -60,7 +63,8 @@ type Session struct {
 	// Summariser produces compaction summaries (nil = extractive fallback).
 	Summariser func(ctx context.Context, c *session.Context, focus string) (string, error)
 
-	Voice func(text string) error // optional TTS hook (3D)
+	Voice   func(text string) error // optional TTS hook (3D)
+	VoiceOn bool                    // speak replies (toggled by /voice, Ctrl+B)
 	// BudgetLine reports remaining subscription budget for /status (Part 5).
 	BudgetLine func() string
 	// OnRateLimit persists the window state a turn observed.
@@ -194,14 +198,14 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	}
 	// Water marks the turn untrusted whenever external content was handed to
 	// the model, whether or not the backend reports delivery (5.5).
-	t := Turn{N: n, User: text, Reply: resp.Text, Prompt: p, Backend: resp.Backend, Model: resp.Model, Duration: time.Since(start), At: start, Untrusted: resp.ConsumedUntrusted() || len(atts) > 0}
+	t := Turn{N: n, User: text, Reply: resp.Text, Prompt: p, Backend: resp.Backend, Model: resp.Model, Duration: time.Since(start), At: start, Untrusted: resp.ConsumedUntrusted() || len(atts) > 0, InputTokens: resp.InputTokens, ContextWindow: resp.ContextWindow}
 	s.turns = append(s.turns, t)
 	s.lastSkills = p.Skills
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindAssistant, Turn: n, Text: resp.Text, Backend: resp.Backend, Skills: p.Skills, MemoryIDs: p.MemoryIDs, InboxIDs: p.InboxIDs})
 	if n%session.AutoCompactEvery == 0 {
 		_, _ = s.Compact(ctx, "")
 	}
-	if s.Voice != nil {
+	if s.Voice != nil && s.VoiceOn {
 		_ = s.Voice(resp.Text)
 	}
 	return t, nil
@@ -403,6 +407,71 @@ func (s *Session) Remember(ctx context.Context, note string) (memory.Entry, erro
 		_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindSignal, Text: "promoted to memory " + e.ID})
 	}
 	return e, nil
+}
+
+// Undo removes the last exchange from the ACTIVE context. The transcript is
+// append-only: an `undo` entry is written and the turn is dropped from
+// context; the file keeps everything.
+func (s *Session) Undo() (Turn, error) {
+	if len(s.turns) == 0 {
+		return Turn{}, errors.New("nothing to undo")
+	}
+	t := s.turns[len(s.turns)-1]
+	s.turns = s.turns[:len(s.turns)-1]
+	if s.Slug != "" {
+		_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindSystem, Turn: t.N, Text: "undo: turn removed from active context"})
+	}
+	return t, nil
+}
+
+// LastReply returns the Nth-from-last assistant reply (1 = last).
+func (s *Session) LastReply(n int) (string, bool) {
+	if n < 1 {
+		n = 1
+	}
+	if n > len(s.turns) {
+		return "", false
+	}
+	return s.turns[len(s.turns)-n].Reply, true
+}
+
+// LastUser returns the most recent user message.
+func (s *Session) LastUser() (string, bool) {
+	if len(s.turns) == 0 {
+		return "", false
+	}
+	return s.turns[len(s.turns)-1].User, true
+}
+
+// Export renders the active context as markdown.
+func (s *Session) Export() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# water · %s · %s\n\n", s.Role.Name, orDefault(s.Slug, "unsaved"))
+	if s.summary != "" {
+		sb.WriteString("## Earlier (compacted)\n\n" + s.summary + "\n\n")
+	}
+	for _, t := range s.turns {
+		fmt.Fprintf(&sb, "## You\n\n%s\n\n## %s\n\n%s\n\n", t.User, s.Role.Name, t.Reply)
+	}
+	return sb.String()
+}
+
+// Stats summarises the session for the exit line.
+func (s *Session) Stats() (turns int, words int, started time.Time) {
+	for i, t := range s.turns {
+		if i == 0 {
+			started = t.At
+		}
+		words += len(strings.Fields(t.Reply))
+	}
+	return len(s.turns), words, started
+}
+
+func orDefault(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
 }
 
 // Flag marks the last response bad for the feedback loop.

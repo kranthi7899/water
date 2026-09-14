@@ -259,10 +259,15 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 		resp.Text = strings.TrimSpace(res.Result)
 		resp.InputTokens = res.Usage.InputTokens + res.Usage.CacheReadInput + res.Usage.CacheCreationInput
 		resp.OutputTokens = res.Usage.OutputTokens
-		if resp.Model == "" {
-			for m := range res.ModelUsage {
+		for m, raw := range res.ModelUsage {
+			if resp.Model == "" {
 				resp.Model = m
-				break
+			}
+			var mu struct {
+				ContextWindow int `json:"contextWindow"`
+			}
+			if json.Unmarshal(raw, &mu) == nil && mu.ContextWindow > 0 {
+				resp.ContextWindow = mu.ContextWindow
 			}
 		}
 		if res.IsError {

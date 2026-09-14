@@ -69,6 +69,9 @@ type Response struct {
 	// RateLimit is the subscription window state the backend reported during
 	// this call, when it exposes one (Part 5 follow-up).
 	RateLimit *RateLimit
+	// ContextWindow is the model's context size in tokens when the backend
+	// reports it (0 = unknown). InputTokens is the context consumed this call.
+	ContextWindow int
 }
 
 // RateLimit is what a subscription CLI reports about its usage windows. Under

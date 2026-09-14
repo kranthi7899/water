@@ -187,3 +187,54 @@ func TestAttachmentsAreUntrusted(t *testing.T) {
 		t.Fatal("missing file")
 	}
 }
+
+func TestNewCommands(t *testing.T) {
+	s, _ := newSession(t, func(req backend.Request) string { return "the reply" })
+	ctx := context.Background()
+	if m := Complete("/co"); len(m) < 2 || m[0].Name != "compact" && m[0].Name != "consult" && m[0].Name != "copy" {
+		t.Fatalf("complete: %+v", m)
+	}
+	if Complete("/copy 2") != nil || Complete("hello") != nil {
+		t.Fatal("complete must only fire on a bare /prefix")
+	}
+	if _, err := s.Send(ctx, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Send(ctx, "second"); err != nil {
+		t.Fatal(err)
+	}
+	if r, ok := s.LastReply(2); !ok || r != "the reply" {
+		t.Fatal("LastReply(2)")
+	}
+	res := Dispatch(ctx, s, "/usage")
+	if res.Err != nil || !strings.Contains(res.Output, "session  2 turn(s)") {
+		t.Fatalf("/usage: %+v", res)
+	}
+	res = Dispatch(ctx, s, "/retry")
+	if res.Action != ActResend || res.Arg != "second" {
+		t.Fatalf("/retry: %+v", res)
+	}
+	res = Dispatch(ctx, s, "/undo")
+	if res.Err != nil || res.Action != ActRedraw || len(s.Turns()) != 1 {
+		t.Fatalf("/undo: %+v", res)
+	}
+	p := t.TempDir() + "/out.md"
+	res = Dispatch(ctx, s, "/save "+p)
+	b, _ := os.ReadFile(p)
+	if res.Err != nil || !strings.Contains(string(b), "## You\n\nfirst") {
+		t.Fatalf("/save: %+v %s", res, b)
+	}
+	if res := Dispatch(ctx, s, "/voice on"); res.Err == nil {
+		t.Fatal("voice on without a provider must error")
+	}
+	s.Voice = func(string) error { return nil }
+	if res := Dispatch(ctx, s, "/voice on"); res.Err != nil || !s.VoiceOn || res.Action != ActRedraw {
+		t.Fatalf("/voice on: %+v", res)
+	}
+	if res := Dispatch(ctx, s, "/title keeper"); res.Err != nil || !s.Pinned {
+		t.Fatalf("/title: %+v", res)
+	}
+	if res := Dispatch(ctx, s, "/copy 9"); res.Err == nil {
+		t.Fatal("/copy beyond history must error")
+	}
+}

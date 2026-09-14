@@ -70,6 +70,36 @@ type editorDoneMsg struct {
 	err  error
 }
 
+type tickMsg time.Time
+
+// ExitSummary is printed after the alternate screen closes, like a shell
+// tells you how to get back: the resume command and what the session held.
+type ExitSummary struct {
+	Role     string
+	Slug     string
+	Turns    int
+	Words    int
+	Duration time.Duration
+}
+
+func (e ExitSummary) String() string {
+	if e.Role == "" {
+		return "exited water"
+	}
+	var sb strings.Builder
+	sb.WriteString("exited water · " + e.Role)
+	if e.Slug != "" {
+		fmt.Fprintf(&sb, "\nresume this session with:\n  water chat %s --resume %s\n", e.Role, e.Slug)
+		fmt.Fprintf(&sb, "session   %s\nturns     %d (%d reply words)\n", e.Slug, e.Turns, e.Words)
+		if e.Duration > 0 {
+			fmt.Fprintf(&sb, "duration  %s\n", e.Duration.Round(time.Second))
+		}
+	} else {
+		sb.WriteString(" (no messages were sent)\n")
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
 type model struct {
 	opts    Options
 	ctx     context.Context
@@ -94,7 +124,10 @@ type model struct {
 	showHero bool
 	busy     bool
 	busyText string
+	busyAt   time.Time
 	status   string
+	summary  ExitSummary
+	started  time.Time
 	kitty    bool
 	pending  string // slug awaiting delete confirmation
 	lines    []string
@@ -118,15 +151,27 @@ func Run(ctx context.Context, o Options) error {
 			return err
 		}
 	}
+	m.started = time.Now()
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	final, err := p.Run()
 	if err != nil {
 		return err
 	}
-	if fm, ok := final.(*model); ok && fm.err != nil {
-		return fm.err
+	if fm, ok := final.(*model); ok {
+		if fm.err != nil {
+			return fm.err
+		}
+		fmt.Fprintln(os.Stderr, fm.exitSummary().String())
 	}
 	return nil
+}
+
+func (m *model) exitSummary() ExitSummary {
+	if m.sess == nil {
+		return ExitSummary{}
+	}
+	turns, words, _ := m.sess.Stats()
+	return ExitSummary{Role: m.role.Slug, Slug: m.sess.Slug, Turns: turns, Words: words, Duration: time.Since(m.started)}
 }
 
 func (m *model) loadTheme(slug string) *theme.Theme {
@@ -173,6 +218,7 @@ func (m *model) enterRole(slug, resume string) error {
 	m.ed = editor.New()
 	m.ed.SetKittyDetected(m.kitty)
 	m.ed.Focus()
+	m.applyPrompt()
 	m.vp = viewport.New()
 	m.showHero = len(s.Turns()) == 0
 	m.mode = modeChat
@@ -183,6 +229,27 @@ func (m *model) enterRole(slug, resume string) error {
 }
 
 func (m *model) Init() tea.Cmd { return nil }
+
+// applyPrompt renders the voice indicator to the LEFT of the composer: a
+// filled note when replies are spoken, a hollow one when voice is available
+// but off, nothing when no provider exists.
+func (m *model) applyPrompt() {
+	if m.ed == nil || m.sess == nil {
+		return
+	}
+	switch {
+	case m.sess.Voice == nil:
+		m.ed.SetPrompt("> ")
+	case m.sess.VoiceOn:
+		m.ed.SetPrompt("♪ > ")
+	default:
+		m.ed.SetPrompt("○ > ")
+	}
+}
+
+func tick() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
 
 func (m *model) relayout() {
 	if m.width == 0 || m.height == 0 {
@@ -225,6 +292,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
 			return m, cmd
+		}
+		return m, nil
+	case tickMsg:
+		if m.busy {
+			m.status = fmt.Sprintf("%s (%s)", m.busyText, time.Since(m.busyAt).Round(100*time.Millisecond))
+			return m, tick()
 		}
 		return m, nil
 	case turnMsg:
@@ -339,6 +412,26 @@ func (m *model) updateChat(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "pgdown":
 		m.vp.PageDown()
 		return m, nil
+	case "ctrl+y":
+		if text, ok := m.sess.LastReply(1); ok {
+			if how, err := CopyToClipboard(text); err != nil {
+				m.status = "copy: " + err.Error()
+			} else {
+				m.status = "copied last reply via " + how
+			}
+		} else {
+			m.status = "nothing to copy yet"
+		}
+		return m, nil
+	case "ctrl+b":
+		res := Dispatch(m.ctx, m.sess, map[bool]string{true: "/voice off", false: "/voice on"}[m.sess.VoiceOn])
+		return m, m.applyResult(res)
+	case "tab":
+		if matches := Complete(m.ed.Value()); len(matches) > 0 {
+			m.ed.SetValue("/" + matches[0].Name + " ")
+			m.relayout()
+		}
+		return m, nil
 	}
 	if m.busy {
 		m.status = m.busyText + " (input paused)"
@@ -375,25 +468,25 @@ func (m *model) updateChat(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) runTurn(text string) tea.Cmd {
-	m.busy, m.busyText = true, "thinking as "+m.role.Slug+"…"
+	m.busy, m.busyText, m.busyAt = true, "thinking as "+m.role.Slug+"…", time.Now()
 	m.status = m.busyText
 	m.showHero = false
 	m.lines = append(m.lines, m.renderUser(text)...)
 	m.relayout()
 	s := m.sess
 	ctx := m.ctx
-	return func() tea.Msg {
+	return tea.Batch(tick(), func() tea.Msg {
 		t, err := s.Send(ctx, text)
 		return turnMsg{turn: t, err: err}
-	}
+	})
 }
 
 func (m *model) runCommand(text string) tea.Cmd {
-	m.busy, m.busyText = true, "running "+strings.Fields(text)[0]
+	m.busy, m.busyText, m.busyAt = true, "running "+strings.Fields(text)[0], time.Now()
 	m.status = m.busyText
 	s := m.sess
 	ctx := m.ctx
-	return func() tea.Msg { return cmdMsg{res: Dispatch(ctx, s, text)} }
+	return tea.Batch(tick(), func() tea.Msg { return cmdMsg{res: Dispatch(ctx, s, text)} })
 }
 
 func (m *model) applyResult(res Result) tea.Cmd {
@@ -422,6 +515,17 @@ func (m *model) applyResult(res Result) tea.Cmd {
 		return nil
 	case ActOpenEditor:
 		return m.openEditor()
+	case ActRedraw:
+		m.applyPrompt()
+		m.rebuildTranscript()
+		if res.Output != "" {
+			m.lines = append(m.lines, m.renderSystem(res.Output)...)
+		}
+		m.status = "ok"
+		m.relayout()
+		return nil
+	case ActResend:
+		return m.runTurn(res.Arg)
 	}
 	if res.Output != "" {
 		m.lines = append(m.lines, m.renderSystem(res.Output)...)
@@ -593,6 +697,34 @@ func (m *model) hero() []string {
 	return rows[:r.H]
 }
 
+// contextBar renders the fill of the model's context window from the last
+// turn: green under 50%, yellow to 80%, red above (thresholds as in Hermes).
+func (m *model) contextBar() string {
+	turns := m.sess.Turns()
+	if len(turns) == 0 {
+		return ""
+	}
+	t := turns[len(turns)-1]
+	if t.ContextWindow <= 0 || t.InputTokens <= 0 {
+		return ""
+	}
+	frac := float64(t.InputTokens) / float64(t.ContextWindow)
+	if frac > 1 {
+		frac = 1
+	}
+	cells := 8
+	filled := int(frac*float64(cells) + 0.5)
+	bar := strings.Repeat("▰", filled) + strings.Repeat("▱", cells-filled)
+	col := "#2BE82B"
+	switch {
+	case frac >= 0.8:
+		col = "#D00000"
+	case frac >= 0.5:
+		col = "#E8B400"
+	}
+	return m.fg(col, fmt.Sprintf("ctx %s %d%%", bar, int(frac*100+0.5))) + m.fg(m.theme.Palette.Muted, fmt.Sprintf(" %s/%s", kilo(t.InputTokens), kilo(t.ContextWindow)))
+}
+
 func (m *model) statusLine() string {
 	p := m.theme.Palette
 	slug := "new session"
@@ -606,6 +738,9 @@ func (m *model) statusLine() string {
 	mid := m.status
 	if mid == "" {
 		mid = m.ed.Hint()
+	}
+	if cb := m.contextBar(); cb != "" {
+		mid = cb + "  " + mid
 	}
 	line := left + " " + mid
 	if n := ansi.StringWidth(line); n < m.width {
@@ -634,7 +769,9 @@ func (m *model) View() tea.View {
 	}
 	var v tea.View
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// Mouse capture is deliberately OFF so the terminal's own text selection
+	// and copy keep working over the transcript (PgUp/PgDn scroll).
+	v.MouseMode = tea.MouseModeNone
 	v.KeyboardEnhancements = tea.KeyboardEnhancements{ReportAlternateKeys: true}
 	if m.mode == modePicker {
 		v.Content = m.pickerView()
@@ -652,7 +789,34 @@ func (m *model) View() tea.View {
 	if r.Hero.Visible() {
 		rows = append(rows, fit(m.hero(), r.Hero.H, m.width)...)
 	}
-	rows = append(rows, fit(strings.Split(m.vp.View(), "\n"), r.Chat.H, m.width)...)
+	chatLines := strings.Split(m.vp.View(), "\n")
+	// Slash autocomplete: a dropdown drawn over the bottom of the CHAT
+	// region (content, not geometry: CHAT/INPUT rows are unchanged).
+	if matches := Complete(m.ed.Value()); len(matches) > 0 && !m.busy {
+		limit := 6
+		if limit > r.Chat.H-1 {
+			limit = r.Chat.H - 1
+		}
+		var drop []string
+		for i, c := range matches {
+			if i >= limit {
+				break
+			}
+			mark := "  "
+			if i == 0 {
+				mark = "▶ "
+			}
+			drop = append(drop, m.styler.Bg(m.theme.Palette.Panel, m.fg(m.theme.Palette.Foreground, fmt.Sprintf(" %s%-34s %s", mark, c.Usage, c.Help))))
+		}
+		drop = append(drop, m.fg(m.theme.Palette.Muted, "  tab completes · enter runs"))
+		chatLines = fit(chatLines, r.Chat.H, m.width)
+		start := r.Chat.H - len(drop)
+		if start < 0 {
+			start = 0
+		}
+		chatLines = append(chatLines[:start], drop...)
+	}
+	rows = append(rows, fit(chatLines, r.Chat.H, m.width)...)
 	inputLines := strings.Split(m.ed.View(), "\n")
 	rows = append(rows, fit(inputLines, r.Input.H, m.width)...)
 	rows = append(rows, m.statusLine())
@@ -665,7 +829,7 @@ func (m *model) View() tea.View {
 	}
 	if m.mode == modeChat && !m.busy {
 		cur := m.ed.Cursor()
-		x, y := 2+m.ed.CursorCell(), m.ed.CursorRow()
+		x, y := m.ed.PromptWidth()+m.ed.CursorCell(), m.ed.CursorRow()
 		if cur != nil {
 			x, y = cur.X, cur.Y
 		}

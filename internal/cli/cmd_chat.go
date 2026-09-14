@@ -59,7 +59,14 @@ func (a *App) runChat(ctx context.Context, start, resume string, picker bool) er
 	}
 	def, err := a.selectBackend(ctx)
 	if err != nil {
-		return err
+		// Logged out? Route to the login flow right here (like `claude`
+		// does) instead of failing with an error to decode.
+		if lerr := a.loginIfLoggedOut(ctx); lerr != nil {
+			return lerr
+		}
+		if def, err = a.selectBackend(ctx); err != nil {
+			return err
+		}
 	}
 	if w := meteredLeakWarning(def); w != "" {
 		fmt.Fprintln(os.Stderr, "warning:", w)

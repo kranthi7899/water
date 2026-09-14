@@ -270,3 +270,39 @@ credential lookup depends on the login shell's environment), so Water correctly 
 as not logged in and selected codex; in a normal shell the same home selects claude. What this
 does not prove: a machine that has never had `claude` or `codex` installed, and Linux (no VM or Docker was available here; the Linux
 binaries are built but unexercised).
+
+---
+
+# Harness cross-check against Hermes Agent (2026-09-14, evening)
+
+Compared Water's interactive harness section by section with the documented Hermes Agent CLI
+([CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli),
+[slash commands](https://hermes-agent.nousresearch.com/docs/reference/slash-commands),
+[repo](https://github.com/nousresearch/hermes-agent)). Water's idea (persona council on a
+subscription, isolation invariants) is not what was compared; the harness affordances were.
+
+| section | Hermes | Water before | Water now |
+|---|---|---|---|
+| slash autocomplete | dropdown on `/`, Tab accepts | none | dropdown over the chat area on `/`, Tab completes the top match |
+| exit | Ctrl+D; prints resume command, session id, duration, message count | alt-screen closed silently | `exited water · role`, resume command, slug, turns, duration |
+| clipboard | `/copy [N]`, paste images | terminal selection blocked by mouse capture | mouse capture off (selection works), `/copy [N]`, Ctrl+Y, pbcopy/wl-copy/xclip/OSC 52 fallback |
+| context fill | status bar with "12.4K/200K" and colour thresholds | none | `ctx ▰▰▱▱ 12% 120K/1M` from the CLI's reported window; green/yellow/red at 50/80% |
+| thinking feedback | animated spinner with elapsed time | static "thinking…" | "thinking as cto… (4.2s)" ticking |
+| voice | `/voice on|tts`, Ctrl+B record key, STT+TTS | `--voice` flag only, no indicator | indicator left of the composer (♪ on / ○ off), `/voice on|off|status`, Ctrl+B; TTS only — listen stays a documented no-op |
+| login routing | `hermes setup` wizard, `hermes auth` | onboard only; chat failed with an error when logged out | chat detects an installed-but-logged-out CLI and runs its login flow before starting |
+| undo / retry | `/undo`, `/retry` | none | `/undo` (active context only; transcript is append-only), `/retry` |
+| usage | `/usage` tokens, cost, provider limits | `/status` budget line | `/usage`: subscription windows, context on the last turn, session size |
+| export | `/save`, `/export` | none | `/save [file]` markdown export |
+| session naming | `/title` | `/name` | `/title` alias |
+| multiline | Alt+Enter, Ctrl+J, Shift+Enter, backslash | Ctrl+J, Shift+Enter when detected | unchanged (deliberate: chords that may not arrive are not advertised) |
+| streaming output | token streaming with tool feed | turn-level replies | unchanged — a turn-level pipeline with per-node tracing; streaming would touch the backend contract and the trace model, so it is a design change, not an upgrade |
+| `!` shell passthrough | runs shell without the model | none | not taken: Water's tools are deny-by-default; a passthrough would be a second, unpoliced path |
+| interrupt-and-redirect / queue / steer | yes | input paused while busy | not taken: a Water turn is one subprocess call; redirecting mid-call has nothing to redirect into |
+| background sessions, cron, messaging gateways, skill hub, Docker/SSH backends | yes | no | out of scope for a single-user council CLI |
+| session store | SQLite + FTS5 search | per-role JSONL, tail-bounded compaction | unchanged; search across sessions is a reasonable next step |
+| memory | agent-curated with nudges, user model | curated, manual promotion | unchanged by design (invariant #4) |
+
+What Water has that Hermes' harness does not: per-role memory isolation enforced at prompt
+assembly, a typed message permission graph, mechanical verbatim forwarding of dissent, evidence
+provenance verified against the run trace, and resume-from-checkpoint that survives a rate-limit
+window. Those are the product, and none of the upgrades above touch them.

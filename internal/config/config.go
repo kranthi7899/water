@@ -174,7 +174,7 @@ func defaults() map[string]string {
 		"memory.provider":              "markdown",
 		"memory.max_entries":           "200",
 		"memory.max_bytes":             "32768",
-		"voice.provider":               "noop",
+		"voice.provider":               "os",
 		"orchestration.router":         "hierarchy",
 		"orchestration.max_parallel":   "4",
 		"orchestration.timeout":        "20m",
