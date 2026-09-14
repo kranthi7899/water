@@ -162,7 +162,21 @@ Two things the build surfaced:
 `--agents-dir` overlay setting `backend: codex-subscription` in `cto/role.yaml`, `water status`
 resolved the CTO to codex with the reason `role.yaml backend:` and the others to claude. The
 first orchestration with that overlay never reached the CTO because the CEO answered a build-vs-buy
-brief alone (correct behaviour); see the mixed-run table below for the second.
+brief alone (correct behaviour). The second (a 2 TB Postgres migration brief that demands a
+feasibility range) ran the full graph:
+
+| node | backend | metered |
+|---|---|---|
+| ceo (frame) | claude-subscription | no |
+| coo (assign) | claude-subscription | no |
+| cto | **codex-subscription** | no |
+| design | claude-subscription | no |
+| coo (verify) | claude-subscription | no |
+| ceo (final) | claude-subscription | no |
+
+Six calls, zero metered, 4m12s wall. `TestPerRoleBackend` is now backed by a real two-provider
+run: resolution precedence (`role.yaml backend:` won over the config default), subprocess
+invocation on codex, and cross-provider context all held.
 
 Context-format compatibility across providers is not an issue by construction: every call is a
 stateless system+prompt pair, and inter-role context travels as text in the outbox.
@@ -181,3 +195,78 @@ Still unverified: Water's MCP tools on codex (`-c mcp_servers.*`) — deliberate
   it"; `run` and chat say the same.
 - The trace records `rate_limit` (observed state) and `rate_limited` (an interruption) events;
   `diagnose` adds a `rate-limit-interruption` finding with a fan-out recommendation when any occur.
+
+## Part 2 — orchestration diagnostics, with numbers
+
+Method. Four briefs, each run through the full graph and with `--solo` (CEO alone, delegating
+nothing; same persona, same brief). A and B are decomposable multi-domain briefs (payments
+migration; onboarding rebuild); C and D are single-domain judgment calls (a distressed
+acquisition; a customer delivery-date commitment). No attachments or tool roots for any of the
+four. Similarity is Jaccard over distinctive terms of the final outputs; influence is the share
+of a specialist's distinctive terms that reached the final; all runs zero metered.
+
+| brief | class | graph calls / wall | solo calls / wall | same headline decision? | final similarity | specialist influence (cto / design) | dissent msgs → survived |
+|---|---|---|---|---|---|---|---|
+| A payments migration | decomposable | 8 / 209 s | 1 / 29 s | **yes** (don't migrate before peak; fix a11y; negotiate fees) | 0.16 | 0.00 / 0.11 | 0 |
+| B onboarding rebuild | decomposable | 11 / 330 s | 1 / 34 s | **yes** (fix web-view first; no native rebuild) | 0.13 | 0.08 / 0.09 | 2 → 2 (100%) |
+| C distressed acquisition | single-domain | 1 / 25 s | 1 / 23 s | yes (CEO answered alone in both) | 0.21 | — | 0 |
+| D delivery-date commitment | single-domain | 1 / 26 s | 1 / 26 s | yes (CEO answered alone in both) | 0.22 | — | 0 |
+
+Plus the two evidence-bearing runs from Parts 1 and 3 (a config file under the CTO's root; a
+migration brief demanding a feasibility range): 6 calls each, tool calls 4 and 0, specialist
+influence 0.12 / 0.07 and (not measured) — and in both the final output contained facts or
+ranges the CEO could not have produced alone (verified config values; method-attributed
+feasibility ranges).
+
+**Synthesis versus single-agent.** On C and D the graph collapsed to the solo run by the CEO's
+own decision — "this is a judgment call, I'm making it myself" — so the topology already costs
+nothing on that class. On A and B the graph produced the *same headline decision* as the solo
+CEO, in more words, with lower lexical overlap because the graph's final spends its length on
+epistemic bookkeeping (what is verified, what is unconfirmed, a dissent acknowledged, a gate
+proposed) rather than on a different conclusion. With nothing to gather, the specialists' outputs
+were labelled unconfirmed-on-word by the COO and, measured lexically, changed 0–11% of the final.
+Eight to eleven calls and 7–10× the wall time bought framing, not a different decision.
+
+**Delegate-with-no-influence.** CTO 0.00 on A (its deliverable in that run was the hallucinated
+tool-syntax failure, later fixed), 0.08 on B, 0.12 on the evidence run; Design 0.07–0.11. The
+`diagnose` warning threshold (below 5% with at least ten distinctive terms) fired on none of them;
+the honest reading is that influence is uniformly low when there is no evidence to gather and
+modest when there is.
+
+**Convergence.** No pairwise specialist similarity above the 0.6 warning line in any run; CTO and
+Design deliverables read as different roles. The personas are differentiated.
+
+**Dissent survival.** 2 of 2 typed dissents reached the CEO verbatim (brief B, both rounds). Only
+one brief produced genuine specialist disagreement; the mechanism is proven mechanically by
+`TestDissentForwardedVerbatim` and the two real data points, and there is no larger sample yet.
+
+**Recommendation (not applied in this pass, per the note on what not to do).** The graph earns
+its cost when there is *something to gather*: an attachment, a declared tool root with relevant
+files, or a brief that names artifacts to check. It does not earn its cost on decomposable
+briefs that arrive as a paragraph of assertions — there the specialists can only reason, the COO
+marks everything unconfirmed, and the CEO reaches the same decision alone in a thirtieth of the
+time. Proposed routing rule for the CEO's frame step: **default to `ROUTE: answer` unless the run
+carries evidence sources (attachments, non-empty tool roots for a specialist, or a brief that
+explicitly asks for a specialist's measured deliverable); when delegating without evidence
+sources, say so and cap the run at one COO round.** The second half is already the `max_rounds`
+knob; the first half is a one-line addition to the CEO frame prompt plus a flag Water can set
+from `Env` (attachments present, tool roots non-empty). Caveat: n=2 per class; the same brief set
+should be rerun after any persona change before the rule is made default.
+
+## Part 4 — distribution gate
+
+Tag `v0.1.0-rc.1` was pushed; the release workflow built and published
+`water_0.1.0-rc.1_{darwin,linux}_{amd64,arm64}.tar.gz` plus `checksums.txt` (CI green).
+
+The anonymous `curl -fsSL …/install.sh | bash` path returned 404: **the repository is private**,
+so raw files and release assets are not reachable without credentials. Making the repository
+public is your decision, not one this pass took. Until then the installer accepts
+`GITHUB_TOKEN`/`GH_TOKEN` and uses the GitHub API for the release lookup and the asset download
+(octet-stream); that path was exercised end to end on this machine in a stripped environment
+(`env -i`, an empty install prefix, a fresh `WATER_HOME`): download, checksum verification,
+install, `water onboard` with a real round trip, `water orchestrate --solo`, zero metered, using
+only the subscription logins already on the machine. One observation: in that `env -i` shell `claude auth status` itself reported logged out (its
+credential lookup depends on the login shell's environment), so Water correctly reported claude
+as not logged in and selected codex; in a normal shell the same home selects claude. What this
+does not prove: a machine that has never had `claude` or `codex` installed, and Linux (no VM or Docker was available here; the Linux
+binaries are built but unexercised).

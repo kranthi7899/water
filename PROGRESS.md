@@ -69,9 +69,26 @@ investigation findings and the Part 10 answers are in `docs/decisions.md`.
 - Subscription session limits are real: a five-hour window ran out mid-campaign; runs checkpoint
   and resume cleanly across it.
 
+## Follow-up (same day): provenance, measurement, verification
+
+- Part 1 built: `trace:current-run` grant for the COO, call ids on tool events, `Evidence` on
+  messages, mechanical verified / failed / unconfirmed verdicts appended to the COO's status.
+  Three gate tests plus a real run (config under the CTO's root) pass.
+- Part 2 measured: on single-domain briefs the CEO already answers alone; on decomposable briefs
+  without evidence sources the graph reached the same decision as the solo CEO at 8–11× the
+  calls. Numbers and a routing recommendation in `docs/decisions.md`.
+- Part 3 exercised: codex installed and signed in; a real run traced the CTO to codex and every
+  other node to claude, zero metered.
+- Part 4: `v0.1.0-rc.1` released with four binaries; the installer works through a token because
+  the repo is private; the anonymous path needs the repo public.
+- Part 5 built: rate-limit capture from stream-json, budget in `water status`/`/status`,
+  distinct exit 5 with a resume hint, `rate_limited` trace events and a `diagnose` finding.
+
 ## Next up
 
 - Verify the Codex path on a machine with `codex` (MCP via `-c mcp_servers.*`, `--image`).
 - Linux Landlock for the shell tool before any role is granted shell.
-- Cut `v0.1.0` and enable the Homebrew tap in `.goreleaser.yaml`.
+- Decide whether to make the repo public (unblocks anonymous `curl | bash`); then `v0.1.0` and
+  the Homebrew tap.
+- Apply the Part 2 routing rule (delegate only with evidence sources) after re-measuring.
 - Persona content pass on the Danone/Mylan CEO entry (see `docs/decisions.md` Q3).
