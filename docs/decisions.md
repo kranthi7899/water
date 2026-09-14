@@ -333,3 +333,27 @@ Full write-up: `docs/judgment-pass-v2.md`. Compared against the public source of
 - **Rejected with reasons:** Codex config layers, a pluggable execution backend (until shell is
   granted), Hermes's autonomous reflect-and-update loop (no evidence: 0 flagged replies), external
   semantic memory, OpenTelemetry.
+
+
+---
+
+# Claude Code usage parity sweep (2026-09-14)
+
+Every common Claude Code usage was tried against Water in a real terminal, with a real PDF, a real
+Retina screenshot and a pre-populated session store. Guardrail: parity is not a reason to widen access.
+
+- **Fixed bugs:** a leading `/` (a dropped absolute path, a pasted `/var/log/…` line) was parsed as an
+  unknown command; now only known command names are commands, and a line that is exactly an existing
+  file is pre-filled as `/attach <path>`. An `@path` that failed to load was sent silently without the
+  file; it now stops the turn. Codex and the metered API silently dropped PDFs (the model then said it
+  "can't access" the file, exit 0); they now refuse loudly and name `claude-subscription`, which reads
+  PDFs natively as document blocks. Chat `/voice on` needed the `--voice` flag; it is now always wired
+  when a provider exists. Tool denials reached the user only through the model's paraphrase; they are
+  now shown as a line under the reply and on stderr for `water run`. Roles without file tools now tell
+  the user to `/attach` instead of just refusing. The header kept the old backend name after `/backend`.
+- **Held as designed:** CEO/COO have no tools, CTO/Design are read-only inside declared roots, no shell
+  in v1. Attaching a file is the user's explicit act and does not change any role's tool access.
+- **Reconsider, not resolved:** `network: none`. In 10 recorded runs, 1 of 25 specialist deliverables
+  was blocked by it (Design could not check a provider's conformance report); a CTO deliverable argued
+  vendor documentation is weaker than local reproduction. Resolving it needs a count of deliverables
+  whose central claim depended on a public source, not a single case.

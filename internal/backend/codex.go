@@ -35,6 +35,10 @@ func (c *CodexSubscription) SupportsAttachments() bool { return true }
 // the call proceeds without them.
 func (c *CodexSubscription) SupportsTools() bool { return false }
 
+// SupportsDocuments is false: `codex exec` accepts images (--image) but has no
+// document input, so a PDF cannot reach the model.
+func (c *CodexSubscription) SupportsDocuments() bool { return false }
+
 func extFor(mt string) string {
 	switch mt {
 	case "image/png":
@@ -122,6 +126,9 @@ func (c *CodexSubscription) Run(ctx context.Context, req Request) (Response, err
 	// this machine (codex is not installed) — detected at runtime, not assumed.
 	var imgs []string
 	var inlined []string
+	if err := refuseUnsupported(c.Name(), req.Attachments, map[string]bool{"image": fs["--image"], "text": true}); err != nil {
+		return Response{Backend: c.Name()}, err
+	}
 	for _, a := range req.Attachments {
 		if a.Kind == "image" && fs["--image"] {
 			f, ferr := os.CreateTemp("", "water-codex-img-*"+extFor(a.MediaType))

@@ -468,7 +468,7 @@ func toolsNote(env Env, slug string) string {
 	if pol := env.RoleTools[slug]; pol != nil && pol.HasTrace() {
 		return "# Tools\n\nYou have no file, shell or web access. Your one capability is read-only access to this run's trace, which water has already applied for you: every evidence reference in the deliverables below was resolved mechanically and the verdicts are in your prompt. Do not emit tool-call syntax."
 	}
-	return "# Tools\n\nYou have no tools in this session: no file access, no shell, no web, no way to run anything. Do not emit tool-call syntax or pretend to run commands. Work from what is in your inbox and say plainly what you could not check."
+	return "# Tools\n\nYou have no tools in this session: no file access, no shell, no web, no way to run anything. Do not emit tool-call syntax or pretend to run commands. Work from what is in your inbox and say plainly what you could not check. If the user refers to a file on their machine, tell them how to give it to you: in chat, `/attach <path>` (PDFs and images work on the Claude backend), or `water run <role> \"…\" --attach <path>`."
 }
 
 func manifestsFor(env Env, slugs ...string) string {

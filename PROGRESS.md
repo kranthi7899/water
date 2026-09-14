@@ -215,3 +215,18 @@ Tests: 86 test functions, all passing; `go test -race` clean on every changed pa
 - Review the skills report findings: `fitts-law` / `hicks-law` triggers, `disagree-and-commit`
   description breadth.
 - Codex backend does not parse token usage (`in=0` in `water replay` listings).
+
+## Claude Code usage parity sweep (same day, evening)
+
+Tried each everyday Claude Code usage against Water in a real terminal. Details and classification in
+`docs/decisions.md` (last section).
+
+- Fixed: slash parser treating absolute paths as commands; dropped file pre-fills `/attach`; silent
+  `@path` failure; codex/api silently dropping PDFs (now refused, claude reads PDFs natively); chat voice
+  needing `--voice`; tool denials now visible in chat and `water run`; no-tools roles point users at
+  `/attach`; header backend name after `/backend`.
+- Verified working: PDF and Retina screenshot on claude, multi-line paste starting with `/`, piping into
+  `water run`, `/clear` `/resume` `/compact`, retention pruning to 30 and removing a 100-day-old session,
+  `/backend` and `/model` taking effect on the next turn, `/help` listing all 26 commands, OS voice.
+- Open decision: `network: none` (RECONSIDER, evidence threshold stated in decisions.md).
+- Tests: 94.

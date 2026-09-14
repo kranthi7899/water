@@ -44,6 +44,7 @@ func (a *API) model() string {
 }
 
 func (a *API) SupportsAttachments() bool { return false }
+func (a *API) SupportsDocuments() bool   { return false }
 func (a *API) SupportsTools() bool       { return false }
 
 func (a *API) base() string {
@@ -103,6 +104,9 @@ func (a *API) Run(ctx context.Context, req Request) (Response, error) {
 	model := req.Model
 	if model == "" {
 		model = a.model()
+	}
+	if err := refuseUnsupported(a.Name(), req.Attachments, map[string]bool{"text": true}); err != nil {
+		return Response{Backend: a.Name(), Metered: true}, err
 	}
 	prompt := req.Prompt
 	for _, at := range req.Attachments {

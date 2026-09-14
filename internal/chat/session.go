@@ -188,7 +188,10 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	if len(s.turns) > 0 {
 		n = s.turns[len(s.turns)-1].N + 1
 	}
-	prompt, atts := s.expandAtRefs(text)
+	prompt, atts, aerr := s.expandAtRefs(text)
+	if aerr != nil {
+		return Turn{}, aerr
+	}
 	atts = append(atts, s.attachments...)
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindUser, Turn: n, Text: text})
 	start := time.Now()
@@ -219,21 +222,40 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 }
 
 // expandAtRefs turns @path tokens into per-turn attachments (5.4).
-func (s *Session) expandAtRefs(text string) (string, []backend.Attachment) {
+// expandAtRefs turns @path tokens into per-turn attachments. A token that
+// looks like a path (contains "/" or starts with "~") and cannot be loaded is
+// an error, so a message never goes out silently missing its file. "@alice"
+// and other non-path mentions are left alone.
+func (s *Session) expandAtRefs(text string) (string, []backend.Attachment, error) {
 	var atts []backend.Attachment
-	fields := strings.Fields(text)
-	for _, f := range fields {
+	for _, f := range strings.Fields(text) {
 		if !strings.HasPrefix(f, "@") || len(f) < 2 {
 			continue
 		}
-		p := strings.Trim(f[1:], ",.;:)")
+		p := strings.TrimRight(f[1:], ",;:)")
+		if !strings.Contains(p, "/") && !strings.HasPrefix(p, "~") {
+			continue
+		}
 		a, err := LoadAttachment(p)
 		if err != nil {
-			continue
+			return text, nil, fmt.Errorf("could not attach @%s: %w (nothing was sent)", p, err)
 		}
 		atts = append(atts, a)
 	}
-	return text, atts
+	return text, atts, nil
+}
+
+// attachmentWarning says when the current backend cannot read an attachment,
+// at the moment it is attached rather than after a turn is wasted.
+func (s *Session) attachmentWarning(a backend.Attachment) string {
+	b := s.Env.BackendFor(s.Role.Slug)
+	if b == nil {
+		return ""
+	}
+	if dc, ok := b.(interface{ SupportsDocuments() bool }); ok && a.Kind == "document" && !dc.SupportsDocuments() {
+		return fmt.Sprintf("%s cannot read %s files; the next message will be refused. Switch with /backend claude-subscription.", b.Name(), a.MediaType)
+	}
+	return ""
 }
 
 // MaxAttachmentBytes caps a single attachment.
@@ -241,11 +263,7 @@ const MaxAttachmentBytes = 8 * 1024 * 1024
 
 // LoadAttachment reads a file into an Attachment, classifying it by extension.
 func LoadAttachment(p string) (backend.Attachment, error) {
-	if strings.HasPrefix(p, "~/") {
-		if h, err := os.UserHomeDir(); err == nil {
-			p = filepath.Join(h, p[2:])
-		}
-	}
+	p = NormalizePath(p)
 	st, err := os.Stat(p)
 	if err != nil {
 		return backend.Attachment{}, err

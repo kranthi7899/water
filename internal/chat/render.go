@@ -14,6 +14,24 @@ import (
 // never a hand-written description independent of that data — an empty
 // ToolEvents means an empty summary, and the counts and path always match
 // what's in the events.
+// DenialLines renders refused tool calls as "tool path — reason" lines.
+func DenialLines(evs []tools.Event) []string {
+	var out []string
+	for _, e := range evs {
+		if e.Allowed {
+			continue
+		}
+		target := ""
+		if p, ok := e.Args["path"].(string); ok {
+			target = " " + p
+		} else if c, ok := e.Args["command"].(string); ok {
+			target = " " + c
+		}
+		out = append(out, fmt.Sprintf("%s%s — %s", e.Tool, target, e.Basis))
+	}
+	return out
+}
+
 func operationSummary(t Turn) string {
 	if len(t.ToolEvents) == 0 {
 		return ""

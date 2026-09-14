@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,8 +124,63 @@ func CopyToClipboard(text string) (how string, err error) {
 	return "osc52", err
 }
 
-// IsCommand reports whether a line is a slash command.
-func IsCommand(line string) bool { return strings.HasPrefix(strings.TrimSpace(line), "/") }
+// commandAliases are accepted names that are not listed separately in /help.
+var commandAliases = map[string]bool{"?": true, "exit": true, "q": true}
+
+// IsCommand reports whether a line is a slash command: its first word, after
+// the slash, must be a known command name or alias. A line that merely starts
+// with "/" — a dropped file path, "/etc/hosts has…", "/r/golang…" — is not a
+// command and falls through to normal handling.
+func IsCommand(line string) bool {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, "/") {
+		return false
+	}
+	name := strings.ToLower(strings.TrimPrefix(strings.Fields(t)[0], "/"))
+	if commandAliases[name] {
+		return true
+	}
+	for _, c := range Commands {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// DroppedPath returns a cleaned file path when the whole input is a single
+// existing file, as a terminal pastes it on drag-and-drop: possibly quoted,
+// possibly with backslash-escaped spaces. ok is false for anything else.
+func DroppedPath(line string) (string, bool) {
+	p := NormalizePath(strings.TrimSpace(line))
+	if p == "" || strings.ContainsAny(p, "\n\r") {
+		return "", false
+	}
+	if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+		return p, true
+	}
+	return "", false
+}
+
+// NormalizePath undoes the quoting terminals apply to dragged paths and
+// expands a leading ~.
+func NormalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	if len(p) >= 2 && (p[0] == '\'' && p[len(p)-1] == '\'' || p[0] == '"' && p[len(p)-1] == '"') {
+		p = p[1 : len(p)-1]
+	} else {
+		p = strings.ReplaceAll(p, "\\ ", " ")
+		p = strings.ReplaceAll(p, "\\(", "(")
+		p = strings.ReplaceAll(p, "\\)", ")")
+		p = strings.ReplaceAll(p, "\\'", "'")
+	}
+	if strings.HasPrefix(p, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(h, p[2:])
+		}
+	}
+	return p
+}
 
 // Dispatch runs a slash command against the session.
 func Dispatch(ctx context.Context, s *Session, line string) Result {
@@ -341,7 +397,11 @@ func Dispatch(ctx context.Context, s *Session, line string) Result {
 		if err != nil {
 			return Result{Err: err}
 		}
-		return Result{Output: fmt.Sprintf("attached %s (%s, %d bytes) for this session — its contents are untrusted data to the role", a.Name, a.MediaType, len(a.Data))}
+		msg := fmt.Sprintf("attached %s (%s, %d bytes) for this session — its contents are untrusted data to the role", a.Name, a.MediaType, len(a.Data))
+		if warn := s.attachmentWarning(a); warn != "" {
+			msg += "\nwarning: " + warn
+		}
+		return Result{Output: msg}
 	case "editor":
 		return Result{Action: ActOpenEditor}
 	case "copy":

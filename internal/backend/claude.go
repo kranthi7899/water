@@ -41,6 +41,7 @@ func (c *ClaudeSubscription) Name() string { return ClaudeSubscriptionName }
 
 func (c *ClaudeSubscription) SupportsAttachments() bool { return true }
 func (c *ClaudeSubscription) SupportsTools() bool       { return true }
+func (c *ClaudeSubscription) SupportsDocuments() bool   { return true }
 
 func (c *ClaudeSubscription) bin() string {
 	if c.Bin != "" {

@@ -90,6 +90,9 @@ func (a *App) runCmd() *cobra.Command {
 				return exitWith(ExitBackend, err)
 			}
 			sf.RunFinished(resp.Text, rec.Finish())
+			for _, d := range chat.DenialLines(resp.ToolEvents) {
+				fmt.Fprintln(os.Stderr, "tool denied:", d)
+			}
 			if a.flags.voice {
 				if vp, ok := voice.Open(cfg.Voice.Provider); ok && vp.Available() {
 					_ = vp.Speak(ctx, resp.Text)

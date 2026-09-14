@@ -44,6 +44,7 @@ type Options struct {
 	Picker        bool
 	Voice         func(text string) error
 	Profile       theme.Profile
+	VoiceOn       bool // start with spoken replies on
 	BudgetLine    func() string
 	OnRateLimit   func(rl *backend.RateLimit)
 }
@@ -204,6 +205,7 @@ func (m *model) enterRole(slug, resume string) error {
 	s.Retention = m.opts.Retention
 	s.Summariser = ModelSummariser(r, env)
 	s.Voice = m.opts.Voice
+	s.VoiceOn = m.opts.Voice != nil && m.opts.VoiceOn
 	s.BudgetLine = m.opts.BudgetLine
 	s.OnRateLimit = m.opts.OnRateLimit
 	if m.opts.SwitchBackend != nil {
@@ -308,6 +310,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("%s · %s", msg.turn.Backend, msg.turn.Duration.Round(time.Millisecond))
 		}
 		m.rebuildTranscript()
+		if msg.err != nil {
+			// Show the failure in the conversation, not only in the status bar.
+			m.lines = append(m.lines, m.renderSystem("error: "+msg.err.Error())...)
+		}
 		m.relayout()
 		return m, nil
 	case cmdMsg:
@@ -444,11 +450,21 @@ func (m *model) updateChat(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.ed.Reset()
-		m.relayout()
 		if IsCommand(text) {
+			m.ed.Reset()
+			m.relayout()
 			return m, m.runCommand(text)
 		}
+		if p, ok := DroppedPath(text); ok {
+			// A dragged-in file arrives as its bare path. Offer the command
+			// instead of sending the path to the model or failing.
+			m.ed.SetValue("/attach " + p)
+			m.status = "that looks like a file — press enter to attach it, or edit the line"
+			m.relayout()
+			return m, nil
+		}
+		m.ed.Reset()
+		m.relayout()
 		return m, m.runTurn(text)
 	case editor.ActOpenEditor:
 		return m, m.openEditor()
@@ -531,6 +547,10 @@ func (m *model) applyResult(res Result) tea.Cmd {
 		m.lines = append(m.lines, m.renderSystem(res.Output)...)
 	}
 	m.status = "ok"
+	// /backend and /model change what the header and status line report.
+	if m.sess.BackendName != "" {
+		m.info.Name = m.sess.BackendName
+	}
 	m.rebuildTranscriptIfContextChanged()
 	m.relayout()
 	return nil
@@ -650,6 +670,11 @@ func (m *model) renderReply(t Turn) []string {
 	lines := []string{m.fg(m.theme.Palette.Accent, label)}
 	if op := operationSummary(t); op != "" {
 		lines = append(lines, m.fg(m.theme.Palette.Muted, "  · "+op))
+	}
+	// Refused tool calls are shown to the user directly, from the same
+	// events, instead of only through the model's paraphrase of the refusal.
+	for _, d := range DenialLines(t.ToolEvents) {
+		lines = append(lines, m.fg(m.theme.Palette.Accent, "  ✕ tool denied: "+d))
 	}
 	for _, l := range m.wrap(t.Reply, w-2) {
 		lines = append(lines, "  "+m.fg(m.theme.Palette.Foreground, l))

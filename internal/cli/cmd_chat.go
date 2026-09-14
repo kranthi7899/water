@@ -103,17 +103,17 @@ func (a *App) runChat(ctx context.Context, start, resume string, picker bool) er
 			return sel.Backend, "session override (/backend)", nil
 		},
 	}
-	if a.flags.voice {
-		vp, ok := voice.Open(cfg.Voice.Provider)
-		if !ok || !vp.Available() {
-			msg := voice.ErrUnavailable.Error()
-			if ok {
-				msg = voice.Absence(vp)
-			}
-			fmt.Fprintln(os.Stderr, "voice:", msg, "— continuing without speech")
-		} else {
-			opts.Voice = func(text string) error { return vp.Speak(ctx, text) }
+	// Voice is wired whenever the provider works, so /voice on and Ctrl+B
+	// work without restarting; --voice only decides whether it starts on.
+	if vp, ok := voice.Open(cfg.Voice.Provider); ok && vp.Available() {
+		opts.Voice = func(text string) error { return vp.Speak(ctx, text) }
+		opts.VoiceOn = a.flags.voice
+	} else if a.flags.voice {
+		msg := voice.ErrUnavailable.Error()
+		if ok {
+			msg = voice.Absence(vp)
 		}
+		fmt.Fprintln(os.Stderr, "voice:", msg, "— continuing without speech")
 	}
 	return chat.Run(ctx, opts)
 }
