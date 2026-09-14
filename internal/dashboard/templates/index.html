@@ -1,0 +1,9 @@
+{{template "head" "runs"}}
+<h1>WATER</h1>
+<div class="panel">{{len .Runs}} RUN(S) · {{len .Roles}} ROLE(S)</div>
+<h2>Runs</h2>
+<table><tr><th>run</th><th>brief</th><th>when</th><th>state</th><th>bytes</th></tr>
+{{range .Runs}}<tr><td><a href="/run/{{.RunID}}">{{.RunID}}</a></td><td>{{trunc .Brief 90}}</td><td>{{.Modified.Format "2006-01-02 15:04:05"}}</td><td>{{if .Complete}}<span class="ok">finished</span>{{else}}<span class="warn">incomplete</span>{{end}}</td><td>{{.Size}}</td></tr>{{end}}
+</table>
+<p class="muted">trace dir: {{.TraceDir}}</p>
+{{template "foot"}}

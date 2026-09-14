@@ -14,5 +14,5 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	os.Exit(cli.Execute(agents, os.Args[1:]))
+	os.Exit(cli.Execute(agents, water.ThemesFS(), os.Args[1:]))
 }

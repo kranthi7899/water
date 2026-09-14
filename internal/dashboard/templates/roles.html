@@ -1,0 +1,15 @@
+{{template "head" "roles"}}
+<h1>ROLES</h1>
+{{range .Roles}}
+<div class="box"><h2>{{.Name}} <span class="muted">{{.Slug}}{{if .Orchestrator}} · orchestrator{{end}}{{if .Singleton}} · singleton{{end}}</span></h2>
+<p class="muted">role_id {{.RoleID}} · backend {{.Backend}} · tools: {{.Tools}}</p>
+<table><tr><th>file</th><th>stamped</th><th>signed</th><th>verified</th></tr>
+{{range .Files}}<tr><td>{{.Name}}</td><td>{{.Stamped}}</td><td>{{.Signed}}</td><td class="{{if eq .Verified "ok"}}ok{{else if eq .Verified "unstamped"}}info{{else}}fail{{end}}">{{.Verified}}</td></tr>{{end}}
+</table>
+<p>skills: {{range .Skills}}<code>{{.}}</code> {{end}}</p>
+{{if .Capability}}<pre>{{.Capability}}</pre>{{end}}
+</div>
+{{end}}
+<h2>Message permission graph</h2>
+<table><tr><th>from</th><th>to</th><th>topics</th></tr>{{range .Edges}}<tr><td>{{.From}}</td><td>{{.To}}</td><td>{{range .Topics}}{{.}} {{end}}</td></tr>{{end}}</table>
+{{template "foot"}}

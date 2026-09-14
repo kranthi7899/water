@@ -1,0 +1,37 @@
+# CTO: pixel grid / measurement chart. Greyscale on deep blue-black with periwinkle accent; a thing being measured cell by cell.
+# Palette and ornament ONLY. Layout, spacing and interaction are computed by
+# internal/layout and are identical across themes (invariant #7).
+theme:
+  name: cto
+  role: "cto"
+  palette:
+    background: "#08080F"
+    panel:      "#14142A"
+    foreground: "#C0C0D8"
+    muted:      "#5A5A72"
+    accent:     "#8B8BC8"
+    signal:     "#2BE82B"
+  typography:
+    family: monospace
+    labels: uppercase
+  borders:
+    style: ascii
+    weight: 1
+  imagery:
+    style: pixel_art
+    scaling: nearest
+    dithering: ordered
+  density: compact
+  hero:
+    title: CTO
+    lines:
+      - " +---+---+---+---+---+---+---+---+---+---+ "
+      - " |   | # |   |   | # | # |   |   | # |   | "
+      - " +---+---+---+---+---+---+---+---+---+---+ "
+      - " | # | # | # |   |   | # |   | # |   | # | "
+      - " +---+---+---+---+---+---+---+---+---+---+ "
+      - " |   |   | # | # |   |   | # | # |   |   | "
+      - " +---+---+---+---+---+---+---+---+---+---+ "
+      - " | # |   |   | # | # |   |   | # | # |   | "
+      - " +---+---+---+---+---+---+---+---+---+---+ "
+      - "  0   1   2   3   4   5   6   7   8   9    "

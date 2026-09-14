@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,8 +14,8 @@ import (
 )
 
 // Execute runs the command tree and returns a process exit code.
-func Execute(embedded fs.FS, args []string) int {
-	app := NewApp(embedded)
+func Execute(embedded, themes fs.FS, args []string) int {
+	app := NewApp(embedded, themes)
 	root := app.rootCmd()
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
@@ -34,9 +35,9 @@ func (a *App) rootCmd() *cobra.Command {
 		Use:   "water",
 		Short: "A council of role-agents on your existing subscription.",
 		Long: surface.StyleDim.Render(surface.Banner) + `
-water hosts role-agents (a singleton CEO plus delegates), each with a private
-persona and private memory, orchestrated through a native state graph, running
-on the Claude or ChatGPT subscription CLIs you already pay for.`,
+water hosts role-agents (a singleton CEO plus COO, CTO and Design), each with a
+private persona and private memory, orchestrated through a native state graph,
+running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -63,12 +64,19 @@ on the Claude or ChatGPT subscription CLIs you already pay for.`,
 	pf.BoolVarP(&a.flags.yes, "yes", "y", false, "assume yes; never prompt")
 	pf.BoolVarP(&a.flags.quiet, "quiet", "q", false, "suppress progress output")
 	pf.BoolVarP(&a.flags.verbose, "verbose", "v", false, "show per-node responses as they arrive")
-	pf.BoolVar(&a.flags.voice, "voice", false, "voice I/O (reserved; not yet available)")
+	pf.BoolVar(&a.flags.voice, "voice", false, "speak replies aloud (voice.provider must be \"os\")")
 
 	root.AddCommand(
-		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.runCmd(), a.orchestrateCmd(),
-		a.memoryCmd(), a.experienceCmd(), a.configCmd(), a.versionCmd(), a.voiceCmd(), a.dashboardCmd(),
+		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(), a.runCmd(), a.orchestrateCmd(),
+		a.diagnoseCmd(), a.dashboardCmd(), a.memoryCmd(), a.personaCmd(), a.experienceCmd(),
+		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root
+}
+
+func printJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
 }

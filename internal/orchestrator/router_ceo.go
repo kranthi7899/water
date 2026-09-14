@@ -1,8 +1,13 @@
 package orchestrator
 
+import "sort"
+
 // CEOFanoutRouter: entry → CEO decomposes → parallel fan-out to delegates →
 // fan-in → CEO synthesis → done. Phase is derived from State.Visits so the
 // router holds no hidden counters and can resume from a checkpoint.
+//
+// Kept from Phase 1 as the flat alternative to HierarchyRouter; it installs
+// no permission graph.
 type CEOFanoutRouter struct {
 	CEO       string
 	Delegates []string
@@ -63,5 +68,15 @@ func RouterNames() []string {
 	for n := range routerFactories {
 		out = append(out, n)
 	}
+	sort.Strings(out)
 	return out
+}
+
+// EdgesFor returns the permission graph a router requires, or nil for routers
+// that impose none.
+func EdgesFor(r Router) *PermissionGraph {
+	if h, ok := r.(*HierarchyRouter); ok {
+		return h.Graph()
+	}
+	return nil
 }

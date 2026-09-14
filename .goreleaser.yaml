@@ -1,0 +1,44 @@
+# goreleaser configuration (Part 3F). One static binary per platform; no
+# Docker, no Python, no Node. Tag `vX.Y.Z` to release.
+version: 2
+project_name: water
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+builds:
+  - id: water
+    main: ./cmd/water
+    binary: water
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X water/internal/cli.Version={{.Version}}
+      - -X water/internal/cli.Commit={{.ShortCommit}}
+      - -X water/internal/cli.Date={{.Date}}
+archives:
+  - id: tar
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE*, README.md]
+checksum:
+  name_template: checksums.txt
+changelog:
+  use: git
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]
+release:
+  draft: false
+  prerelease: auto
+# Homebrew tap: enable once a stable tag exists by filling in the repository.
+# brews:
+#   - repository:
+#       owner: kranthi7899
+#       name: homebrew-water
+#     homepage: https://github.com/kranthi7899/water
+#     description: "A council of role-agents on the subscription you already pay for."
+#     install: bin.install "water"
+#     test: system "#{bin}/water version"

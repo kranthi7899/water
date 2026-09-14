@@ -3,6 +3,9 @@ schema: 1
 role: coo
 kind: experience
 status: written
+role_id: 7e2f9c1b-5a63-4d8e-b2f4-1c9a0d7e3b52
+file_type: experience
+content_hash: sha256:e1a23f85029a8b82d6eb41999f9031e037bcda8f4262a3b53721400d7a242a04
 ---
 
 These are lessons I carry from documented cases and studies, held as patterns to weigh against a new situation, never as proof a pattern holds here.

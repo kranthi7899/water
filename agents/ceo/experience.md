@@ -3,6 +3,9 @@ schema: 1
 role: ceo
 kind: experience
 status: written
+role_id: c1a4b6e2-0f3d-4b7e-9a21-6d0e8f2c4a10
+file_type: experience
+content_hash: sha256:aae010ce3b6d334495fe9383160803100593e72f7771062509caf822c2215651
 ---
 
 These are lessons I carry from documented cases, held as patterns to weigh against a new situation, never as proof a pattern holds here.

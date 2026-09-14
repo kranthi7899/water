@@ -36,9 +36,9 @@ import (
 
 // GrowResult is the outcome of one reflection pass.
 type GrowResult struct {
-	Action    string `json:"action"`    // "new" | "reinforce" | "none"
-	Matched   string `json:"matched"`   // existing lesson sentence, verbatim, when action=="reinforce"
-	Lesson    string `json:"lesson"`    // new lesson sentence, when action=="new"
+	Action    string `json:"action"`  // "new" | "reinforce" | "none"
+	Matched   string `json:"matched"` // existing lesson sentence, verbatim, when action=="reinforce"
+	Lesson    string `json:"lesson"`  // new lesson sentence, when action=="new"
 	Rationale string `json:"rationale"`
 }
 

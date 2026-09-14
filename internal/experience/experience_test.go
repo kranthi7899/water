@@ -183,7 +183,9 @@ func TestCandidates_ThresholdAndOrder(t *testing.T) {
 func TestGrow_InvalidActionFromModel(t *testing.T) {
 	dir, role := setupRole(t)
 	fake := backend.NewFake("fake")
-	fake.Reply = func(req backend.Request) string { return `{"action":"promote","matched":"","lesson":"","rationale":"x"}` }
+	fake.Reply = func(req backend.Request) string {
+		return `{"action":"promote","matched":"","lesson":"","rationale":"x"}`
+	}
 	if _, err := Grow(context.Background(), fake, dir, role, "q", "r", "f", false); err == nil {
 		t.Fatal("expected an error for an unrecognised action")
 	}

@@ -3,6 +3,9 @@ schema: 1
 role: design
 kind: experience
 status: written
+role_id: 9f4c2a7d-1e58-4c3b-a6f9-2b7d0c5e8a41
+file_type: experience
+content_hash: sha256:ac20f7c43930fd569ee49581a0284cec302a85de0a5295025a9b57d0b28644d0
 ---
 
 These are lessons I carry from documented cases, held as patterns to weigh against a new situation, never as proof a pattern holds here.

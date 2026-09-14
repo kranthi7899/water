@@ -47,5 +47,5 @@ func (f *Fake) Run(ctx context.Context, req Request) (Response, error) {
 	if f.Reply != nil {
 		text = f.Reply(req)
 	}
-	return Response{Text: text, Raw: text, Metered: f.Avail.Metered, Backend: f.FakeName}, nil
+	return Response{Text: text, Raw: text, Metered: f.Avail.Metered, Backend: f.FakeName, AttachmentsDelivered: len(req.Attachments) > 0}, nil
 }

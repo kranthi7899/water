@@ -2,16 +2,17 @@
 
 Persona content, embedded into the binary at build time (`//go:embed all:agents` in `embed.go`).
 
-Each subdirectory with a valid `role.yaml` is a role. Adding a role is adding a folder.
+Each subdirectory with a valid `role.yaml` is a role. Adding a role is adding a folder (and,
+optionally, `themes/<slug>.yaml` for its look).
 
     agents/<slug>/
-      role.yaml            manifest (schema 1)
-      soul.md              always loaded — identity, mission framing
+      role.yaml            manifest: role_id, capability manifest, backend/model, tools grant
+      soul.md              always loaded — identity, mission framing, place in the run
       experience.md        always loaded — distilled first-person prose (uncited)
       .index.json          hidden sentence→source-record index for experience.md
-      skills/<slug>/SKILL.md   contextually loaded reasoning procedures
-      memory/session.md    seed for the per-role bounded memory (copied to ~/.water/memory on first use)
+      skills/<name>/SKILL.md   Anthropic-schema skills, loaded by description match
+      memory/session.md    seed for the per-role bounded memory (copied to ~/.water/memory)
 
-Phase 1 shipped these blank. Phase 2 (2026-09-14) wrote soul.md/experience.md/.index.json for all
-four roles (ceo, coo, cto, design), adapted from verified persona-research content in a sibling
-project (`~/twin`).
+Every persona file carries `role_id`, `file_type` and `content_hash` in its frontmatter and is
+verified against its folder's `role.yaml` at load. Edit with `water persona edit` (which re-stamps
+and journals) or run `water persona sign --no-signature` after a manual edit.

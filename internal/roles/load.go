@@ -28,11 +28,25 @@ func (e *LoadError) Error() string {
 // ErrNoRoles is returned when the agents tree contains no valid role.
 var ErrNoRoles = errors.New("no roles discovered")
 
+// LoadOptions carry the identity-verification inputs (Part 3A).
+type LoadOptions struct {
+	// Key is the machine keyring (nil = no signature verification).
+	Key []byte
+	// RequireSignatures makes unsigned stamped files fail. Set when roles come
+	// from a real local agents directory and a keyring exists.
+	RequireSignatures bool
+}
+
 // Load scans every top-level directory of src for a role.yaml, validates the
 // set, and binds each role's memory. It fails LOUDLY at startup if two roles
-// declare singleton, a slug collides, a manifest is invalid, or no
-// orchestrator exists.
+// declare singleton, a slug collides, a manifest is invalid, a persona file's
+// identity does not match its folder, or no orchestrator exists.
 func Load(src persona.Source, mem memory.Provider) (*Registry, error) {
+	return LoadWith(src, mem, LoadOptions{})
+}
+
+// LoadWith is Load with identity options.
+func LoadWith(src persona.Source, mem memory.Provider, opts LoadOptions) (*Registry, error) {
 	fsys := src.FS()
 	entries, err := fs.ReadDir(fsys, ".")
 	if err != nil {
@@ -58,7 +72,7 @@ func Load(src persona.Source, mem memory.Provider) (*Registry, error) {
 			problems = append(problems, fmt.Sprintf("slug %q declared by more than one folder", m.Slug))
 			continue
 		}
-		p, err := persona.Load(fsys, e.Name(), m.Slug)
+		p, err := persona.Load(fsys, e.Name(), m.Slug, persona.Identity{RoleID: m.RoleID, Key: opts.Key, RequireSig: opts.RequireSignatures})
 		if err != nil {
 			problems = append(problems, fmt.Sprintf("%s: persona: %v", e.Name(), err))
 			continue
@@ -75,6 +89,17 @@ func Load(src persona.Source, mem memory.Provider) (*Registry, error) {
 		}
 		reg.roles = append(reg.roles, r)
 		reg.bySlug[m.Slug] = r
+	}
+	// role_ids must be unique across roles: a duplicated id means a copied folder.
+	seenID := map[string]string{}
+	for _, r := range reg.roles {
+		if r.RoleID == "" {
+			continue
+		}
+		if other, dup := seenID[r.RoleID]; dup {
+			problems = append(problems, fmt.Sprintf("roles %s and %s share role_id %s — one folder was copied from the other", other, r.Slug, r.RoleID))
+		}
+		seenID[r.RoleID] = r.Slug
 	}
 	if len(singletons) > 1 {
 		problems = append(problems, fmt.Sprintf("exactly one role may declare singleton: true; found %v", singletons))

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +16,7 @@ import (
 	"water/internal/memory"
 	"water/internal/orchestrator"
 	"water/internal/surface"
+	"water/internal/theme"
 	"water/internal/voice"
 )
 
@@ -128,16 +130,60 @@ func (a *App) doctorCmd() *cobra.Command {
 				add("traces", "ok", cfg.Telemetry.TraceDir+" (local only; nothing leaves this machine)")
 			}
 
+			// Checkpoints dir.
+			if cfg.Orchestration.Checkpointer == "file" {
+				if err := os.MkdirAll(cfg.Orchestration.CheckpointDir, 0o755); err != nil {
+					add("checkpoints", "fail", err.Error())
+				} else {
+					add("checkpoints", "ok", cfg.Orchestration.CheckpointDir)
+				}
+			} else {
+				add("checkpoints", "warn", "checkpointer is noop; runs cannot be resumed")
+			}
+
+			// Identity keyring + local agents dir.
+			switch {
+			case a.keys() != nil:
+				add("keyring", "ok", filepath.Join(config.Home(), "keyring")+" (persona signatures enforced for --agents-dir)")
+			case a.localAgentsDir() != "":
+				add("keyring", "warn", "no keyring yet; persona files are hash-checked but not signed (created on first `water persona edit`)")
+			default:
+				add("keyring", "ok", "not needed (personas are embedded)")
+			}
+
+			// Tools.
+			switch {
+			case !cfg.Tools.Enabled:
+				add("tools", "ok", "disabled (tools.enabled=false); every role invokes nothing")
+			case len(cfg.RootList()) == 0:
+				add("tools", "warn", "tools.enabled but tools.roots is empty; roles with a tools block can read nothing")
+			default:
+				add("tools", "ok", fmt.Sprintf("read roots: %s (roles: cto, design read-only; no shell)", strings.Join(cfg.RootList(), ", ")))
+			}
+
+			// Themes.
+			if names := theme.Names(a.themes); len(names) == 0 {
+				add("themes", "fail", "no themes embedded")
+			} else {
+				add("themes", "ok", fmt.Sprintf("%s · terminal colour profile %s", strings.Join(names, ", "), theme.EnvProfile()))
+			}
+
+			// Sessions.
+			add("sessions", "ok", fmt.Sprintf("%s (keep %d, max age %s, pinned exempt)", filepath.Join(config.Home(), "sessions"), cfg.Sessions.Keep, cfg.Sessions.MaxAge))
+
 			// Voice.
 			if vp, ok := voice.Open(cfg.Voice.Provider); !ok {
 				add("voice", "fail", fmt.Sprintf("provider %q not registered", cfg.Voice.Provider))
 			} else if !vp.Available() {
-				add("voice", "ok", vp.Name()+" (voice arrives in Phase 4)")
+				add("voice", "warn", voice.Absence(vp))
 			} else {
-				add("voice", "ok", vp.Name())
+				add("voice", "ok", vp.Name()+" (speak only; listen is a documented no-op)")
 			}
-			_ = filepath.Join
-			_ = config.Home
+			if cfg.Onboard.VerifiedAt != "" {
+				add("onboard", "ok", "verified round trip at "+cfg.Onboard.VerifiedAt)
+			} else {
+				add("onboard", "warn", "no verified round trip recorded; run `water onboard`")
+			}
 			return a.printChecks(checks)
 		},
 	}

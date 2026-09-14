@@ -28,6 +28,61 @@ type Config struct {
 	Orchestration OrchestrationConfig `yaml:"orchestration"`
 	Telemetry     TelemetryConfig     `yaml:"telemetry"`
 	API           APIConfig           `yaml:"api"`
+	Sessions      SessionsConfig      `yaml:"sessions"`
+	Tools         ToolsConfig         `yaml:"tools"`
+	Skills        SkillsConfig        `yaml:"skills"`
+	UI            UIConfig            `yaml:"ui"`
+	Onboard       OnboardConfig       `yaml:"onboard"`
+}
+
+// SessionsConfig is transcript retention (Part 4.3): count-based with an age
+// backstop; pinned sessions are exempt.
+type SessionsConfig struct {
+	Keep   int    `yaml:"keep"`
+	MaxAge string `yaml:"max_age"`
+}
+
+// ToolsConfig enables Water's tool layer for roles whose role.yaml declares a
+// tools block, and names the roots they may read. Roots are never inherited
+// from the working directory (Part 5.2).
+type ToolsConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Roots   string `yaml:"roots"` // comma-separated absolute or ~-paths
+}
+
+// SkillsConfig picks the skill selector.
+type SkillsConfig struct {
+	Selector string `yaml:"selector"` // description | keyword
+}
+
+// UIConfig holds interactive-session knobs.
+type UIConfig struct {
+	Theme string `yaml:"theme"` // "" = per-role theme; a name forces one theme
+}
+
+// OnboardConfig records the last verified round trip.
+type OnboardConfig struct {
+	VerifiedAt string `yaml:"verified_at"`
+}
+
+// RootList splits tools.roots.
+func (c *Config) RootList() []string {
+	var out []string
+	for _, r := range strings.Split(c.Tools.Roots, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, Expand(r))
+		}
+	}
+	return out
+}
+
+// SessionMaxAge parses sessions.max_age (0 = disabled).
+func (c *Config) SessionMaxAge() time.Duration {
+	d, err := time.ParseDuration(c.Sessions.MaxAge)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 type BackendConfig struct {
@@ -46,9 +101,14 @@ type VoiceConfig struct {
 }
 
 type OrchestrationConfig struct {
-	Router      string `yaml:"router"`
-	MaxParallel int    `yaml:"max_parallel"`
-	Timeout     string `yaml:"timeout"`
+	Router        string `yaml:"router"`
+	MaxParallel   int    `yaml:"max_parallel"`
+	Timeout       string `yaml:"timeout"`        // whole-run ceiling
+	CallTimeout   string `yaml:"call_timeout"`   // one model call
+	MaxSteps      int    `yaml:"max_steps"`      // hard step budget per run
+	MaxRounds     int    `yaml:"max_rounds"`     // COO assignment rounds (depth cap)
+	Checkpointer  string `yaml:"checkpointer"`   // file | noop
+	CheckpointDir string `yaml:"checkpoint_dir"` // where run snapshots live
 }
 
 type TelemetryConfig struct {
@@ -62,11 +122,20 @@ type APIConfig struct {
 	Model string `yaml:"model,omitempty"`
 }
 
-// TimeoutDuration parses orchestration.timeout.
+// TimeoutDuration parses orchestration.timeout (the whole-run ceiling).
 func (c *Config) TimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(c.Orchestration.Timeout)
 	if err != nil {
-		return 5 * time.Minute
+		return 20 * time.Minute
+	}
+	return d
+}
+
+// CallTimeoutDuration parses orchestration.call_timeout (one model call).
+func (c *Config) CallTimeoutDuration() time.Duration {
+	d, err := time.ParseDuration(c.Orchestration.CallTimeout)
+	if err != nil {
+		return 4 * time.Minute
 	}
 	return d
 }
@@ -99,19 +168,31 @@ func Keys() []string {
 
 func defaults() map[string]string {
 	return map[string]string{
-		"schema":                     strconv.Itoa(CurrentSchema),
-		"backend.preferred":          "auto",
-		"backend.allow_metered":      "false",
-		"memory.provider":            "markdown",
-		"memory.max_entries":         "200",
-		"memory.max_bytes":           "32768",
-		"voice.provider":             "noop",
-		"orchestration.router":       "ceo-fanout",
-		"orchestration.max_parallel": "4",
-		"orchestration.timeout":      "5m",
-		"telemetry.trace_dir":        filepath.Join(Home(), "traces"),
-		"api.key":                    "",
-		"api.model":                  "",
+		"schema":                       strconv.Itoa(CurrentSchema),
+		"backend.preferred":            "auto",
+		"backend.allow_metered":        "false",
+		"memory.provider":              "markdown",
+		"memory.max_entries":           "200",
+		"memory.max_bytes":             "32768",
+		"voice.provider":               "noop",
+		"orchestration.router":         "hierarchy",
+		"orchestration.max_parallel":   "4",
+		"orchestration.timeout":        "20m",
+		"orchestration.call_timeout":   "4m",
+		"orchestration.max_steps":      "24",
+		"orchestration.max_rounds":     "2",
+		"orchestration.checkpointer":   "file",
+		"orchestration.checkpoint_dir": filepath.Join(Home(), "checkpoints"),
+		"telemetry.trace_dir":          filepath.Join(Home(), "traces"),
+		"api.key":                      "",
+		"api.model":                    "",
+		"sessions.keep":                "30",
+		"sessions.max_age":             "2160h",
+		"tools.enabled":                "false",
+		"tools.roots":                  "",
+		"skills.selector":              "description",
+		"ui.theme":                     "",
+		"onboard.verified_at":          "",
 	}
 }
 
@@ -192,14 +273,34 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Orchestration.Router = flat["orchestration.router"]
 	r.Orchestration.MaxParallel = atoi("orchestration.max_parallel")
 	r.Orchestration.Timeout = flat["orchestration.timeout"]
+	r.Orchestration.CallTimeout = flat["orchestration.call_timeout"]
+	r.Orchestration.MaxSteps = atoi("orchestration.max_steps")
+	r.Orchestration.MaxRounds = atoi("orchestration.max_rounds")
+	r.Orchestration.Checkpointer = flat["orchestration.checkpointer"]
+	r.Orchestration.CheckpointDir = Expand(flat["orchestration.checkpoint_dir"])
 	r.Telemetry.TraceDir = Expand(flat["telemetry.trace_dir"])
 	r.API.Key = flat["api.key"]
 	r.API.Model = flat["api.model"]
+	r.Sessions.Keep = atoi("sessions.keep")
+	r.Sessions.MaxAge = flat["sessions.max_age"]
+	r.Tools.Enabled = abool("tools.enabled")
+	r.Tools.Roots = flat["tools.roots"]
+	r.Skills.Selector = flat["skills.selector"]
+	r.UI.Theme = flat["ui.theme"]
+	r.Onboard.VerifiedAt = flat["onboard.verified_at"]
 	if err != nil {
 		return err
 	}
 	if _, e := time.ParseDuration(r.Orchestration.Timeout); e != nil {
 		return fmt.Errorf("orchestration.timeout: %q is not a duration", r.Orchestration.Timeout)
+	}
+	if _, e := time.ParseDuration(r.Orchestration.CallTimeout); e != nil {
+		return fmt.Errorf("orchestration.call_timeout: %q is not a duration", r.Orchestration.CallTimeout)
+	}
+	if r.Sessions.MaxAge != "" && r.Sessions.MaxAge != "0" {
+		if _, e := time.ParseDuration(r.Sessions.MaxAge); e != nil {
+			return fmt.Errorf("sessions.max_age: %q is not a duration", r.Sessions.MaxAge)
+		}
 	}
 	return nil
 }
@@ -207,19 +308,31 @@ func (r *Resolved) apply(flat map[string]string) error {
 // Flat returns the resolved values as dotted keys (for `water config`).
 func (r *Resolved) Flat() map[string]string {
 	return map[string]string{
-		"schema":                     strconv.Itoa(r.Schema),
-		"backend.preferred":          r.Backend.Preferred,
-		"backend.allow_metered":      strconv.FormatBool(r.Backend.AllowMetered),
-		"memory.provider":            r.Memory.Provider,
-		"memory.max_entries":         strconv.Itoa(r.Memory.MaxEntries),
-		"memory.max_bytes":           strconv.Itoa(r.Memory.MaxBytes),
-		"voice.provider":             r.Voice.Provider,
-		"orchestration.router":       r.Orchestration.Router,
-		"orchestration.max_parallel": strconv.Itoa(r.Orchestration.MaxParallel),
-		"orchestration.timeout":      r.Orchestration.Timeout,
-		"telemetry.trace_dir":        r.Telemetry.TraceDir,
-		"api.key":                    mask(r.API.Key),
-		"api.model":                  r.API.Model,
+		"schema":                       strconv.Itoa(r.Schema),
+		"backend.preferred":            r.Backend.Preferred,
+		"backend.allow_metered":        strconv.FormatBool(r.Backend.AllowMetered),
+		"memory.provider":              r.Memory.Provider,
+		"memory.max_entries":           strconv.Itoa(r.Memory.MaxEntries),
+		"memory.max_bytes":             strconv.Itoa(r.Memory.MaxBytes),
+		"voice.provider":               r.Voice.Provider,
+		"orchestration.router":         r.Orchestration.Router,
+		"orchestration.max_parallel":   strconv.Itoa(r.Orchestration.MaxParallel),
+		"orchestration.timeout":        r.Orchestration.Timeout,
+		"orchestration.call_timeout":   r.Orchestration.CallTimeout,
+		"orchestration.max_steps":      strconv.Itoa(r.Orchestration.MaxSteps),
+		"orchestration.max_rounds":     strconv.Itoa(r.Orchestration.MaxRounds),
+		"orchestration.checkpointer":   r.Orchestration.Checkpointer,
+		"orchestration.checkpoint_dir": r.Orchestration.CheckpointDir,
+		"telemetry.trace_dir":          r.Telemetry.TraceDir,
+		"api.key":                      mask(r.API.Key),
+		"api.model":                    r.API.Model,
+		"sessions.keep":                strconv.Itoa(r.Sessions.Keep),
+		"sessions.max_age":             r.Sessions.MaxAge,
+		"tools.enabled":                strconv.FormatBool(r.Tools.Enabled),
+		"tools.roots":                  r.Tools.Roots,
+		"skills.selector":              r.Skills.Selector,
+		"ui.theme":                     r.UI.Theme,
+		"onboard.verified_at":          r.Onboard.VerifiedAt,
 	}
 }
 

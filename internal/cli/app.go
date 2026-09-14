@@ -8,17 +8,21 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/x/term"
 
+	"water/internal/agent"
 	"water/internal/backend"
 	"water/internal/config"
+	"water/internal/identity"
 	"water/internal/memory"
 	"water/internal/persona"
 	"water/internal/roles"
 	"water/internal/surface"
+	"water/internal/tools"
 )
 
 // Exit codes that mean something.
@@ -66,15 +70,19 @@ type globalFlags struct {
 type App struct {
 	flags    globalFlags
 	embedded fs.FS
+	themes   fs.FS
 
-	cfg   *config.Resolved
-	src   persona.Source
-	mem   memory.Provider
-	roles *roles.Registry
+	cfg     *config.Resolved
+	src     persona.Source
+	mem     memory.Provider
+	roles   *roles.Registry
+	keyring *identity.Keyring
+	keyErr  error
 }
 
-// NewApp builds an App around the embedded agents tree (rooted at agents/).
-func NewApp(embedded fs.FS) *App { return &App{embedded: embedded} }
+// NewApp builds an App around the embedded agents tree (rooted at agents/)
+// and the embedded themes tree (rooted at the repo root).
+func NewApp(embedded, themes fs.FS) *App { return &App{embedded: embedded, themes: themes} }
 
 func (a *App) config() (*config.Resolved, error) {
 	if a.cfg != nil {
@@ -96,6 +104,22 @@ func (a *App) config() (*config.Resolved, error) {
 	}
 	a.cfg = cfg
 	return cfg, nil
+}
+
+// localAgentsDir returns the real local agents directory if one is in play:
+// --agents-dir, or ./agents when running from a source checkout. This is the
+// gate for `persona show/edit` (invariant #5: personas stay hidden from end
+// users unless a real local source directory exists).
+func (a *App) localAgentsDir() string {
+	if a.flags.agentsDir != "" {
+		return a.flags.agentsDir
+	}
+	if info, err := os.Stat(filepath.Join("agents", "ceo", "role.yaml")); err == nil && !info.IsDir() {
+		if abs, err := filepath.Abs("agents"); err == nil {
+			return abs
+		}
+	}
+	return ""
 }
 
 func (a *App) source() persona.Source {
@@ -131,7 +155,19 @@ func (a *App) memoryProvider() (memory.Provider, error) {
 	return m, nil
 }
 
+// keys loads the machine keyring once (nil when absent).
+func (a *App) keys() *identity.Keyring {
+	if a.keyring != nil || a.keyErr != nil {
+		return a.keyring
+	}
+	a.keyring, a.keyErr = identity.LoadKeyring(config.Home())
+	return a.keyring
+}
+
 // roleRegistry loads roles, failing loudly on any invariant violation.
+// Signatures are required only when roles come from a real local agents dir
+// (--agents-dir) and a keyring exists; the embedded tree is trusted by virtue
+// of being in the binary and is checked for role_id/content_hash only.
 func (a *App) roleRegistry() (*roles.Registry, error) {
 	if a.roles != nil {
 		return a.roles, nil
@@ -140,7 +176,12 @@ func (a *App) roleRegistry() (*roles.Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	reg, err := roles.Load(a.source(), mem)
+	opts := roles.LoadOptions{}
+	if k := a.keys(); k != nil {
+		opts.Key = k.Key
+		opts.RequireSignatures = a.flags.agentsDir != ""
+	}
+	reg, err := roles.LoadWith(a.source(), mem, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -148,21 +189,77 @@ func (a *App) roleRegistry() (*roles.Registry, error) {
 	return reg, nil
 }
 
-// selectBackend resolves the backend via the single selection function and
-// applies per-backend settings from config.
+// selectBackend resolves the GLOBAL backend via the single selection function.
 func (a *App) selectBackend(ctx context.Context) (backend.Selection, error) {
+	return a.selectBackendFor(ctx, nil)
+}
+
+// selectBackendFor resolves the backend for one role (Part 8): --backend
+// flag → role.yaml backend: → config → auto, all inside backend.Select.
+func (a *App) selectBackendFor(ctx context.Context, role *roles.Role) (backend.Selection, error) {
 	cfg, err := a.config()
 	if err != nil {
 		return backend.Selection{}, err
 	}
 	a.configureBackends(cfg)
-	sel, err := backend.Select(ctx, backend.Default, backend.SelectConfig{
-		Preferred: cfg.Backend.Preferred, AllowMetered: cfg.Backend.AllowMetered,
-	})
+	sc := backend.SelectConfig{Flag: a.flags.backend, AllowMetered: cfg.Backend.AllowMetered}
+	if a.flags.backend == "" {
+		sc.Preferred = cfg.Backend.Preferred
+	}
+	if role != nil {
+		sc.Role, sc.RoleSlug = role.Backend, role.Slug
+	}
+	sel, err := backend.Select(ctx, backend.Default, sc)
 	if err != nil {
 		return sel, exitWith(ExitBackend, err)
 	}
 	return sel, nil
+}
+
+// roleEnv builds the shared agent.Env for a run: per-role backends resolved
+// through Select, per-role models, tool policies, capability manifests, and
+// the configured skill selector. It returns the resolutions for status output.
+type roleResolution struct {
+	Backend string
+	Reason  string
+	Model   string
+	Tools   []string
+}
+
+func (a *App) roleEnv(ctx context.Context, reg *roles.Registry, def backend.Selection) (agent.Env, map[string]roleResolution, error) {
+	cfg, err := a.config()
+	if err != nil {
+		return agent.Env{}, nil, err
+	}
+	env := agent.Env{Backend: def.Backend, Timeout: cfg.CallTimeoutDuration(), RoleBackends: map[string]backend.Backend{}, RoleModels: map[string]string{}, RoleTools: map[string]*tools.Policy{}, Manifests: map[string]string{}}
+	if sel, ok := persona.Selectors()[cfg.Skills.Selector]; ok {
+		env.Selector = sel
+	}
+	res := map[string]roleResolution{}
+	for _, r := range reg.All() {
+		rr := roleResolution{Backend: def.Backend.Name(), Reason: def.Reason, Model: r.Model}
+		if r.Backend != "" {
+			sel, err := a.selectBackendFor(ctx, r)
+			if err != nil {
+				return agent.Env{}, nil, fmt.Errorf("role %s: %w", r.Slug, err)
+			}
+			env.RoleBackends[r.Slug] = sel.Backend
+			rr.Backend, rr.Reason = sel.Backend.Name(), sel.Reason
+		}
+		if r.Model != "" {
+			env.RoleModels[r.Slug] = r.Model
+		}
+		if cfg.Tools.Enabled && r.Tools != nil {
+			pol := tools.FromGrant(r.Slug, r.RoleID, r.Tools, cfg.RootList())
+			if !pol.Empty() {
+				env.RoleTools[r.Slug] = pol
+				rr.Tools = pol.ToolNames()
+			}
+		}
+		env.Manifests[r.Slug] = r.Capability.Render(r.Slug, r.Name)
+		res[r.Slug] = rr
+	}
+	return env, res, nil
 }
 
 func (a *App) configureBackends(cfg *config.Resolved) {
@@ -171,6 +268,7 @@ func (a *App) configureBackends(cfg *config.Resolved) {
 	if b, ok := backend.Default.Get(backend.ClaudeSubscriptionName); ok {
 		if c, ok := b.(*backend.ClaudeSubscription); ok {
 			c.WorkDir = home
+			c.ScratchDir = filepath.Join(home, "tmp")
 		}
 	}
 	if b, ok := backend.Default.Get(backend.CodexSubscriptionName); ok {

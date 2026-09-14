@@ -43,6 +43,9 @@ func (a *API) model() string {
 	return "claude-opus-5"
 }
 
+func (a *API) SupportsAttachments() bool { return false }
+func (a *API) SupportsTools() bool       { return false }
+
 func (a *API) base() string {
 	if a.BaseURL != "" {
 		return strings.TrimRight(a.BaseURL, "/")
@@ -97,11 +100,21 @@ func (a *API) Run(ctx context.Context, req Request) (Response, error) {
 	if key == "" {
 		return Response{}, fmt.Errorf("api backend: no API key configured")
 	}
+	model := req.Model
+	if model == "" {
+		model = a.model()
+	}
+	prompt := req.Prompt
+	for _, at := range req.Attachments {
+		if at.Kind == "text" {
+			prompt += "\n\n" + InlineTextAttachment(at)
+		}
+	}
 	body, _ := json.Marshal(apiRequest{
-		Model:     a.model(),
+		Model:     model,
 		MaxTokens: 16000,
 		System:    req.System,
-		Messages:  []apiMessage{{Role: "user", Content: req.Prompt}},
+		Messages:  []apiMessage{{Role: "user", Content: prompt}},
 	})
 	timeout := req.Timeout
 	if timeout <= 0 {
@@ -128,7 +141,7 @@ func (a *API) Run(ctx context.Context, req Request) (Response, error) {
 	}
 	defer hres.Body.Close()
 	raw, _ := io.ReadAll(hres.Body)
-	resp := Response{Raw: string(raw), Metered: true, Backend: a.Name(), Duration: time.Since(start)}
+	resp := Response{Raw: string(raw), Metered: true, Backend: a.Name(), Model: model, Duration: time.Since(start)}
 
 	var ar apiResponse
 	if jerr := json.Unmarshal(raw, &ar); jerr != nil {

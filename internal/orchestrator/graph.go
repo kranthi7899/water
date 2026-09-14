@@ -33,6 +33,7 @@ type Hooks struct {
 	StepStarted  func(step int, nodes []string)
 	NodeStarted  func(role string)
 	NodeFinished func(role string, dur time.Duration, err error)
+	Checkpointed func(step int)
 }
 
 // Executor runs a Graph to completion.
@@ -47,6 +48,10 @@ type Executor struct {
 // ErrNoCheckpoint is returned by Load when nothing is stored.
 var ErrNoCheckpoint = errors.New("no checkpoint for run")
 
+// ErrStalled is returned when a superstep completes without changing the
+// outbox or final output, so the router would schedule the same nodes again.
+var ErrStalled = errors.New("run stalled: a step produced no new messages")
+
 // NodeError wraps a failure in a specific node.
 type NodeError struct {
 	Role string
@@ -59,6 +64,10 @@ func (e *NodeError) Unwrap() error { return e.Err }
 // Run executes the graph starting from the router's Entry. The brief is
 // injected as an AgentMessage from "user" to the entry node if the outbox is
 // empty, so even the entry role receives context only through its inbox.
+//
+// A checkpoint is saved after every superstep. When a node fails mid-step the
+// checkpoint is still saved, so completed sibling writes survive and a resume
+// re-executes only the failed node (the router derives phase from visits).
 func (e *Executor) Run(ctx context.Context, g *Graph, s *State) error {
 	if g.Router == nil {
 		return errors.New("graph has no router")
@@ -84,10 +93,14 @@ func (e *Executor) Run(ctx context.Context, g *Graph, s *State) error {
 		cp = NoopCheckpointer{}
 	}
 	if len(s.Messages()) == 0 && s.Brief != "" {
-		s.AppendMessage(AgentMessage{From: UserSender, To: g.Router.Entry(), Topic: TopicBrief, Payload: s.Brief})
+		if _, err := s.AppendMessage(AgentMessage{From: UserSender, To: g.Router.Entry(), Topic: TopicBrief, Payload: s.Brief}); err != nil {
+			return err
+		}
 	}
 
-	for step := 1; ; step++ {
+	step := s.StepCount()
+	for {
+		step++
 		if step > maxSteps {
 			return fmt.Errorf("router %s exceeded %d steps without completing", g.Router.Name(), maxSteps)
 		}
@@ -103,11 +116,29 @@ func (e *Executor) Run(ctx context.Context, g *Graph, s *State) error {
 		if e.Hooks.StepStarted != nil {
 			e.Hooks.StepStarted(step, next)
 		}
-		if err := e.runStep(ctx, g, s, next, par); err != nil {
-			return err
-		}
+		before := len(s.Messages())
+		_, hadFinal := s.FinalOutput()
+		stepErr := e.runStep(ctx, g, s, next, par)
+		s.setStep(step, g.Router.Next(s))
 		if err := cp.Save(ctx, s); err != nil {
+			if stepErr != nil {
+				return fmt.Errorf("%w (and checkpoint failed: %v)", stepErr, err)
+			}
 			return fmt.Errorf("checkpoint: %w", err)
+		}
+		if e.Hooks.Checkpointed != nil {
+			e.Hooks.Checkpointed(step)
+		}
+		if stepErr != nil {
+			return stepErr
+		}
+		_, hasFinal := s.FinalOutput()
+		if len(s.Messages()) == before && hasFinal == hadFinal {
+			// Nothing changed: the router would schedule the same set again.
+			// Ask it once more; if it still wants to run, declare a stall.
+			if again := g.Router.Next(s); len(again) > 0 {
+				return fmt.Errorf("%w after step %d (nodes %s)", ErrStalled, step, strings.Join(next, ","))
+			}
 		}
 	}
 }
@@ -132,7 +163,11 @@ func (e *Executor) runStep(ctx context.Context, g *Graph, s *State, nodes []stri
 			}
 			start := time.Now()
 			err := e.safeRun(ctx, g.Nodes[name], s)
-			s.markVisited(name)
+			if err == nil {
+				// Only a completed node counts as visited; a failed node is
+				// re-executed on resume.
+				s.markVisited(name)
+			}
 			if e.Hooks.NodeFinished != nil {
 				e.Hooks.NodeFinished(name, time.Since(start), err)
 			}

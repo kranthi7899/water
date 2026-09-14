@@ -62,12 +62,39 @@ func (r *Registry) All() []Backend {
 var Default = NewRegistry()
 
 // SelectConfig is the slice of configuration that drives selection.
+//
+// Part 8 precedence, highest first: --backend flag → role.yaml backend: →
+// config file default → first available non-metered → metered only if
+// AllowMetered. Callers fill Flag/Role/Config; Select resolves them here and
+// nowhere else.
 type SelectConfig struct {
 	// Preferred is an explicit backend name, or "auto" / "" for precedence.
+	// (Legacy single-source field; equivalent to Config below.)
 	Preferred string
+	// Flag is the --backend flag value ("" = unset).
+	Flag string
+	// Role is the role.yaml backend: value ("" = inherit).
+	Role string
+	// RoleSlug names the role being resolved, for the reason string.
+	RoleSlug string
 	// AllowMetered permits falling back to a backend whose Availability.Metered
 	// is true. Default false.
 	AllowMetered bool
+}
+
+// preferred resolves the effective explicit preference and its source.
+func (c SelectConfig) preferred() (string, string) {
+	norm := func(s string) string { return strings.TrimSpace(strings.ToLower(s)) }
+	if v := norm(c.Flag); v != "" && v != "auto" {
+		return v, "--backend flag"
+	}
+	if v := norm(c.Role); v != "" && v != "auto" {
+		return v, "role.yaml backend: (" + c.RoleSlug + ")"
+	}
+	if v := norm(c.Preferred); v != "" && v != "auto" {
+		return v, "config backend.preferred"
+	}
+	return "", "auto"
 }
 
 // Selection is the result of Select, including why the backend was chosen.
@@ -75,6 +102,7 @@ type Selection struct {
 	Backend      Backend
 	Availability Availability
 	Reason       string
+	Source       string // which layer decided: flag | role | config | auto
 }
 
 // ErrNoBackend is returned when nothing usable is available.
@@ -93,20 +121,20 @@ var ErrMeteredRefused = errors.New("only metered backends are available and back
 // An explicit metered preference is still refused unless AllowMetered is set;
 // a user must opt into paying twice, never fall into it.
 func Select(ctx context.Context, reg *Registry, cfg SelectConfig) (Selection, error) {
-	pref := strings.TrimSpace(strings.ToLower(cfg.Preferred))
-	if pref != "" && pref != "auto" {
+	pref, source := cfg.preferred()
+	if pref != "" {
 		b, ok := reg.Get(pref)
 		if !ok {
-			return Selection{}, fmt.Errorf("backend %q is not registered (known: %s)", pref, strings.Join(reg.Names(), ", "))
+			return Selection{}, fmt.Errorf("backend %q (from %s) is not registered (known: %s)", pref, source, strings.Join(reg.Names(), ", "))
 		}
 		av := b.Available(ctx)
 		if !av.Usable() {
-			return Selection{}, fmt.Errorf("backend %q is not usable: %s", pref, av.Detail)
+			return Selection{}, fmt.Errorf("backend %q (from %s) is not usable: %s", pref, source, av.Detail)
 		}
 		if av.Metered && !cfg.AllowMetered {
-			return Selection{}, fmt.Errorf("backend %q is metered: %w", pref, ErrMeteredRefused)
+			return Selection{}, fmt.Errorf("backend %q (from %s) is metered: %w", pref, source, ErrMeteredRefused)
 		}
-		return Selection{Backend: b, Availability: av, Reason: "explicit preference"}, nil
+		return Selection{Backend: b, Availability: av, Reason: "explicit preference via " + source, Source: source}, nil
 	}
 
 	var meteredCandidate *Selection
@@ -118,10 +146,10 @@ func Select(ctx context.Context, reg *Registry, cfg SelectConfig) (Selection, er
 			continue
 		}
 		if !av.Metered {
-			return Selection{Backend: b, Availability: av, Reason: "first available non-metered backend"}, nil
+			return Selection{Backend: b, Availability: av, Reason: "first available non-metered backend", Source: "auto"}, nil
 		}
 		if meteredCandidate == nil {
-			meteredCandidate = &Selection{Backend: b, Availability: av, Reason: "metered fallback (allow_metered=true)"}
+			meteredCandidate = &Selection{Backend: b, Availability: av, Reason: "metered fallback (allow_metered=true)", Source: "auto"}
 		}
 	}
 	if meteredCandidate != nil {

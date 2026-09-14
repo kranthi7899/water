@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"water/internal/orchestrator"
+	"water/internal/tools"
 )
 
 // Event is one JSONL line.
 type Event struct {
 	At         time.Time                  `json:"at"`
-	Type       string                     `json:"type"` // run_started, node_started, node_finished, backend_call, message, run_finished, error
+	Type       string                     `json:"type"` // run_started, node_started, node_finished, backend_call, message, tool_call, prompt_assembled, checkpoint, run_finished, error
 	RunID      string                     `json:"run_id"`
 	Role       string                     `json:"role,omitempty"`
 	Backend    string                     `json:"backend,omitempty"`
@@ -27,6 +28,11 @@ type Event struct {
 	Message    *orchestrator.AgentMessage `json:"message,omitempty"`
 	Text       string                     `json:"text,omitempty"`
 	Error      string                     `json:"error,omitempty"`
+	Tool       *tools.Event               `json:"tool,omitempty"`
+	Skills     []string                   `json:"skills,omitempty"`
+	MemoryIDs  []string                   `json:"memory_ids,omitempty"`
+	InboxIDs   []string                   `json:"inbox_ids,omitempty"`
+	Step       int                        `json:"step,omitempty"`
 }
 
 // RoleTiming is per-role wall time and call count.
@@ -46,6 +52,8 @@ type Stats struct {
 	OutputTokens int           `json:"output_tokens"`
 	Wall         time.Duration `json:"wall_ns"`
 	Messages     int           `json:"messages"`
+	ToolCalls    int           `json:"tool_calls"`
+	ToolDenials  int           `json:"tool_denials"`
 	Roles        []RoleTiming  `json:"roles"`
 	TracePath    string        `json:"trace_path,omitempty"`
 }
@@ -191,4 +199,30 @@ func (r *Recorder) Stats() Stats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.stats
+}
+
+// ToolCall records one traced tool invocation (Part 5.6).
+func (r *Recorder) ToolCall(ev tools.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := ev
+	r.emit(Event{Type: "tool_call", Role: ev.Role, Tool: &e, DurationMS: ev.DurationMS, Error: ev.Error})
+	r.stats.ToolCalls++
+	if !ev.Allowed {
+		r.stats.ToolDenials++
+	}
+}
+
+// PromptAssembled records the traceability inputs of one prompt (`/why`).
+func (r *Recorder) PromptAssembled(role string, skills, memoryIDs, inboxIDs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.emit(Event{Type: "prompt_assembled", Role: role, Skills: skills, MemoryIDs: memoryIDs, InboxIDs: inboxIDs})
+}
+
+// Checkpoint records that a durable checkpoint was written.
+func (r *Recorder) Checkpoint(step int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.emit(Event{Type: "checkpoint", Step: step})
 }

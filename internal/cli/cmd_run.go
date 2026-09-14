@@ -10,20 +10,20 @@ import (
 	"github.com/spf13/cobra"
 
 	"water/internal/agent"
+	"water/internal/backend"
+	"water/internal/chat"
 	"water/internal/orchestrator"
 	"water/internal/trace"
 	"water/internal/voice"
 )
 
 func (a *App) runCmd() *cobra.Command {
-	return &cobra.Command{
+	var attach []string
+	c := &cobra.Command{
 		Use:   "run <role> [prompt]",
-		Short: "Single-role session, bypasses the graph",
+		Short: "Single-role turn, bypasses the graph (use `water chat` for a session)",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if a.flags.voice {
-				return exitWith(ExitUsage, voice.ErrUnavailable)
-			}
 			cfg, err := a.config()
 			if err != nil {
 				return err
@@ -46,12 +46,16 @@ func (a *App) runCmd() *cobra.Command {
 				return exitWith(ExitUsage, errors.New("empty prompt"))
 			}
 			ctx := context.Background()
-			sel, err := a.selectBackend(ctx)
+			def, err := a.selectBackend(ctx)
 			if err != nil {
 				return err
 			}
-			if w := meteredLeakWarning(sel); w != "" && !a.jsonMode() {
+			if w := meteredLeakWarning(def); w != "" && !a.jsonMode() {
 				fmt.Fprintln(os.Stderr, "warning:", w)
+			}
+			env, _, err := a.roleEnv(ctx, reg, def)
+			if err != nil {
+				return exitWith(ExitBackend, err)
 			}
 			runID := orchestrator.NewRunID()
 			rec, err := trace.New(cfg.Telemetry.TraceDir, runID)
@@ -59,12 +63,20 @@ func (a *App) runCmd() *cobra.Command {
 				return err
 			}
 			sf := a.surfaces()
+			env.Surface, env.Trace = sf, rec
 			sf.RunStarted(runID, prompt)
 			rec.RunStarted(prompt)
 			sf.NodeStarted(role.Slug)
 			rec.NodeStarted(role.Slug)
-			env := agent.Env{Backend: sel.Backend, Surface: sf, Trace: rec, Timeout: runTimeout(cfg)}
-			resp, _, err := agent.RunSingle(ctx, role, env, prompt)
+			var atts []backend.Attachment
+			for _, p := range attach {
+				at, err := chat.LoadAttachment(p)
+				if err != nil {
+					return exitWith(ExitUsage, err)
+				}
+				atts = append(atts, at)
+			}
+			resp, _, err := agent.RunTurn(ctx, role, env, nil, prompt, atts)
 			rec.NodeFinished(role.Slug, resp.Duration, err)
 			if err != nil {
 				sf.NodeFailed(role.Slug, err)
@@ -74,7 +86,16 @@ func (a *App) runCmd() *cobra.Command {
 			}
 			sf.NodeFinished(role.Slug, resp)
 			sf.RunFinished(resp.Text, rec.Finish())
+			if a.flags.voice {
+				if vp, ok := voice.Open(cfg.Voice.Provider); ok && vp.Available() {
+					_ = vp.Speak(ctx, resp.Text)
+				} else if ok {
+					fmt.Fprintln(os.Stderr, "voice:", voice.Absence(vp))
+				}
+			}
 			return nil
 		},
 	}
+	c.Flags().StringArrayVar(&attach, "attach", nil, "attach a file (image, PDF, or text) to this turn; repeatable")
+	return c
 }

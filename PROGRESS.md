@@ -5,91 +5,72 @@ each work session rather than trusting memory or git history alone.
 
 ---
 
-## Status: Phase 1 (skeleton) — COMPLETE — 2026-09-13
+## Status: Phase 3 (master build v2) — COMPLETE — 2026-09-14
 
-Every interface from the build plan exists with at least one working implementation. Personas
-are deliberately blank (Phase 2 work). All Phase 1 gates pass against a real Claude Pro
-subscription.
+Everything in the master build prompt is built: input editor, slash commands, sessions, skills,
+identity binding, auth, hierarchy orchestration, tool layer (MCP), attachments, voice, dashboard,
+distribution, visual design system, per-role backends. All 25 gate/guard tests pass. Decisions,
+investigation findings and the Part 10 answers are in `docs/decisions.md`.
 
 ### What was built
 
-| Area | Package | Contents |
+| Part | Package(s) | Contents |
 |---|---|---|
-| Backends | `internal/backend` | `Backend` interface, `Registry` + single `Select()` precedence function, `ClaudeSubscription`, `CodexSubscription`, `API` (metered), env-scrubbing (`ScrubbedEnv`/`LeakedKeys`), runtime `--help` flag detection, `Fake` for tests |
-| Persona | `internal/persona` | `Source` (Embedded/Dir/Overlay), frontmatter parsing, `Skill` discovery + `SkillSelector` (keyword default), hidden `.index.json` traceability index |
-| Roles | `internal/roles` | folder discovery, manifest validation, singleton/orchestrator invariants enforced at load, memory scoping |
-| Memory | `internal/memory` | `Provider` interface, `Scoped` binding (no role parameter anywhere on it), bounds (`ErrBoundsExceeded`, never silent truncation), `Markdown` provider (Hermes pattern) |
-| Orchestrator | `internal/orchestrator` | mutex-guarded `State`, `AgentMessage` outbox, `Executor` (bounded parallelism, step guard), `CEOFanoutRouter` (visit-count driven, checkpoint-resumable), `NoopCheckpointer` |
-| Agent node | `internal/agent` | the one place prompts are assembled; enforces memory isolation and inbox filtering |
-| Surfaces | `internal/surface` | `Surface` interface, `Terminal` (lipgloss, etched visual identity), `JSON` |
-| Config | `internal/config` | layered (defaults → file → env → flags) with per-key provenance, schema migration stub |
-| Tracing | `internal/trace` | JSONL per-run trace, end-of-run `Stats` (metered call count must be 0 under defaults) |
-| Voice | `internal/voice` | `Provider` interface, `Noop` only |
-| CLI | `internal/cli` | full cobra tree: `onboard`, `doctor`, `status`, `run`, `orchestrate`, `memory`, `config`, `version`; hidden stubs for `voice`/`dashboard` |
-| Guards | `internal/guards` | the three required guard tests, written before final wiring |
+| 3A identity | `internal/identity`, `persona`, `roles` | role_id UUID in role.yaml; role_id/file_type/content_hash stamped in every persona file; HMAC keyring at `~/.water/keyring`; `water persona show/edit/sign/verify`; git-backed journal at `~/.water/persona-journal` |
+| 3B auth | `internal/auth`, `cli/cmd_onboard` | `claude login` / `codex login` launched with inherited stdio, headless fallbacks; success gated on one real round trip; `onboard.verified_at` recorded |
+| 3C checkpointer | `orchestrator/checkpoint.go` | `FileCheckpointer` (atomic JSON per run), save after every superstep and on node failure, `--resume <id>`, `--list` |
+| 3D voice | `internal/voice/os.go` | `say` / `spd-say` / `espeak`; Listen is a documented no-op; `--voice` on chat/run |
+| 3E dashboard | `internal/dashboard` | read-only HTTP: runs, outbox graph, timings, diagnostics, tool calls with decisions, persona file status; non-GET → 405 |
+| 3F distribution | `.goreleaser.yaml`, `install.sh`, `.github/workflows` | darwin/linux × amd64/arm64; curl-bash installer with checksum check; CI on push, release on tag |
+| 4.1 editor | `internal/editor` | Bubble Tea v2 + Bubbles v2 textarea behind `InputEditor`; uniseg cell math; Ctrl+J newline, Enter submit, Shift+Enter only after Kitty detection |
+| 4.2 commands | `internal/chat/commands.go` | `/clear /compact /resume /delete /name /model /backend /status /help /quit /consult /switch /remember /why /skills /flag /attach /editor /agents` |
+| 4.3 sessions | `internal/session` | per-role JSONL; count+age retention, pinned exempt; tail-bounded Open so compaction never loads the whole file; manual promotion only |
+| 4.4 skills | `persona/skills.go`, `agents/*/skills` | Anthropic SKILL.md schema enforced; 22 skills restructured from the twin frameworks; `DescriptionSelector` default |
+| 5 tools | `internal/tools`, `backend/claude.go`, `cli/cmd_mcp.go` | policy, root confinement (`..`, symlinks), MCP stdio server (`water mcp-serve`), `--tools "" --strict-mcp-config --mcp-config`, traced decisions, untrusted marking, macOS sandbox profile for the (unused) shell tool; attachments via stream-json |
+| 6 orchestration | `orchestrator/edges.go`, `router_hierarchy.go`, `agent/node.go`, `diagnose` | permission-graph DAG, hierarchy router with rounds/steps/stall bounds, CEO answers alone, mechanical verbatim forwarding, epistemic status marks, capability manifests in role.yaml, seven diagnostics + `water diagnose` |
+| 7 design | `internal/theme`, `internal/layout`, `themes/`, `chat/tui.go` | five theme YAMLs, colour degradation, deterministic regions, hero box fixed per size, agent picker |
+| 8 backends | `backend/registry.go`, `cli/app.go` | per-role `backend:`/`model:` resolved inside `Select` (flag → role.yaml → config → auto); `water status` shows each role's backend and why |
 
-~5,400 lines of Go. Module name: `water`. Entry point: `cmd/water/main.go`. Agents tree is
-`//go:embed`-ed via `embed.go` at the repo root.
-
-### Gate results (Part 13, Phase 1 checklist)
-
-All run under a temporary `$WATER_HOME` (deleted after), against the real `claude` CLI logged
-in with a Claude Pro subscription. `codex` is not installed on this machine.
+### Gate results (real `claude` CLI, Claude Pro, fresh `$WATER_HOME` each)
 
 | Gate | Result |
 |---|---|
-| `go build` produces a working binary; `water --help` lists the full tree | ✅ |
-| `onboard` detects claude (Pro, logged in) / codex (absent) correctly | ✅ |
-| `doctor` warns when `ANTHROPIC_API_KEY` is exported alongside a subscription backend | ✅ |
-| `run ceo "hello"` completes a round trip via claude-subscription | ✅ (3.4s, 0 metered) |
-| `orchestrate "<brief>"` runs ceo → parallel fan-out → ceo synthesis → prints FinalOutput | ✅ (5 calls, 0 metered, 7 messages traced) |
-| Adding a 5th dummy role folder is picked up by `water status` with zero code changes | ✅ (via `--agents-dir`) |
-| Two `singleton: true` roles fails loudly at load | ✅ |
-| Run summary reports 0 metered calls under default config | ✅ |
-| All three guard tests pass | ✅ |
+| `go test ./...` — all guard and gate tests | ✅ 25 tests across 16 packages |
+| `water onboard`: detect → verify round trip → config | ✅ (2.7s, 0 metered) |
+| MCP tool path: CTO reads a file under a declared root; trace has `tool_call` with decision+basis | ✅ |
+| CEO (no tools block) reports NONE | ✅ |
+| Image attachment via stream-json; text memo with injected instruction treated as data | ✅ |
+| `water chat cto` through a pty: header, hero, `/status`, `/help`, `/quit` | ✅ |
+| Hierarchy run: CEO delegated → COO wrote two specific assignments → CTO delivered | ✅ (Design hit the old 5m run ceiling → checkpoint saved) |
+| `--resume` schedules only the unfinished node | ✅ (verified: only `design` / only `coo` ran on resume) |
+| `water diagnose`, `water dashboard` over real traces; POST → 405 | ✅ |
+| Codex backend | ⚠ not installed here; MCP tools on codex deliberately unwired |
+| `goreleaser` / `install.sh` end-to-end | ⚠ no release tag yet; config and script parse |
 
-### Fixes made during verification
+### Bugs found by real runs and fixed during the campaign
 
-- **Connector leakage**: the first real `orchestrate` run showed delegate subprocesses could see
-  the user's Drive/Gmail/Calendar MCP connectors through the `claude` CLI. Fixed by adding
-  `--strict-mcp-config` to the subprocess args in `internal/backend/claude.go`. Re-verified: no
-  connector mentions in the trace afterward.
-- **TTY detection**: switched from a raw `os.ModeCharDevice` check to
-  `github.com/charmbracelet/x/term.IsTerminal` for correctness across platforms.
-- **Message tracing**: added `State.Observe(fn)` so trace/surface hooks subscribe to
-  `AppendMessage` directly instead of the CLI re-walking `State.Messages()` after the fact.
-- **Token accounting**: `claude`'s JSON result usage includes `cache_read_input_tokens` /
-  `cache_creation_input_tokens`; both are now folded into `Response.InputTokens`.
+- COO could not see the brief (only the CEO's summary) → Water now appends the brief verbatim
+  under the CEO's direction.
+- Hub nodes marked their inbox consumed before the backend call; a failure then made a resumed
+  run look finished → consume-after-success, plus a restore-time repair; `TestResumeAfterHubFailure`.
+- One `orchestration.timeout` governed both a single call and the whole run; a six-call run hit
+  the 5m ceiling → `call_timeout` (4m) and run `timeout` (20m) are separate.
+- A tool-less CTO emitted tool-call XML as text → every prompt now states exactly which tools
+  exist (or that none do).
+- Hero art sized the hero box, moving CHAT between themes → fixed hero box per terminal size.
 
-### Known gaps / deliberately deferred (per spec, not forgotten)
+### Environment notes
 
-- Not yet a git repository — nothing has been committed.
-- `agent-sdk`/goreleaser/`install.sh` (Phase 6) — not started.
-- Voice `OSProvider`, dashboard, resumable checkpointer — interfaces exist, implementations are
-  Phase 4/5 work.
-- Persona content (`soul.md`, `experience.md`, `.index.json` entries, skills) is entirely blank —
-  this is Phase 2, explicitly out of scope for the engineering build.
+- Go at `/opt/homebrew/bin/go` (`export PATH=/opt/homebrew/bin:$PATH`). Module `water`, Go 1.27.
+- Dev loop: `go build -o bin/water ./cmd/water && ./bin/water doctor`; tests `go test ./...`.
+- Real runs under a scratch home: `WATER_HOME=$(mktemp -d) ./bin/water onboard --no-picker`.
+- Persona files must be re-stamped after a manual edit: `./bin/water persona sign --no-signature`.
+- Subscription session limits are real: a five-hour window ran out mid-campaign; runs checkpoint
+  and resume cleanly across it.
 
----
+## Next up
 
-## Next up: Phase 2 — persona content pass (no engineering)
-
-Per the build plan: write `soul.md` / `experience.md` for **CEO first**, build its `.index.json`
-traceability mapping, author its first two skills, and write the CEO's understanding of its own
-orchestration role into its `soul.md`. Gate: CEO produces role-appropriate output on five
-held-out prompts, traceable via the hidden index, before any other role's content is written.
-
-Do not touch the separate Python decide-then-ground memo pipeline — unrelated, out of scope
-permanently.
-
----
-
-## Environment notes (for whoever picks this up)
-
-- Go was not preinstalled; installed via Homebrew on 2026-09-13.
-  `go` lives at `/opt/homebrew/bin/go`, which is **not** on this shell's default `PATH` — prefix
-  commands with `export PATH=/opt/homebrew/bin:$PATH`.
-- `codex` CLI is not installed on this machine; only the `claude` CLI backend has been exercised
-  end-to-end.
-- Local dev loop: `go build -o bin/water ./cmd/water && ./bin/water doctor`. Test suite:
-  `go test ./...`.
+- Verify the Codex path on a machine with `codex` (MCP via `-c mcp_servers.*`, `--image`).
+- Linux Landlock for the shell tool before any role is granted shell.
+- Cut `v0.1.0` and enable the Homebrew tap in `.goreleaser.yaml`.
+- Persona content pass on the Danone/Mylan CEO entry (see `docs/decisions.md` Q3).

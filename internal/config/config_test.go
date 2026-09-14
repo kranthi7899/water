@@ -21,7 +21,7 @@ func TestLayersAndProvenance(t *testing.T) {
 		"backend.preferred":     {"codex-subscription", LayerFile},
 		"memory.max_entries":    {"75", LayerEnv},
 		"backend.allow_metered": {"true", LayerFlag},
-		"orchestration.router":  {"ceo-fanout", LayerDefault},
+		"orchestration.router":  {"hierarchy", LayerDefault},
 	}
 	flat := r.Flat()
 	for k, want := range cases {

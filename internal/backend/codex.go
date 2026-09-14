@@ -25,6 +25,29 @@ func init() { Default.Register(&CodexSubscription{}) }
 
 func (c *CodexSubscription) Name() string { return CodexSubscriptionName }
 
+// SupportsAttachments: images via --image when the installed codex has it.
+func (c *CodexSubscription) SupportsAttachments() bool { return true }
+
+// SupportsTools: codex can load MCP servers from config (-c mcp_servers.*),
+// but that path is NOT wired in this build because it could not be verified
+// on a machine without codex. Roles with tools on this backend get none, and
+// the call proceeds without them.
+func (c *CodexSubscription) SupportsTools() bool { return false }
+
+func extFor(mt string) string {
+	switch mt {
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	}
+	return ".bin"
+}
+
 func (c *CodexSubscription) bin() string {
 	if c.Bin != "" {
 		return c.Bin
@@ -86,8 +109,35 @@ func (c *CodexSubscription) Run(ctx context.Context, req Request) (Response, err
 	if fs["--color"] {
 		args = append(args, "--color", "never")
 	}
-	if c.Model != "" && fs["--model"] {
-		args = append(args, "--model", c.Model)
+	model := req.Model
+	if model == "" {
+		model = c.Model
+	}
+	if model != "" && fs["--model"] {
+		args = append(args, "--model", model)
+	}
+	// Attachments: codex exec exposes --image for image files in recent
+	// releases; other kinds are inlined as untrusted text. Not verified on
+	// this machine (codex is not installed) — detected at runtime, not assumed.
+	var imgs []string
+	var inlined []string
+	for _, a := range req.Attachments {
+		if a.Kind == "image" && fs["--image"] {
+			f, ferr := os.CreateTemp("", "water-codex-img-*"+extFor(a.MediaType))
+			if ferr == nil {
+				_, _ = f.Write(a.Data)
+				f.Close()
+				imgs = append(imgs, f.Name())
+				defer os.Remove(f.Name())
+				continue
+			}
+		}
+		if a.Kind == "text" {
+			inlined = append(inlined, InlineTextAttachment(a))
+		}
+	}
+	for _, p := range imgs {
+		args = append(args, "--image", p)
 	}
 	var lastMsg string
 	if fs["--output-last-message"] {
@@ -100,6 +150,9 @@ func (c *CodexSubscription) Run(ctx context.Context, req Request) (Response, err
 		}
 	}
 	prompt := req.Prompt
+	if len(inlined) > 0 {
+		prompt += "\n\n" + strings.Join(inlined, "\n\n")
+	}
 	if strings.TrimSpace(req.System) != "" {
 		prompt = "<system>\n" + req.System + "\n</system>\n\n" + req.Prompt
 	}
@@ -107,7 +160,8 @@ func (c *CodexSubscription) Run(ctx context.Context, req Request) (Response, err
 
 	start := time.Now()
 	stdout, stderr, err := runScrubbed(ctx, req.Timeout, c.WorkDir, "", path, args...)
-	resp := Response{Raw: stdout, Backend: c.Name(), Duration: time.Since(start)}
+	resp := Response{Raw: stdout, Backend: c.Name(), Duration: time.Since(start), Model: model}
+	resp.AttachmentsDelivered = len(imgs) > 0 || len(inlined) > 0
 	if err != nil {
 		return resp, fmt.Errorf("codex failed: %w: %s", err, firstLine(stderr+stdout))
 	}

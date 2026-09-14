@@ -1,0 +1,37 @@
+# CEO: cloud. 1-bit dithered monochrome; ordered-dither cloudscape. Elevated, atmospheric, weather-over-terrain.
+# Palette and ornament ONLY. Layout, spacing and interaction are computed by
+# internal/layout and are identical across themes (invariant #7).
+theme:
+  name: ceo
+  role: "ceo"
+  palette:
+    background: "#050505"
+    panel:      "#1A1A1A"
+    foreground: "#E8E8E8"
+    muted:      "#6B6B6B"
+    accent:     "#FFFFFF"
+    signal:     "#2BE82B"
+  typography:
+    family: monospace
+    labels: uppercase
+  borders:
+    style: ascii
+    weight: 1
+  imagery:
+    style: pixel_art
+    scaling: nearest
+    dithering: ordered
+  density: compact
+  hero:
+    title: CEO
+    lines:
+      - "            .:::::::.                  "
+      - "        .:::.........:::.              "
+      - "     .::...............:::.   .:::.    "
+      - "   .::...................::::::...::.  "
+      - "  ::.................................::"
+      - "  ::.................................::"
+      - "   '::.............................::' "
+      - "     '::::::::::::::::::::::::::::'    "
+      - "  . : . : . : . : . : . : . : . : . :  "
+      - " : . : . : . : . : . : . : . : . : . : "

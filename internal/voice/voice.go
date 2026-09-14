@@ -1,5 +1,5 @@
-// Package voice is extension point 6. Audio is reasoned over: STT feeds the
-// text pipeline, TTS renders text output. The model layer never sees audio.
+// Package voice is extension point 6. Audio is NEVER reasoned over: STT feeds
+// the text pipeline, TTS renders text output. The model layer never sees audio.
 package voice
 
 import (
@@ -16,8 +16,8 @@ type Provider interface {
 	Listen(ctx context.Context) (string, error)
 }
 
-// ErrUnavailable is returned by the no-op provider and by `--voice` in Phase 1.
-var ErrUnavailable = errors.New("voice is not yet available in this build (Phase 4)")
+// ErrUnavailable is returned by the no-op provider.
+var ErrUnavailable = errors.New("voice provider is noop; set voice.provider to \"os\"")
 
 // Noop is the Phase 1 provider.
 type Noop struct{}
@@ -51,4 +51,12 @@ func Names() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Absence returns a clear explanation of why a provider cannot speak.
+func Absence(p Provider) string {
+	if o, ok := p.(*OS); ok {
+		return o.Absence()
+	}
+	return ErrUnavailable.Error()
 }
