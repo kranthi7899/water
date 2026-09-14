@@ -176,6 +176,11 @@ func (m *Markdown) Snapshot(_ context.Context, role string) ([]Entry, error) {
 func (m *Markdown) Add(_ context.Context, role string, e Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := lockRole(m.root, role)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	p, err := m.read(role)
 	if err != nil {
 		return err
@@ -198,6 +203,11 @@ func (m *Markdown) Add(_ context.Context, role string, e Entry) error {
 func (m *Markdown) Replace(_ context.Context, role, id string, e Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := lockRole(m.root, role)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	p, err := m.read(role)
 	if err != nil {
 		return err
@@ -218,6 +228,11 @@ func (m *Markdown) Replace(_ context.Context, role, id string, e Entry) error {
 func (m *Markdown) Remove(_ context.Context, role, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := lockRole(m.root, role)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	p, err := m.read(role)
 	if err != nil {
 		return err
@@ -237,6 +252,11 @@ func (m *Markdown) Remove(_ context.Context, role, id string) error {
 func (m *Markdown) Prune(_ context.Context, role string) ([]Entry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	unlock, err := lockRole(m.root, role)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	p, err := m.read(role)
 	if err != nil {
 		return nil, err

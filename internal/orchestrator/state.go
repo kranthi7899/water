@@ -457,3 +457,20 @@ func Restore(snap Snapshot, orchestratorRoles []string) *State {
 	}
 	return s
 }
+
+// TrySnapshot is Snapshot for diagnostics on a possibly-stuck run: it gives up
+// after wait instead of blocking forever if the state mutex is held, and
+// reports that, because a held lock is itself the finding.
+func (s *State) TrySnapshot(wait time.Duration) (Snapshot, bool) {
+	deadline := time.Now().Add(wait)
+	for {
+		if s.mu.TryLock() {
+			s.mu.Unlock()
+			return s.Snapshot(), true
+		}
+		if time.Now().After(deadline) {
+			return Snapshot{RunID: s.RunID, Brief: s.Brief}, false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

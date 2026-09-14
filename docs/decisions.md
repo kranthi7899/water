@@ -306,3 +306,30 @@ What Water has that Hermes' harness does not: per-role memory isolation enforced
 assembly, a typed message permission graph, mechanical verbatim forwarding of dissent, evidence
 provenance verified against the run trace, and resume-from-checkpoint that survives a rate-limit
 window. Those are the product, and none of the upgrades above touch them.
+
+
+---
+
+# Infrastructure judgment pass v2 (2026-09-14)
+
+Full write-up: `docs/judgment-pass-v2.md`. Compared against the public source of `openai/codex` and
+`NousResearch/hermes-agent`. 3 adopt, 5 adapt, 5 reject. Every gap was reproduced before fixing.
+
+- **Debugging first:** `water replay` re-runs one recorded node call in isolation (`--print`,
+  `--edit`); `water debug dump <run-id>` dumps a live run without stopping it; `--debug` logs real
+  subprocess flags; errors now surface the real cause and name the controlling setting.
+- **Isolation (invariant 2):** a tool root containing the water home let the CTO read Design's memory
+  and the keyring. The water home is now protected from all tool paths. Memory writes take a
+  cross-process lock (two writers were losing half their entries). `/remember` refuses to promote an
+  untrusted reply wholesale.
+- **MCP server:** a single blocked read (named pipe under a root) wedged the whole server and left it
+  running after its parent died. Calls are now concurrent, deadlined, regular-files-only, and the
+  server exits on stdin close.
+- **Shell allowlist:** allowlisting `ls` authorised `ls && …`; compound commands are now refused, and
+  no shell runs where no OS sandbox exists.
+- **Skills:** a read-only `water skills` report (Curator's deterministic half, no archiving) already
+  shows Design's `fitts-law` and `hicks-law` never loading, and the CEO's `disagree-and-commit`
+  loading far more than its trigger suggests.
+- **Rejected with reasons:** Codex config layers, a pluggable execution backend (until shell is
+  granted), Hermes's autonomous reflect-and-update loop (no evidence: 0 flagged replies), external
+  semantic memory, OpenTelemetry.

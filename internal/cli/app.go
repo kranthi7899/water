@@ -65,6 +65,7 @@ type globalFlags struct {
 	verbose      bool
 	voice        bool
 	allowMetered bool
+	debug        bool
 }
 
 // App holds lazily-built shared state for one invocation.
@@ -252,6 +253,7 @@ func (a *App) roleEnv(ctx context.Context, reg *roles.Registry, def backend.Sele
 		}
 		if r.Tools != nil {
 			pol := tools.FromGrant(r.Slug, r.RoleID, r.Tools, cfg.RootList())
+			pol.Protected = []string{config.Home()}
 			if !cfg.Tools.Enabled {
 				// Subprocess tools stay off until the user enables them; the
 				// in-process trace capability has no such switch (it reads

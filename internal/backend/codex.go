@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -163,7 +164,10 @@ func (c *CodexSubscription) Run(ctx context.Context, req Request) (Response, err
 	resp := Response{Raw: stdout, Backend: c.Name(), Duration: time.Since(start), Model: model}
 	resp.AttachmentsDelivered = len(imgs) > 0 || len(inlined) > 0
 	if err != nil {
-		return resp, fmt.Errorf("codex failed: %w: %s", err, firstLine(stderr+stdout))
+		if errors.Is(err, ErrCallTimeout) {
+			return resp, fmt.Errorf("codex failed: %w", err)
+		}
+		return resp, fmt.Errorf("codex failed: %w: %s", err, ErrorSummary(stderr, stdout))
 	}
 	if lastMsg != "" {
 		if b, rerr := os.ReadFile(filepath.Clean(lastMsg)); rerr == nil && strings.TrimSpace(string(b)) != "" {

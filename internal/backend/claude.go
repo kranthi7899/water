@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -274,12 +275,15 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 			if IsRateLimitText(res.Result) || (resp.RateLimit != nil && resp.RateLimit.Status != "" && resp.RateLimit.Status != "allowed") {
 				return resp, fmt.Errorf("%w: %s", ErrRateLimited, firstLine(res.Result))
 			}
-			return resp, fmt.Errorf("claude returned an error result (%s): %s", res.Subtype, firstLine(res.Result))
+			return resp, fmt.Errorf("claude reported an error: %s", firstLine(res.Result))
 		}
 		return resp, nil
 	}
 	if err != nil {
-		return resp, fmt.Errorf("claude failed: %w: %s", err, firstLine(stderr+stdout))
+		if errors.Is(err, ErrCallTimeout) {
+			return resp, fmt.Errorf("claude failed: %w", err)
+		}
+		return resp, fmt.Errorf("claude failed: %w: %s", err, ErrorSummary(stderr, stdout))
 	}
 	resp.Text = strings.TrimSpace(stdout)
 	return resp, nil

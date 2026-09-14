@@ -81,7 +81,7 @@ func (a *App) runCmd() *cobra.Command {
 			rec.NodeFinished(role.Slug, resp.Duration, err)
 			_ = backend.SaveRateLimit(config.Home(), resp.RateLimit)
 			if err != nil {
-				sf.NodeFailed(role.Slug, err)
+				// agent.call already reported the failure to the surface.
 				rec.Error(err)
 				sf.RunFinished("", rec.Finish())
 				if errors.Is(err, backend.ErrRateLimited) {
@@ -89,7 +89,6 @@ func (a *App) runCmd() *cobra.Command {
 				}
 				return exitWith(ExitBackend, err)
 			}
-			sf.NodeFinished(role.Slug, resp)
 			sf.RunFinished(resp.Text, rec.Finish())
 			if a.flags.voice {
 				if vp, ok := voice.Open(cfg.Voice.Provider); ok && vp.Available() {

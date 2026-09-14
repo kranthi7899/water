@@ -25,6 +25,16 @@ import (
 //
 // No role enables shell in v1, so this is exercised by tests only. Containers
 // are strictly opt-in and not part of the default path.
+// SandboxAvailable reports whether this platform can confine a shell
+// command. Shell tools are refused where it cannot.
+var SandboxAvailable = func() bool {
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	_, err := exec.LookPath("sandbox-exec")
+	return err == nil
+}
+
 func Sandbox(cmd *exec.Cmd, p *Policy) *exec.Cmd {
 	if runtime.GOOS != "darwin" {
 		return cmd

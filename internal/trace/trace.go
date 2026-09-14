@@ -4,9 +4,11 @@ package trace
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +76,68 @@ type Recorder struct {
 	stats    Stats
 	roles    map[string]*RoleTiming
 	calls    map[string]tools.Event
+	seq      int
+}
+
+// CallRecord is the exact request a node sent and what came back, written to
+// <trace_dir>/<run-id>.calls/<seq>-<role>.json so one node's decision can be
+// replayed in isolation (water replay). It holds the full persona, memory and
+// inbox text for that call; it stays local, like checkpoints.
+type CallRecord struct {
+	Seq          int       `json:"seq"`
+	RunID        string    `json:"run_id"`
+	Role         string    `json:"role"`
+	At           time.Time `json:"at"`
+	Backend      string    `json:"backend"`
+	Model        string    `json:"model,omitempty"`
+	System       string    `json:"system"`
+	Prompt       string    `json:"prompt"`
+	Attachments  []string  `json:"attachments,omitempty"`
+	Tools        []string  `json:"tools,omitempty"`
+	Skills       []string  `json:"skills,omitempty"`
+	MemoryIDs    []string  `json:"memory_ids,omitempty"`
+	InboxIDs     []string  `json:"inbox_ids,omitempty"`
+	Response     string    `json:"response"`
+	Error        string    `json:"error,omitempty"`
+	DurationMS   int64     `json:"duration_ms"`
+	InputTokens  int       `json:"input_tokens,omitempty"`
+	OutputTokens int       `json:"output_tokens,omitempty"`
+	ReplayOf     int       `json:"replay_of,omitempty"`
+}
+
+// CallsDir is where call records for runID live ("" when not writing).
+func (r *Recorder) CallsDir() string {
+	if r.path == "" {
+		return ""
+	}
+	return strings.TrimSuffix(r.path, ".jsonl") + ".calls"
+}
+
+// CallsDirFor returns the call-record directory for a run under traceDir.
+func CallsDirFor(traceDir, runID string) string {
+	return filepath.Join(traceDir, runID+".calls")
+}
+
+// RecordCall assigns the next sequence number, writes the record, and emits a
+// call_recorded event linking the trace to the file.
+func (r *Recorder) RecordCall(rec CallRecord) int {
+	r.mu.Lock()
+	r.seq++
+	rec.Seq = r.seq
+	rec.RunID = r.runID
+	dir := r.CallsDir()
+	r.mu.Unlock()
+	if dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err == nil {
+			if b, err := json.MarshalIndent(rec, "", "  "); err == nil {
+				_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("%03d-%s.json", rec.Seq, rec.Role)), b, 0o600)
+			}
+		}
+	}
+	r.mu.Lock()
+	r.emit(Event{Type: "call_recorded", Role: rec.Role, Step: rec.Seq, Backend: rec.Backend})
+	r.mu.Unlock()
+	return rec.Seq
 }
 
 // RunID returns the run this recorder belongs to.

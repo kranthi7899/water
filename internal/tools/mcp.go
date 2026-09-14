@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 )
 
 // MCP (Model Context Protocol) stdio server — the interception point found by
@@ -43,7 +44,20 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+// DefaultCallTimeout bounds one tools/call inside the server. The model CLI
+// has its own client-side timeout, but a server that never answers keeps the
+// whole call (and this process) hanging until Water's much longer call
+// timeout kills the parent — and the child can outlive it.
+const DefaultCallTimeout = 60 * time.Second
+
 // ServeStdio runs the MCP server over in/out until in closes or ctx ends.
+//
+// Requests are answered concurrently: a slow or stuck tools/call must not
+// block ping, initialize, or the model's other parallel calls (JSON-RPC ids
+// correlate responses, writes are serialised). Each tools/call runs under a
+// deadline. When stdin closes, the server returns immediately even if calls
+// are still in flight, so the process exits with its parent instead of
+// lingering as an orphan.
 func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) error {
 	var wmu sync.Mutex
 	write := func(v any) {
@@ -51,6 +65,10 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 		defer wmu.Unlock()
 		b, _ := json.Marshal(v)
 		_, _ = out.Write(append(b, '\n'))
+	}
+	callTimeout := svc.CallTimeout
+	if callTimeout <= 0 {
+		callTimeout = DefaultCallTimeout
 	}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
@@ -67,9 +85,19 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 			write(rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
 			continue
 		}
-		if res, reply := handle(ctx, svc, req); reply {
-			write(res)
+		if req.Method != "tools/call" {
+			if res, reply := handle(ctx, svc, req); reply {
+				write(res)
+			}
+			continue
 		}
+		go func(req rpcRequest) {
+			cctx, cancel := context.WithTimeout(ctx, callTimeout)
+			defer cancel()
+			if res, reply := handle(cctx, svc, req); reply {
+				write(res)
+			}
+		}(req)
 	}
 	return sc.Err()
 }

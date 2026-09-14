@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestCEOFanoutPhases(t *testing.T) {
@@ -343,5 +344,20 @@ func TestResumeAfterHubFailure(t *testing.T) {
 	r.SetEdges(h.Graph())
 	if got := h.Next(r); !reflect.DeepEqual(got, []string{"coo"}) {
 		t.Fatalf("resume should re-run the failed hub, got %v", got)
+	}
+}
+
+// TestTrySnapshotNeverBlocks — a state dump on a run whose lock is held must
+// return and say so, not hang the diagnostic too.
+func TestTrySnapshotNeverBlocks(t *testing.T) {
+	s := NewState("r", "b", []string{"ceo"})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	start := time.Now()
+	if _, ok := s.TrySnapshot(80 * time.Millisecond); ok {
+		t.Fatal("TrySnapshot claimed success while the lock was held")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("TrySnapshot blocked")
 	}
 }

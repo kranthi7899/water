@@ -23,6 +23,10 @@ One binary. No Docker, no Python, no Node. Prerequisite: `claude` (Claude subscr
     water orchestrate "<brief>"     # CEO frames → COO assigns → CTO/Design → COO verifies → CEO decides
     water orchestrate --resume <id> # continue a killed run from its checkpoint
     water diagnose <run-id>         # topology diagnostics: dissent survival, unverified done, …
+    water replay <run-id> [seq|role] [--print|--edit]   # re-run one recorded node call in isolation
+    water debug dump <run-id>       # live state + goroutines of a running orchestration, without stopping it
+    water skills                    # which skills each role actually loads (read-only)
+    water --debug <command>         # log every model subprocess: real flags, pid, duration, exit
     water dashboard                 # read-only local web view of roles, runs, tool calls
     water run cto "…" --attach deck.pdf
     water memory ceo list|add|remove|prune

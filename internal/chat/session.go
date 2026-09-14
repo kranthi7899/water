@@ -397,7 +397,14 @@ func (s *Session) Remember(ctx context.Context, note string) (memory.Entry, erro
 		if len(s.turns) == 0 {
 			return memory.Entry{}, errors.New("nothing to remember yet")
 		}
-		note = s.turns[len(s.turns)-1].Reply
+		last := s.turns[len(s.turns)-1]
+		// Memory enters every future prompt. A reply written after reading an
+		// attachment or tool output may carry injected text, so promoting it
+		// wholesale needs the user to type what they actually want kept.
+		if last.Untrusted {
+			return memory.Entry{}, errors.New("the last reply consumed untrusted content (an attachment or tool output); type the note to keep instead: /remember <note>")
+		}
+		note = last.Reply
 	}
 	e := memory.Entry{ID: memory.NewID(), Text: note, CreatedAt: time.Now().UTC(), Tags: []string{"remember"}}
 	if err := s.Role.Memory().Add(ctx, e); err != nil {

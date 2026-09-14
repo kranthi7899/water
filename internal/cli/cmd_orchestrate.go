@@ -111,16 +111,28 @@ func (a *App) orchestrateCmd() *cobra.Command {
 					g.Nodes[r.Slug] = agent.Node(r, env, delegates)
 				}
 			}
+			active := newActiveNodes()
 			ex := &orchestrator.Executor{
 				MaxParallel:  cfg.Orchestration.MaxParallel,
 				Timeout:      runTimeout(cfg),
 				MaxSteps:     cfg.Orchestration.MaxSteps,
 				Checkpointer: cp,
 				Hooks: orchestrator.Hooks{
-					NodeStarted:  func(role string) { sf.NodeStarted(role); rec.NodeStarted(role) },
-					NodeFinished: func(role string, d time.Duration, err error) { rec.NodeFinished(role, d, err) },
+					NodeStarted:  func(role string) { active.start(role); sf.NodeStarted(role); rec.NodeStarted(role) },
+					NodeFinished: func(role string, d time.Duration, err error) { active.finish(role); rec.NodeFinished(role, d, err) },
 					Checkpointed: func(step int) { rec.Checkpoint(step) },
 				},
+			}
+			// Live debugging: `water debug dump <run-id>` signals this process,
+			// which writes a state dump without stopping the run.
+			_ = os.MkdirAll(cfg.Orchestration.CheckpointDir, 0o755)
+			pf := pidFile(cfg.Orchestration.CheckpointDir, st.RunID)
+			_ = os.WriteFile(pf, []byte(fmt.Sprintf(`{"pid":%d,"started":%q}`, os.Getpid(), time.Now().Format(time.RFC3339))), 0o600)
+			defer os.Remove(pf)
+			disarm := armStateDump(func() (string, error) { return writeStateDump(cfg.Telemetry.TraceDir, st, router, active) })
+			defer disarm()
+			if !a.jsonMode() && !a.flags.quiet {
+				fmt.Fprintf(os.Stderr, "live dump: water debug dump %s\n", st.RunID)
 			}
 			sf.RunStarted(st.RunID, brief)
 			rec.RunStarted(brief)

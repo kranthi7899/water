@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -44,6 +45,12 @@ type Policy struct {
 
 	// MaxReadBytes caps a single read (default 256 KiB).
 	MaxReadBytes int64 `json:"max_read_bytes,omitempty"`
+
+	// Protected paths are never readable or writable through tools, even when
+	// they sit under a declared root. Water sets this to its own home, which
+	// holds every role's memory, transcripts, traces and the signing keyring:
+	// a root like "~" must not become a path around per-role isolation.
+	Protected []string `json:"protected,omitempty"`
 }
 
 // FSPolicy is the filesystem grant.
@@ -127,6 +134,9 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		if err != nil {
 			return Decision{false, "path outside declared roots: " + err.Error()}, args
 		}
+		if prot, hit := p.protectedHit(resolved); hit {
+			return Decision{false, "path is inside water's own state directory (" + prot + "), which holds other roles' memory and the keyring"}, args
+		}
 		out := cloneArgs(args)
 		out["path"] = resolved
 		return Decision{true, "filesystem.mode=" + p.Filesystem.Mode + " root=" + root}, out
@@ -140,30 +150,69 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		if err != nil {
 			return Decision{false, "parent outside declared roots: " + err.Error()}, args
 		}
+		if prot, hit := p.protectedHit(filepath.Join(parent, filepath.Base(target))); hit {
+			return Decision{false, "path is inside water's own state directory (" + prot + ")"}, args
+		}
 		out := cloneArgs(args)
 		out["path"] = filepath.Join(parent, filepath.Base(target))
 		return Decision{true, "filesystem.mode=read-write root=" + root}, out
 	case ToolRun:
-		switch p.Shell.Mode {
+		mode := orNone(p.Shell.Mode)
+		if mode == "none" {
+			return Decision{false, "shell.mode=none"}, args
+		}
+		// Codex allows commands no rule matched only where a platform sandbox
+		// enforces the boundary, and never without one. Water has no approval
+		// channel inside a tool call, so without a sandbox it refuses.
+		if !SandboxAvailable() {
+			return Decision{false, "shell.mode=" + mode + " refused: no OS sandbox on " + runtime.GOOS + ", so a command's effects cannot be confined"}, args
+		}
+		switch mode {
 		case "unrestricted":
-			return Decision{true, "shell.mode=unrestricted"}, args
-		case "allowlist", "confirm-each":
+			return Decision{true, "shell.mode=unrestricted (confined by sandbox)"}, args
+		case "confirm-each":
+			return Decision{false, "shell.mode=confirm-each needs an interactive approval channel, which this build does not have"}, args
+		case "allowlist":
 			cmd := strings.TrimSpace(str("command"))
-			first := cmd
-			if i := strings.IndexAny(cmd, " \t"); i >= 0 {
-				first = cmd[:i]
+			// The allowlist names single simple commands. Chaining, pipes,
+			// redirection and substitution would let "ls" authorise anything.
+			if strings.ContainsAny(cmd, ";&|$`<>()\\\n\r") {
+				return Decision{false, "shell.mode=allowlist: compound, piped, redirected or substituted command refused; the allowlist matches one simple command"}, args
+			}
+			fields := strings.Fields(cmd)
+			if len(fields) == 0 {
+				return Decision{false, "shell.mode=allowlist: empty command"}, args
 			}
 			for _, a := range p.Shell.Allowlist {
-				if a == first || a == cmd {
-					return Decision{true, "shell.mode=" + p.Shell.Mode + " allowlist match " + a}, args
+				if a == fields[0] || a == cmd {
+					out := cloneArgs(args)
+					out["argv"] = fields
+					return Decision{true, "shell.mode=allowlist match " + a + " (argument effects confined by sandbox)"}, out
 				}
 			}
-			return Decision{false, "shell.mode=" + p.Shell.Mode + ": " + first + " not in allowlist"}, args
-		default:
-			return Decision{false, "shell.mode=" + orNone(p.Shell.Mode)}, args
+			return Decision{false, "shell.mode=allowlist: " + fields[0] + " not in allowlist"}, args
 		}
+		return Decision{false, "shell.mode=" + mode + " is not recognised"}, args
 	}
 	return Decision{false, "unknown tool " + tool}, args
+}
+
+// protectedHit reports the protected path that contains p, if any.
+func (p *Policy) protectedHit(path string) (string, bool) {
+	rp, err := realPath(path)
+	if err != nil {
+		rp = path
+	}
+	for _, prot := range p.Protected {
+		pp, err := realPath(prot)
+		if err != nil {
+			continue
+		}
+		if rp == pp || strings.HasPrefix(rp, pp+string(filepath.Separator)) {
+			return prot, true
+		}
+	}
+	return "", false
 }
 
 func orNone(s string) string {

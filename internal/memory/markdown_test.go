@@ -79,3 +79,27 @@ func TestBoundsAreExplicitErrors(t *testing.T) {
 		t.Fatalf("prune: %v %v", removed, err)
 	}
 }
+
+// TestConcurrentWritersLoseNothing — two providers over the same directory
+// (as two processes would be) writing concurrently must not lose entries.
+func TestConcurrentWritersLoseNothing(t *testing.T) {
+	root := t.TempDir()
+	a, _ := NewMarkdown(Options{Root: root, Limits: Limits{MaxEntries: 1000, MaxBytes: 1 << 20}})
+	b, _ := NewMarkdown(Options{Root: root, Limits: Limits{MaxEntries: 1000, MaxBytes: 1 << 20}})
+	ctx := context.Background()
+	done := make(chan struct{})
+	for _, m := range []*Markdown{a, b} {
+		go func(m *Markdown) {
+			for i := 0; i < 40; i++ {
+				_ = m.Add(ctx, "cto", Entry{Text: "x"})
+			}
+			done <- struct{}{}
+		}(m)
+	}
+	<-done
+	<-done
+	es, err := a.Snapshot(ctx, "cto")
+	if err != nil || len(es) != 80 {
+		t.Fatalf("entries after concurrent writers: %d (want 80) %v", len(es), err)
+	}
+}

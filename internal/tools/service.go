@@ -45,9 +45,15 @@ const PreviewBytes = 2048
 type Service struct {
 	Policy *Policy
 	Log    func(Event)
-	mu     sync.Mutex
-	events []Event
+	// CallTimeout bounds one invocation (0 = DefaultCallTimeout).
+	CallTimeout time.Duration
+	mu          sync.Mutex
+	events      []Event
+	testDelay   time.Duration // tests only: simulate a slow tool
 }
+
+// ErrToolTimeout marks a tool invocation that exceeded its deadline.
+var ErrToolTimeout = errors.New("tool call exceeded its deadline")
 
 // NewService binds a policy to a logger (nil logger = collect only).
 func NewService(p *Policy, log func(Event)) *Service { return &Service{Policy: p, Log: log} }
@@ -107,7 +113,7 @@ func (s *Service) Call(ctx context.Context, tool string, args map[string]any) (s
 	if !dec.Allowed {
 		err = fmt.Errorf("%w: %s", ErrDenied, dec.Basis)
 	} else {
-		result, err = s.execute(ctx, tool, resolved)
+		result, err = s.executeWithDeadline(ctx, tool, resolved)
 	}
 	ev.DurationMS = time.Since(start).Milliseconds()
 	if err != nil {
@@ -144,6 +150,31 @@ func NewCallID(role string) string {
 	return "call-" + role + "-" + hex.EncodeToString(b)
 }
 
+// executeWithDeadline runs a tool so that a blocking filesystem call (a slow
+// network mount, a device) cannot outlive the caller's deadline. The blocked
+// goroutine is abandoned; the server process is short-lived and exits with
+// its parent.
+func (s *Service) executeWithDeadline(ctx context.Context, tool string, args map[string]any) (string, error) {
+	type result struct {
+		out string
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		if s.testDelay > 0 {
+			time.Sleep(s.testDelay)
+		}
+		out, err := s.execute(ctx, tool, args)
+		ch <- result{out, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.out, r.err
+	case <-ctx.Done():
+		return "", fmt.Errorf("%w: %s did not finish before the call deadline", ErrToolTimeout, tool)
+	}
+}
+
 func (s *Service) execute(ctx context.Context, tool string, args map[string]any) (string, error) {
 	str := func(k string) string {
 		v, _ := args[k].(string)
@@ -154,6 +185,16 @@ func (s *Service) execute(ctx context.Context, tool string, args map[string]any)
 		max := s.Policy.MaxReadBytes
 		if max <= 0 {
 			max = 256 * 1024
+		}
+		// Only regular files. A FIFO, device or socket under a declared root
+		// would block open() or stream forever (reproduced with a named pipe:
+		// one read wedged the whole server).
+		fi, err := os.Stat(str("path"))
+		if err != nil {
+			return "", err
+		}
+		if !fi.Mode().IsRegular() {
+			return "", fmt.Errorf("%s is not a regular file (%s); only regular files can be read", str("path"), fi.Mode().Type())
 		}
 		f, err := os.Open(str("path"))
 		if err != nil {
@@ -199,6 +240,10 @@ func (s *Service) execute(ctx context.Context, tool string, args map[string]any)
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(cctx, "/bin/sh", "-c", cmdline)
+		if argv, ok := args["argv"].([]string); ok && len(argv) > 0 {
+			// Allowlist mode: exec the words directly, no shell interpretation.
+			cmd = exec.CommandContext(cctx, argv[0], argv[1:]...)
+		}
 		if len(s.Policy.Filesystem.Roots) > 0 {
 			cmd.Dir = s.Policy.Filesystem.Roots[0]
 		}

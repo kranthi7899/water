@@ -298,6 +298,24 @@ func call(ctx context.Context, role *roles.Role, env Env, p Prompt, attachments 
 	if resp.Backend == "" {
 		resp.Backend = b.Name()
 	}
+	if err != nil {
+		err = explainCallError(role.Slug, b.Name(), req.Model, env.Timeout, err)
+	}
+	if env.Trace != nil {
+		rec := trace.CallRecord{Role: role.Slug, At: start, Backend: resp.Backend, Model: req.Model, System: req.System, Prompt: req.Prompt,
+			Skills: p.Skills, MemoryIDs: p.MemoryIDs, InboxIDs: p.InboxIDs, Response: resp.Text, DurationMS: resp.Duration.Milliseconds(),
+			InputTokens: resp.InputTokens, OutputTokens: resp.OutputTokens}
+		for _, a := range attachments {
+			rec.Attachments = append(rec.Attachments, a.Name)
+		}
+		if req.Tools != nil {
+			rec.Tools = req.Tools.ToolNames()
+		}
+		if err != nil {
+			rec.Error = err.Error()
+		}
+		env.Trace.RecordCall(rec)
+	}
 	if env.Trace != nil {
 		env.Trace.BackendCall(role.Slug, resp.Backend, resp.Metered, resp.Duration, resp.InputTokens, resp.OutputTokens, err)
 		env.Trace.RateLimit(role.Slug, resp.RateLimit, errors.Is(err, backend.ErrRateLimited))
@@ -318,6 +336,20 @@ func call(ctx context.Context, role *roles.Role, env Env, p Prompt, attachments 
 		env.Surface.NodeFinished(role.Slug, resp)
 	}
 	return resp, nil
+}
+
+// explainCallError adds what a developer needs to act on a failed call: which
+// backend and model were used, and, for a timeout, the setting that controls
+// it. errors.Is still works on the wrapped error.
+func explainCallError(role, backendName, model string, timeout time.Duration, err error) error {
+	where := "backend " + backendName
+	if model != "" {
+		where += fmt.Sprintf(", model %q from role.yaml", model)
+	}
+	if errors.Is(err, backend.ErrCallTimeout) {
+		return fmt.Errorf("%s call via %s exceeded %s (set orchestration.call_timeout to raise it): %w", role, where, timeout, err)
+	}
+	return fmt.Errorf("%s: %w", where, err)
 }
 
 // snapshotOnce loads a role's memory once per run and freezes it.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"water/internal/backend"
 	"water/internal/config"
 	"water/internal/surface"
 )
@@ -33,6 +34,11 @@ func Execute(embedded, themes fs.FS, args []string) int {
 
 func (a *App) rootCmd() *cobra.Command {
 	root := &cobra.Command{
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			if a.flags.debug || os.Getenv("WATER_DEBUG") != "" {
+				backend.Debug = os.Stderr
+			}
+		},
 		Use:   "water",
 		Short: "A council of role-agents on your existing subscription.",
 		Long: surface.StyleDim.Render(surface.Banner) + `
@@ -71,11 +77,12 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 	pf.BoolVarP(&a.flags.quiet, "quiet", "q", false, "suppress progress output")
 	pf.BoolVarP(&a.flags.verbose, "verbose", "v", false, "show per-node responses as they arrive")
 	pf.BoolVar(&a.flags.voice, "voice", false, "speak replies aloud (voice.provider must be \"os\")")
+	pf.BoolVar(&a.flags.debug, "debug", false, "log every model subprocess: real flags (prompt text elided), pid, duration, exit, last stderr line")
 
 	root.AddCommand(
 		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(), a.runCmd(), a.orchestrateCmd(),
 		a.diagnoseCmd(), a.dashboardCmd(), a.memoryCmd(), a.personaCmd(), a.experienceCmd(),
-		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(),
+		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(), a.replayCmd(), a.debugCmd(), a.skillsCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root

@@ -141,3 +141,55 @@ next to `~/water` and `~/twin`; not a git repo):
 No code changes in this pass beyond the three commits above; the PDF and demo kit are
 presentation artifacts, generated and verified (rehearsed end-to-end on this Mac) but outside
 the `water` repo.
+
+
+## Infrastructure judgment pass v2 (same day, afternoon)
+
+Judgment pass against the public source of `openai/codex` and `NousResearch/hermes-agent`
+(shallow clones, read directly; no reconstructed Claude Code source). Full report with per-area
+comparandum / Water / verdict paragraphs: `docs/judgment-pass-v2.md`. 3 adopt, 5 adapt, 5 reject.
+Every gap was reproduced before it was fixed; every fix has a test that fails on the old behaviour.
+
+### Debugging (fixed first)
+
+- **Single-node replay (6a).** Every model call writes `<trace_dir>/<run-id>.calls/<seq>-<role>.json`
+  (0600) with the exact system and prompt. `water replay` lists, prints (`--print`), edits (`--edit`)
+  and re-sends one call in isolation. Verified on a real run.
+- **Stuck-run dump (6d).** `water debug dump <run-id>` signals a live orchestration (SIGUSR1 via a pid
+  file) to write active nodes, in-flight subprocesses, router next step, outbox tail and goroutine
+  stacks; never blocks on the state lock. Verified mid-run.
+- **`--debug` (6b).** Logs every subprocess with its real flags (prompts elided to sizes), pid,
+  duration, exit and last stderr line. Verified on Claude and Codex.
+- **Actionable errors (6c).** Real error line surfaced (Codex's banner was hiding it); backend,
+  role.yaml model and `orchestration.call_timeout` named; `water run` no longer prints twice.
+
+### Gaps fixed from the comparison
+
+- **Invariant 2 through the tool layer (5a).** A tool root containing the water home let the CTO read
+  Design's memory and the keyring. Water home is now a protected path for every tool.
+- **Lost memory writes (5a).** Two writers on one role's memory lost 40 of 80 entries; writes now take
+  a cross-process lock.
+- **Untrusted promotion (5a).** `/remember` without a note refuses a reply that read an attachment or
+  tool output.
+- **MCP server wedge (2).** One blocked read (named pipe under a root) stalled every other request and
+  left the server running after its parent; calls are now concurrent, deadlined, regular-files-only,
+  and the server exits on stdin close.
+- **Shell allowlist (1).** Allowlisting `ls` authorised `ls && …`; compound commands are refused,
+  allowlisted commands exec without a shell, and no shell runs where no OS sandbox exists.
+- **Skill usage (5b).** Read-only `water skills` report. On 47 real prompts: Design's `fitts-law` and
+  `hicks-law` never loaded; CEO `disagree-and-commit` loads far more than its trigger suggests.
+
+### Rejected, with reasons in the report
+
+Codex config layers (4); Codex resume model (3, a confirmation of Water's existing fix); pluggable
+execution backends until a role is granted shell (5c, trigger recorded); Hermes's autonomous
+reflect-and-update loop (5d: 3 real chat turns, 0 flags, no growth logs — no evidence); external
+semantic memory providers (5e); OpenTelemetry (6e).
+
+Tests: 86 test functions, all passing; `go test -race` clean on every changed package.
+
+### Next up (added)
+
+- Review the skills report findings: `fitts-law` / `hicks-law` triggers, `disagree-and-commit`
+  description breadth.
+- Codex backend does not parse token usage (`in=0` in `water replay` listings).
