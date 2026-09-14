@@ -41,8 +41,9 @@ investigation findings and the Part 10 answers are in `docs/decisions.md`.
 | CEO (no tools block) reports NONE | ✅ |
 | Image attachment via stream-json; text memo with injected instruction treated as data | ✅ |
 | `water chat cto` through a pty: header, hero, `/status`, `/help`, `/quit` | ✅ |
-| Hierarchy run: CEO delegated → COO wrote two specific assignments → CTO delivered | ✅ (Design hit the old 5m run ceiling → checkpoint saved) |
-| `--resume` schedules only the unfinished node | ✅ (verified: only `design` / only `coo` ran on resume) |
+| Hierarchy run A (payments migration): killed at the old 5m run ceiling mid-Design → `--resume` ran only Design → COO rollup → CEO final | ✅ 3 calls on resume, 0 metered; CEO wrote an explicit decision with reversal conditions |
+| Hierarchy run B (onboarding rebuild): killed at 35s mid-COO → `--resume` re-ran COO, not the CEO frame; two assignment rounds; Design dissent forwarded verbatim; final status marked UNCONFIRMED ×4 | ✅ 8 calls, 0 metered, 16 messages; `diagnose`: dissent survival 2/2, every edge permitted, one first-round status flagged for missing marks |
+| A killed run survives the subscription session limit (quota ran out between kill and resume) | ✅ resumed after the window reset |
 | `water diagnose`, `water dashboard` over real traces; POST → 405 | ✅ |
 | Codex backend | ⚠ not installed here; MCP tools on codex deliberately unwired |
 | `goreleaser` / `install.sh` end-to-end | ⚠ no release tag yet; config and script parse |
