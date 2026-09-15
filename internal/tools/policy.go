@@ -25,6 +25,10 @@ const (
 	ToolListDir   = "list_dir"
 	ToolWriteFile = "write_file"
 	ToolRun       = "run"
+	// ToolApplyActions is an explicit, bounded action plan. Interactive chat
+	// exposes this instead of raw write/run calls so one human decision can
+	// cover a reviewed set of related effects without becoming a broad grant.
+	ToolApplyActions = "apply_actions"
 )
 
 // Policy is the resolved, role-scoped permission set. It is serialised to a
@@ -41,6 +45,10 @@ type Policy struct {
 	// chat parent to approve one write or shell action. It is absent for
 	// orchestration and headless runs, which therefore remain deny-by-default.
 	ApprovalSocket string `json:"approval_socket,omitempty"`
+	// BatchActions makes apply_actions the only consequential tool exposed.
+	// It is used exclusively by interactive chat; headless policies retain
+	// their declared per-tool surface and never gain a batch escape hatch.
+	BatchActions bool `json:"batch_actions,omitempty"`
 	// Trace is the narrow verification capability (Part 1 follow-up):
 	// "current-run" lets the role resolve evidence references against the
 	// trace of the run it is participating in. Not an MCP tool; it never
@@ -81,7 +89,7 @@ func (p *Policy) HasTrace() bool { return p != nil && p.Trace == "current-run" }
 // directory listings within an already-approved workspace do not prompt; a
 // write or process launch always does.
 func (p *Policy) RequiresApproval(tool string) bool {
-	return p != nil && p.ApprovalSocket != "" && (tool == ToolWriteFile || tool == ToolRun)
+	return p != nil && p.ApprovalSocket != "" && (tool == ToolWriteFile || tool == ToolRun || tool == ToolApplyActions)
 }
 
 // InteractiveWorkspacePolicy is the local-chat baseline: one explicit
@@ -93,6 +101,7 @@ func InteractiveWorkspacePolicy(role, roleID, workspace, protected, approvalSock
 		Role:           role,
 		RoleID:         roleID,
 		ApprovalSocket: approvalSocket,
+		BatchActions:   true,
 		Filesystem:     FSPolicy{Mode: "read-write", Roots: []string{workspace}},
 		Shell:          ShellPolicy{Mode: "confirm-each"},
 		Network:        "none",
@@ -124,12 +133,20 @@ func (p *Policy) ToolNames() []string {
 		}
 	case "read-write":
 		if len(p.Filesystem.Roots) > 0 {
-			out = append(out, ToolReadFile, ToolListDir, ToolWriteFile)
+			out = append(out, ToolReadFile, ToolListDir)
+			if !p.BatchActions {
+				out = append(out, ToolWriteFile)
+			}
 		}
 	}
 	switch p.Shell.Mode {
 	case "allowlist", "confirm-each", "unrestricted":
-		out = append(out, ToolRun)
+		if !p.BatchActions {
+			out = append(out, ToolRun)
+		}
+	}
+	if p.BatchActions && (p.Filesystem.Mode == "read-write" || p.Shell.Mode != "" && p.Shell.Mode != "none") {
+		out = append(out, ToolApplyActions)
 	}
 	sort.Strings(out)
 	return out
@@ -153,6 +170,11 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		return v
 	}
 	switch tool {
+	case ToolApplyActions:
+		if !p.BatchActions || p.ApprovalSocket == "" {
+			return Decision{false, "action plans are available only in an interactive workspace session"}, args
+		}
+		return Decision{true, "interactive workspace action plan; every action will be validated before approval"}, args
 	case ToolReadFile, ToolListDir:
 		if p.Filesystem.Mode != "read-only" && p.Filesystem.Mode != "read-write" {
 			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode)}, args
@@ -168,6 +190,9 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		out["path"] = resolved
 		return Decision{true, "filesystem.mode=" + p.Filesystem.Mode + " root=" + root}, out
 	case ToolWriteFile:
+		if p.BatchActions {
+			return Decision{false, "interactive workspace requires apply_actions so related effects can be reviewed together"}, args
+		}
 		if p.Filesystem.Mode != "read-write" {
 			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode) + " (write requires read-write)"}, args
 		}
@@ -184,6 +209,9 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		out["path"] = filepath.Join(parent, filepath.Base(target))
 		return Decision{true, "filesystem.mode=read-write root=" + root}, out
 	case ToolRun:
+		if p.BatchActions {
+			return Decision{false, "interactive workspace requires apply_actions so related effects can be reviewed together"}, args
+		}
 		mode := orNone(p.Shell.Mode)
 		if mode == "none" {
 			return Decision{false, "shell.mode=none"}, args

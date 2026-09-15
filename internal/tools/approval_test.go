@@ -99,6 +99,126 @@ func TestWriteRequiresInteractiveApproval(t *testing.T) {
 	}
 }
 
+func TestInteractivePlanGetsOneApprovalAndExecutesExactActions(t *testing.T) {
+	b, err := NewApprovalBroker()
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("the surrounding test sandbox forbids Unix-domain sockets")
+		}
+		t.Fatal(err)
+	}
+	defer b.Close()
+	root := t.TempDir()
+	svc := NewService(InteractiveWorkspacePolicy("ceo", "id", root, t.TempDir(), b.Socket()), nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.Call(context.Background(), ToolApplyActions, map[string]any{
+			"summary": "Create a short brief and verify it",
+			"actions": []any{
+				map[string]any{"tool": ToolWriteFile, "args": map[string]any{"path": "brief.txt", "content": "approved"}},
+				map[string]any{"tool": ToolRun, "args": map[string]any{"command": "test -f brief.txt"}},
+			},
+		})
+		done <- err
+	}()
+	pending := waitApproval(t, b)
+	if pending.Request.Tool != ToolApplyActions || len(pending.Request.Actions) != 2 || pending.Request.Summary != "Create a short brief and verify it" {
+		t.Fatalf("approval plan = %+v", pending.Request)
+	}
+	// A single decision releases the validated plan. There must not be a
+	// second prompt for the run action.
+	pending.Decide(true)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := b.Next(); ok {
+		t.Fatal("plan prompted more than once")
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "brief.txt")); err != nil || string(got) != "approved" {
+		t.Fatalf("planned write = %q, %v", got, err)
+	}
+}
+
+func TestInteractivePlanRejectsInvalidActionBeforePrompt(t *testing.T) {
+	b, err := NewApprovalBroker()
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("the surrounding test sandbox forbids Unix-domain sockets")
+		}
+		t.Fatal(err)
+	}
+	defer b.Close()
+	root := t.TempDir()
+	svc := NewService(InteractiveWorkspacePolicy("ceo", "id", root, t.TempDir(), b.Socket()), nil)
+	_, err = svc.Call(context.Background(), ToolApplyActions, map[string]any{
+		"summary": "Attempt an escape",
+		"actions": []any{map[string]any{"tool": ToolWriteFile, "args": map[string]any{"path": "../outside.txt", "content": "no"}}},
+	})
+	if err == nil || !errors.Is(err, ErrDenied) {
+		t.Fatalf("invalid plan err = %v", err)
+	}
+	if _, ok := b.Next(); ok {
+		t.Fatal("invalid plan reached approval UI")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(root), "outside.txt")); !os.IsNotExist(err) {
+		t.Fatalf("invalid plan touched disk: %v", err)
+	}
+}
+
+func TestInteractivePolicyRejectsDirectConsequentialCalls(t *testing.T) {
+	b, err := NewApprovalBroker()
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("the surrounding test sandbox forbids Unix-domain sockets")
+		}
+		t.Fatal(err)
+	}
+	defer b.Close()
+	svc := NewService(InteractiveWorkspacePolicy("ceo", "id", t.TempDir(), t.TempDir(), b.Socket()), nil)
+	if _, err := svc.Call(context.Background(), ToolWriteFile, map[string]any{"path": "bypass.txt", "content": "no"}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("direct write err = %v", err)
+	}
+	if _, err := svc.Call(context.Background(), ToolRun, map[string]any{"command": "true"}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("direct run err = %v", err)
+	}
+	if _, ok := b.Next(); ok {
+		t.Fatal("direct action reached approval UI")
+	}
+}
+
+func TestInteractivePlanDenialDoesNotPartiallyExecute(t *testing.T) {
+	b, err := NewApprovalBroker()
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			t.Skip("the surrounding test sandbox forbids Unix-domain sockets")
+		}
+		t.Fatal(err)
+	}
+	defer b.Close()
+	root := t.TempDir()
+	svc := NewService(InteractiveWorkspacePolicy("ceo", "id", root, t.TempDir(), b.Socket()), nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.Call(context.Background(), ToolApplyActions, map[string]any{
+			"summary": "Write two files",
+			"actions": []any{
+				map[string]any{"tool": ToolWriteFile, "args": map[string]any{"path": "one.txt", "content": "one"}},
+				map[string]any{"tool": ToolWriteFile, "args": map[string]any{"path": "two.txt", "content": "two"}},
+			},
+		})
+		done <- err
+	}()
+	waitApproval(t, b).Decide(false)
+	if err := <-done; err == nil {
+		t.Fatal("denied plan succeeded")
+	}
+	for _, n := range []string{"one.txt", "two.txt"} {
+		if _, err := os.Stat(filepath.Join(root, n)); !os.IsNotExist(err) {
+			t.Fatalf("denied plan touched %s: %v", n, err)
+		}
+	}
+}
+
 func waitApproval(t *testing.T, b *ApprovalBroker) *PendingApproval {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

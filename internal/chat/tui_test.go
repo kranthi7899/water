@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -105,19 +106,62 @@ func TestInteractiveWorkspaceApprovalIsScopedToActiveRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	pol := m.sess.Env.RoleTools["ceo"]
-	if pol == nil || len(pol.ToolNames()) != 4 || m.sess.Env.RoleTools["cto"] != nil {
+	if pol == nil || !pol.BatchActions || len(pol.ToolNames()) != 3 || m.sess.Env.RoleTools["cto"] != nil {
 		t.Fatalf("interactive scope leaked or missing: %+v", m.sess.Env.RoleTools)
 	}
 	m.busy = true
 	m.mode = modeApproval
-	m.approval = tools.NewPendingApproval(tools.ApprovalRequest{Role: "ceo", Tool: tools.ToolWriteFile, Args: map[string]any{"path": root + "/brief.md"}})
-	if view := m.View().Content; !strings.Contains(view, "ACTION APPROVAL") || !strings.Contains(view, "allow once") {
+	m.approval = tools.NewPendingApproval(tools.ApprovalRequest{Role: "ceo", Tool: tools.ToolApplyActions, Summary: "Create a brief", Actions: []tools.PlannedAction{{Tool: tools.ToolWriteFile, Args: map[string]any{"path": root + "/brief.md", "content": "x"}}, {Tool: tools.ToolRun, Args: map[string]any{"command": "python3 -c 'print(1)'"}}}})
+	if view := m.View().Content; !strings.Contains(view, "REVIEW 2 ACTIONS") || !strings.Contains(view, "y approve") || strings.Contains(view, "python3 -c") {
 		t.Fatalf("approval UI not rendered: %s", view)
 	}
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
 	got := updated.(*model)
-	if got.mode != modeChat || got.approval != nil || !strings.Contains(got.status, "approved once") {
+	if got.mode != modeChat || got.approval != nil || !strings.Contains(got.status, "approved exact plan") {
 		t.Fatalf("approval acceptance: mode=%v approval=%+v status=%q", got.mode, got.approval, got.status)
+	}
+}
+
+func TestApprovalDetailsRevealCommandOnlyOnDemand(t *testing.T) {
+	m := testModel(t)
+	m.width, m.height = 100, 30
+	if err := m.enterRole("ceo", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.relayout()
+	m.mode = modeApproval
+	m.approval = tools.NewPendingApproval(tools.ApprovalRequest{Role: "ceo", Tool: tools.ToolApplyActions, Actions: []tools.PlannedAction{{Tool: tools.ToolRun, Args: map[string]any{"command": "python3 -c 'print(1)'"}}}})
+	if strings.Contains(m.View().Content, "command: python3") {
+		t.Fatal("raw command shown before details requested")
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	if !strings.Contains(updated.(*model).View().Content, "command: python3") {
+		t.Fatal("details did not reveal exact command")
+	}
+}
+
+func TestApprovalCardPagesWithoutMovingComposer(t *testing.T) {
+	m := testModel(t)
+	m.width, m.height = 60, 12 // smallest supported chat geometry
+	if err := m.enterRole("ceo", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.relayout()
+	m.mode = modeApproval
+	actions := make([]tools.PlannedAction, 0, 6)
+	for i := 0; i < 6; i++ {
+		actions = append(actions, tools.PlannedAction{Tool: tools.ToolWriteFile, Args: map[string]any{"path": fmt.Sprintf("file-%d.txt", i), "content": "x"}})
+	}
+	m.approval = tools.NewPendingApproval(tools.ApprovalRequest{Role: "ceo", Tool: tools.ToolApplyActions, Actions: actions})
+	before := m.regions.Input
+	first := m.View().Content
+	if !strings.Contains(first, "1. write") || !strings.Contains(first, "←/→ review") || m.regions.Input != before {
+		t.Fatalf("first approval page did not preserve geometry: input=%+v before=%+v", m.regions.Input, before)
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	second := updated.(*model).View().Content
+	if !strings.Contains(second, "5. write") && !strings.Contains(second, "6. write") {
+		t.Fatal("next approval page did not expose later actions")
 	}
 }
 

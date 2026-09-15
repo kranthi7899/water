@@ -241,6 +241,6 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 ## Interactive workspace approvals (2026-09-15)
 
 - `water` now gives the active chat role a session-only workspace rooted at the directory where Water was launched. It can read/list only inside that root; Water's own state remains protected.
-- Every write and shell command stops on a fixed chat approval card: `y` allows exactly that action once, `n` denies it. The MCP child waits over a private Unix socket, rather than printing over the terminal.
+- Consequential chat work now uses a prevalidated `apply_actions` plan: up to six declared writes/commands appear in one review card, `y` approves only that exact plan once, `n` executes none, and `d` reveals the exact command. The MCP child waits over a private Unix socket, rather than printing over the terminal.
 - macOS shell actions are confined by `sandbox-exec` and have no network access. Linux and Windows shell actions remain refused until a real kernel sandbox exists. Headless `water run` and orchestration retain their deny-by-default posture.
 - Validation: 103 named tests pass plus `go vet`; the real Unix-socket handshake was separately verified, including that a denied write leaves no file behind.

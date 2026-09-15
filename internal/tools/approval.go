@@ -20,10 +20,20 @@ import (
 
 // ApprovalRequest is the exact action the user sees before it can run.
 type ApprovalRequest struct {
-	CallID string         `json:"call_id"`
-	Role   string         `json:"role"`
-	Tool   string         `json:"tool"`
-	Args   map[string]any `json:"args"`
+	CallID  string          `json:"call_id"`
+	Role    string          `json:"role"`
+	Tool    string          `json:"tool"`
+	Args    map[string]any  `json:"args"`
+	Summary string          `json:"summary,omitempty"`
+	Actions []PlannedAction `json:"actions,omitempty"`
+}
+
+// PlannedAction is one exact, already-authorised effect in an approval plan.
+// The broker never receives model-supplied actions directly: Service resolves
+// them first, then sends this immutable description to the TUI.
+type PlannedAction struct {
+	Tool string         `json:"tool"`
+	Args map[string]any `json:"args"`
 }
 
 type approvalReply struct {

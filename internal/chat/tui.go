@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -122,26 +123,28 @@ type model struct {
 	themes map[string]*theme.Theme
 
 	// chat
-	role     *roles.Role
-	theme    *theme.Theme
-	styler   theme.Styler
-	sess     *Session
-	info     BackendInfo
-	ed       *editor.TextArea
-	vp       viewport.Model
-	showHero bool
-	busy     bool
-	busyText string
-	busyAt   time.Time
-	status   string
-	summary  ExitSummary
-	started  time.Time
-	kitty    bool
-	pending  string // slug awaiting delete confirmation
-	approval *tools.PendingApproval
-	lines    []string
-	err      error
-	quitting bool
+	role            *roles.Role
+	theme           *theme.Theme
+	styler          theme.Styler
+	sess            *Session
+	info            BackendInfo
+	ed              *editor.TextArea
+	vp              viewport.Model
+	showHero        bool
+	busy            bool
+	busyText        string
+	busyAt          time.Time
+	status          string
+	summary         ExitSummary
+	started         time.Time
+	kitty           bool
+	pending         string // slug awaiting delete confirmation
+	approval        *tools.PendingApproval
+	approvalDetails bool
+	approvalPage    int
+	lines           []string
+	err             error
+	quitting        bool
 }
 
 // Run starts the interactive program.
@@ -443,14 +446,28 @@ func (m *model) updateApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch strings.ToLower(msg.String()) {
 	case "y":
 		m.approval.Decide(true)
-		m.status = "approved once — waiting for tool result"
+		m.status = "approved exact plan once — waiting for tool result"
 	case "n", "esc", "ctrl+c":
 		m.approval.Decide(false)
 		m.status = "denied — waiting for the role to continue"
+	case "d":
+		m.approvalDetails = !m.approvalDetails
+		m.approvalPage = 0
+		return m, nil
+	case "left", "up", "k":
+		if m.approvalPage > 0 {
+			m.approvalPage--
+		}
+		return m, nil
+	case "right", "down", "j":
+		m.approvalPage++ // approvalCard clamps this to the last valid page.
+		return m, nil
 	default:
 		return m, nil
 	}
 	m.approval = nil
+	m.approvalDetails = false
+	m.approvalPage = 0
 	m.mode = modeChat
 	return m, nil
 }
@@ -905,11 +922,7 @@ func (m *model) View() tea.View {
 	if m.mode == modeApproval && m.approval != nil {
 		// Keep CHAT and INPUT geometry stable: approval occupies the tail of
 		// the chat region, leaving the composer where it always is.
-		overlay := []string{
-			m.fg(m.theme.Palette.Accent, "  ACTION APPROVAL · "+strings.ToUpper(m.approval.Request.Role)),
-			m.fg(m.theme.Palette.Foreground, "  "+approvalSummary(m.approval.Request)),
-			m.fg(m.theme.Palette.Muted, "  y allow once · n deny · executes only inside the workspace sandbox"),
-		}
+		overlay := m.approvalCard(m.approval.Request)
 		chatLines = fit(chatLines, r.Chat.H, m.width)
 		start := max(0, r.Chat.H-len(overlay))
 		chatLines = append(chatLines[:start], overlay...)
@@ -969,9 +982,98 @@ func (m *model) View() tea.View {
 	return v
 }
 
+// approvalCard uses progressive disclosure: the ordinary view says what will
+// change and where; `d` exposes the exact command only when the person wants
+// to inspect it. This prevents a long generated -c script from becoming the
+// primary affordance while keeping the approval fully informed.
+func (m *model) approvalCard(req tools.ApprovalRequest) []string {
+	title := "  REVIEW ACTION"
+	if len(req.Actions) > 0 {
+		title = fmt.Sprintf("  REVIEW %d ACTIONS", len(req.Actions))
+	}
+	lines := []string{m.fg(m.theme.Palette.Accent, title+" · "+strings.ToUpper(req.Role))}
+	if req.Summary != "" {
+		lines = append(lines, m.fg(m.theme.Palette.Foreground, "  "+truncateApproval(req.Summary, m.width-4)))
+	}
+	actions := req.Actions
+	if len(actions) == 0 {
+		actions = []tools.PlannedAction{{Tool: req.Tool, Args: req.Args}}
+	}
+	// A small terminal must still let the person inspect every effect before
+	// approval. Page the card inside CHAT rather than silently clipping it or
+	// moving the composer. Details intentionally uses one action per page.
+	reserve := len(lines) + 1 // footer
+	perPage := m.regions.Chat.H - reserve
+	if m.approvalDetails {
+		perPage /= 2
+	}
+	if perPage < 1 {
+		perPage = 1
+	}
+	pages := (len(actions) + perPage - 1) / perPage
+	page := m.approvalPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= pages {
+		page = pages - 1
+	}
+	start := page * perPage
+	end := start + perPage
+	if end > len(actions) {
+		end = len(actions)
+	}
+	for i, action := range actions[start:end] {
+		ordinal := start + i + 1
+		line := fmt.Sprintf("  %d. %s", ordinal, actionEffect(action))
+		lines = append(lines, m.fg(m.theme.Palette.Foreground, truncateApproval(line, m.width-2)))
+		if m.approvalDetails && action.Tool == tools.ToolRun {
+			cmd, _ := action.Args["command"].(string)
+			lines = append(lines, m.fg(m.theme.Palette.Muted, truncateApproval("     command: "+cmd, m.width-2)))
+		}
+	}
+	pageHint := ""
+	if pages > 1 {
+		pageHint = fmt.Sprintf(" · %d-%d/%d · ←/→ review", start+1, end, len(actions))
+	}
+	lines = append(lines, m.fg(m.theme.Palette.Muted, "  workspace-only · no network"+pageHint+" · y approve · n deny · d details"))
+	return lines
+}
+
+func truncateApproval(s string, width int) string {
+	if width < 8 || len(s) <= width {
+		return s
+	}
+	return s[:width-1] + "…"
+}
+
+func actionEffect(action tools.PlannedAction) string {
+	path, _ := action.Args["path"].(string)
+	content, _ := action.Args["content"].(string)
+	command, _ := action.Args["command"].(string)
+	switch action.Tool {
+	case tools.ToolWriteFile:
+		return fmt.Sprintf("write %s (%d bytes)", path, len(content))
+	case tools.ToolRun:
+		fields := strings.Fields(command)
+		if len(fields) == 0 {
+			return "run a command"
+		}
+		if len(fields) > 1 && fields[1] == "-c" {
+			return "run " + filepath.Base(fields[0]) + " with an inline script"
+		}
+		return "run " + filepath.Base(fields[0])
+	default:
+		return action.Tool
+	}
+}
+
 // approvalSummary makes the consequential part of a request legible without
 // dumping an entire generated file into a three-line terminal approval card.
 func approvalSummary(req tools.ApprovalRequest) string {
+	if len(req.Actions) > 0 {
+		return fmt.Sprintf("review %d exact workspace action(s)", len(req.Actions))
+	}
 	path, _ := req.Args["path"].(string)
 	command, _ := req.Args["command"].(string)
 	content, _ := req.Args["content"].(string)

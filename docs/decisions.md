@@ -64,7 +64,10 @@ official documentation established that a local agent need not choose between no
 and unrestricted disk access. Codex separates the technical sandbox from per-call approvals and
 correlates each answer with the waiting command. Water now adapts that shape for interactive chat:
 the launch directory is the bounded workspace; reads/listing stay inside it; every write and command
-requires a one-time `y`/`n` approval card. The MCP child reaches that card over a private Unix socket,
+is proposed as an explicit, prevalidated plan of at most six actions, then requires one `y`/`n` approval
+card. The card uses progressive disclosure: intended effect and targets first, exact command text on `d`.
+Water does not batch commands merely because they arrive close together; no undeclared follow-up can ride
+on an approval. The MCP child reaches that card over a private Unix socket,
 not `/dev/tty`, so it cannot corrupt or impersonate the chat UI. Shell remains macOS-only because it
 is refused without kernel-level confinement. Orchestration and headless execution retain the prior
 deny-by-default policy.
