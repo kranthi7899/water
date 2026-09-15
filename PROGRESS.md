@@ -244,3 +244,11 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 - Consequential chat work now uses a prevalidated `apply_actions` plan: up to six declared writes/commands appear in one review card, `y` approves only that exact plan once, `n` executes none, and `d` reveals the exact command. The MCP child waits over a private Unix socket, rather than printing over the terminal.
 - macOS shell actions are confined by `sandbox-exec` and have no network access. Linux and Windows shell actions remain refused until a real kernel sandbox exists. Headless `water run` and orchestration retain their deny-by-default posture.
 - Validation: 103 named tests pass plus `go vet`; the real Unix-socket handshake was separately verified, including that a denied write leaves no file behind.
+
+## Approval-plan UX + voice verification (2026-09-15)
+
+- Replaced repeated, raw per-command approval prompts with `apply_actions`: a role must declare one bounded plan (maximum six writes/commands), and Water validates every path, protected-state boundary, and sandbox requirement before one approval card is shown.
+- The card follows progressive disclosure: it leads with the human intent and each affected target, keeps the composer fixed, pages safely in short terminals, and reveals raw command text only on `d`. `y` approves that immutable plan once; `n` executes none. Direct `write_file` / `run` calls cannot bypass this path in interactive chat.
+- Validation: plan rejection leaves every target untouched; an invalid path never reaches the approval UI; a two-step plan gets exactly one correlated prompt; short-terminal paging preserves chat/input geometry. Full suite: 109 named tests plus `go vet`.
+- Voice status: **working TTS** on this Mac. `water voice 'Water voice verification.'` launched `/usr/bin/say` and exited 0. Interactive chat exposes `○ >` when speech is available but off, `♪ >` when on; `/voice on|off|status` and Ctrl+B toggle it. The OS provider speaks completed role replies only.
+- Speech-to-text / microphone listening remains deliberately unshipped (`Listen` returns a clear unavailable message). Audio is never passed to the model; a future STT provider would transcribe to text before the normal role pipeline.
