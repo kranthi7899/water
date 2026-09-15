@@ -192,6 +192,18 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	if aerr != nil {
 		return Turn{}, aerr
 	}
+	// A quoted leading path is the shape produced by a terminal file drop when
+	// the person adds a request on the same line. It is a per-turn attachment:
+	// it does not silently become session state, and the original message stays
+	// in the transcript for an honest audit trail.
+	if path, request, ok := LeadingAttachment(text); ok {
+		a, err := LoadAttachment(path)
+		if err != nil {
+			return Turn{}, fmt.Errorf("could not attach %s: %w (nothing was sent)", path, err)
+		}
+		prompt = request
+		atts = append(atts, a)
+	}
 	atts = append(atts, s.attachments...)
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindUser, Turn: n, Text: text})
 	start := time.Now()

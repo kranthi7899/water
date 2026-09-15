@@ -224,9 +224,10 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 - Fixed: slash parser treating absolute paths as commands; dropped file pre-fills `/attach`; silent
   `@path` failure; codex/api silently dropping PDFs (now refused, claude reads PDFs natively); chat voice
   needing `--voice`; tool denials now visible in chat and `water run`; no-tools roles point users at
-  `/attach`; header backend name after `/backend`.
+  `/attach`; header backend name after `/backend`; a quoted dropped PDF followed by the request on the
+  same line is now attached for that turn rather than sent as unreadable prose.
 - Verified working: PDF and Retina screenshot on claude, multi-line paste starting with `/`, piping into
   `water run`, `/clear` `/resume` `/compact`, retention pruning to 30 and removing a 100-day-old session,
   `/backend` and `/model` taking effect on the next turn, `/help` listing all 26 commands, OS voice.
 - Open decision: `network: none` (RECONSIDER, evidence threshold stated in decisions.md).
-- Tests: 94.
+- Tests: 96, including attachment scenarios for a dragged PDF plus request, an `@` screenshot, and the Claude document/image wire format.

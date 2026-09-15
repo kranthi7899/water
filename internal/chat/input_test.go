@@ -53,6 +53,73 @@ func TestDroppedPathNormalised(t *testing.T) {
 	}
 }
 
+// TestQuotedLeadingPathAttachesForTheTurn covers the common terminal flow:
+// drag a PDF into the composer, then type the request without first running
+// /attach. The file must reach the model and must not leak into later turns.
+func TestQuotedLeadingPathAttachesForTheTurn(t *testing.T) {
+	s, fake := newSession(t, func(req backend.Request) string { return "brief" })
+	p := filepath.Join(t.TempDir(), "Water Live Demo.pdf")
+	if err := os.WriteFile(p, []byte("%PDF-1.4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	line := `"` + p + `" write a presenter brief`
+	gotPath, gotRequest, ok := LeadingAttachment(line)
+	if !ok || gotPath != p || gotRequest != "write a presenter brief" {
+		t.Fatalf("LeadingAttachment(%q) = %q, %q, %v", line, gotPath, gotRequest, ok)
+	}
+	turn, err := s.Send(context.Background(), line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := fake.Requests()[0]
+	if !strings.Contains(req.Prompt, "write a presenter brief") || len(req.Attachments) != 1 || req.Attachments[0].Kind != "document" {
+		t.Fatalf("request = %+v", req)
+	}
+	if !turn.Untrusted || len(s.Attachments()) != 0 {
+		t.Fatalf("turn attachment escaped its scope: %+v, session=%+v", turn, s.Attachments())
+	}
+	if _, err := s.Send(context.Background(), "now shorten it"); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.Requests()[1].Attachments; len(got) != 0 {
+		t.Fatalf("attachment leaked into next turn: %+v", got)
+	}
+}
+
+// TestAttachmentScenarios exercises the interactive forms people actually
+// use: a dropped PDF followed by a request, and an @-referenced screenshot.
+// Both are per-turn, reach the backend with their real media kind, and mark
+// the turn as external/untrusted input.
+func TestAttachmentScenarios(t *testing.T) {
+	s, fake := newSession(t, func(req backend.Request) string { return "review complete" })
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "demo.pdf")
+	shot := filepath.Join(dir, "screen.png")
+	if err := os.WriteFile(pdf, []byte("%PDF-1.4"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shot, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct {
+		input string
+		kind  string
+	}{
+		{`"` + pdf + `" write a brief`, "document"},
+		{"describe @" + shot, "image"},
+	} {
+		turn, err := s.Send(context.Background(), scenario.input)
+		if err != nil || !turn.Untrusted {
+			t.Fatalf("%q: turn=%+v err=%v", scenario.input, turn, err)
+		}
+	}
+	for i, req := range fake.Requests() {
+		if len(req.Attachments) != 1 || req.Attachments[0].Kind != []string{"document", "image"}[i] {
+			t.Fatalf("scenario %d attachment = %+v", i, req.Attachments)
+		}
+	}
+}
+
 // TestAtPathFailureIsLoud — an @path that cannot be loaded stops the turn
 // with a reason instead of silently sending the message without the file.
 func TestAtPathFailureIsLoud(t *testing.T) {

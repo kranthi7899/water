@@ -162,6 +162,43 @@ func DroppedPath(line string) (string, bool) {
 	return "", false
 }
 
+// LeadingAttachment returns a regular file explicitly quoted at the beginning
+// of a message and the request that follows it. Terminal drag-and-drop often
+// inserts a quoted path, then the person immediately types their request:
+//
+//	"/Users/me/Downloads/Board Deck.pdf" write a brief
+//
+// The quotes are intentional evidence that this is a file reference, rather
+// than prose which happens to begin with a path. Only that unambiguous form is
+// auto-attached; bare paths remain plain text unless they are the whole input
+// (DroppedPath) or explicitly use @path.
+func LeadingAttachment(line string) (path, request string, ok bool) {
+	t := strings.TrimSpace(line)
+	if len(t) < 3 || (t[0] != '\'' && t[0] != '"') {
+		return "", "", false
+	}
+	quote := t[0]
+	end := 1
+	for end < len(t) {
+		if t[end] == quote && (end == 0 || t[end-1] != '\\') {
+			break
+		}
+		end++
+	}
+	if end == len(t) {
+		return "", "", false
+	}
+	request = strings.TrimSpace(t[end+1:])
+	if request == "" {
+		return "", "", false
+	}
+	path = NormalizePath(t[:end+1])
+	if fi, err := os.Stat(path); err == nil && fi.Mode().IsRegular() {
+		return path, request, true
+	}
+	return "", "", false
+}
+
 // NormalizePath undoes the quoting terminals apply to dragged paths and
 // expands a leading ~.
 func NormalizePath(p string) string {

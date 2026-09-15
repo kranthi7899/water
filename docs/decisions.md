@@ -44,7 +44,9 @@ stream-json message. Documents use the `document` block; text is inlined inside 
 UNTRUSTED markers. Codex has `--image` in recent releases; detected at runtime, not assumed.
 
 Syntax shipped: `/attach <path>` (session-scoped, listed in `/status`), `@path` tokens (per turn),
-`water run --attach`. Promotion of an attachment to memory is manual via `/remember`, like
+`water run --attach`, and the terminal drag-and-type form `"/absolute/path.pdf" write a brief`
+(per turn). The latter only activates for an explicitly quoted, existing leading file path; ordinary
+path-shaped prose remains text. Promotion of an attachment to memory is manual via `/remember`, like
 everything else. Every turn that carried an attachment is marked untrusted and rendered as such.
 
 ## Part 10 — the open questions, resolved or flagged
@@ -351,6 +353,9 @@ Retina screenshot and a pre-populated session store. Guardrail: parity is not a 
   when a provider exists. Tool denials reached the user only through the model's paraphrase; they are
   now shown as a line under the reply and on stderr for `water run`. Roles without file tools now tell
   the user to `/attach` instead of just refusing. The header kept the old backend name after `/backend`.
+  A dragged, quoted file path followed by a request was previously ordinary prose; it is now a visible,
+  per-turn attachment, so `"/path/Water - Live Demo Script.pdf" write a brief` delivers the PDF to
+  Claude rather than asking the CEO to guess from a path.
 - **Held as designed:** CEO/COO have no tools, CTO/Design are read-only inside declared roots, no shell
   in v1. Attaching a file is the user's explicit act and does not change any role's tool access.
 - **Reconsider, not resolved:** `network: none`. In 10 recorded runs, 1 of 25 specialist deliverables
