@@ -49,6 +49,14 @@ Syntax shipped: `/attach <path>` (session-scoped, listed in `/status`), `@path` 
 path-shaped prose remains text. Promotion of an attachment to memory is manual via `/remember`, like
 everything else. Every turn that carried an attachment is marked untrusted and rendered as such.
 
+**Document breadth (2026-09-15).** Plain-text formats are dynamic rather than allowlisted: Markdown,
+text, source files, JSON, CSV, YAML and similar readable files are supplied as untrusted text with
+their detected media type. PDFs and supported images use Claude content blocks. On macOS, an explicit
+user attachment of `.doc`, `.docx`, `.rtf`, or `.odt` is converted by the system `textutil` reader to
+bounded untrusted text. This is not role filesystem access. Spreadsheets, slide decks, archives,
+executables and other opaque binaries still fail loudly; each needs a format-specific reader before
+Water can make a truthful promise to read it.
+
 ## Part 10 — the open questions, resolved or flagged
 
 1. **CEO persona scope (people decisions).** *Considered revision, not drift.* The sibling project's

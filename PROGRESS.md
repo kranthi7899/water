@@ -230,4 +230,10 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
   `water run`, `/clear` `/resume` `/compact`, retention pruning to 30 and removing a 100-day-old session,
   `/backend` and `/model` taking effect on the next turn, `/help` listing all 26 commands, OS voice.
 - Open decision: `network: none` (RECONSIDER, evidence threshold stated in decisions.md).
-- Tests: 96, including attachment scenarios for a dragged PDF plus request, an `@` screenshot, and the Claude document/image wire format.
+- Tests: 98, including attachment scenarios for a dragged PDF plus request, an `@` screenshot, the Claude document/image wire format, and dynamic text/office-document handling.
+
+## Attachment breadth update (2026-09-15)
+
+- Plain-text documents are dynamically accepted (including `.md`, `.yaml`, `.json`, `.csv`, and source files).
+- macOS `.doc`, `.docx`, `.rtf`, and `.odt` attachments are converted through the system `textutil` reader into bounded untrusted text.
+- PDFs and supported images retain their native structured delivery to Claude. Opaque binaries still refuse clearly instead of pretending to be readable.

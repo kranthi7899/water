@@ -120,6 +120,45 @@ func TestAttachmentScenarios(t *testing.T) {
 	}
 }
 
+// TestDocumentKinds shows that common source documents remain dynamic text
+// attachments, and that an office document is extracted through the explicit
+// user-attachment path rather than becoming a role filesystem capability.
+func TestDocumentKinds(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, data string
+	}{
+		{"notes.md", "# Release notes\n"},
+		{"plan.yaml", "phase: one\n"},
+		{"data.csv", "name,value\nwater,1\n"},
+	} {
+		p := filepath.Join(dir, tc.name)
+		if err := os.WriteFile(p, []byte(tc.data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		a, err := LoadAttachment(p)
+		if err != nil || a.Kind != "text" || string(a.Data) != tc.data {
+			t.Fatalf("%s: attachment=%+v err=%v", tc.name, a, err)
+		}
+	}
+	orig := officeTextExtractor
+	defer func() { officeTextExtractor = orig }()
+	officeTextExtractor = func(path string) ([]byte, error) {
+		if !strings.HasSuffix(path, ".docx") {
+			t.Fatalf("unexpected extraction path %q", path)
+		}
+		return []byte("Document body"), nil
+	}
+	p := filepath.Join(dir, "brief.docx")
+	if err := os.WriteFile(p, []byte("opaque office bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a, err := LoadAttachment(p)
+	if err != nil || a.Kind != "text" || string(a.Data) != "Document body" {
+		t.Fatalf("office extraction: attachment=%+v err=%v", a, err)
+	}
+}
+
 // TestAtPathFailureIsLoud — an @path that cannot be loaded stops the turn
 // with a reason instead of silently sending the message without the file.
 func TestAtPathFailureIsLoud(t *testing.T) {

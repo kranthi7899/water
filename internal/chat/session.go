@@ -10,8 +10,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"mime"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -273,6 +276,14 @@ func (s *Session) attachmentWarning(a backend.Attachment) string {
 // MaxAttachmentBytes caps a single attachment.
 const MaxAttachmentBytes = 8 * 1024 * 1024
 
+// MaxExtractedTextBytes prevents an office document with a small compressed
+// representation from expanding into an unbounded model prompt.
+const MaxExtractedTextBytes = 2 * 1024 * 1024
+
+// officeTextExtractor is a seam for tests. The operation is performed only
+// after the user explicitly attaches a named file; it is not role tool access.
+var officeTextExtractor = extractOfficeText
+
 // LoadAttachment reads a file into an Attachment, classifying it by extension.
 func LoadAttachment(p string) (backend.Attachment, error) {
 	p = NormalizePath(p)
@@ -287,8 +298,9 @@ func LoadAttachment(p string) (backend.Attachment, error) {
 	if err != nil {
 		return backend.Attachment{}, err
 	}
+	ext := strings.ToLower(filepath.Ext(p))
 	a := backend.Attachment{Name: filepath.Base(p), Data: b}
-	switch strings.ToLower(filepath.Ext(p)) {
+	switch ext {
 	case ".png":
 		a.Kind, a.MediaType = "image", "image/png"
 	case ".jpg", ".jpeg":
@@ -300,12 +312,61 @@ func LoadAttachment(p string) (backend.Attachment, error) {
 	case ".pdf":
 		a.Kind, a.MediaType = "document", "application/pdf"
 	default:
+		// macOS textutil is an OS-provided document reader for the office
+		// formats it advertises. Extracted content stays untrusted text; Water
+		// does not grant the role filesystem access just because it can read an
+		// attachment.
+		if isOfficeDocument(ext) {
+			text, err := officeTextExtractor(p)
+			if err != nil {
+				return backend.Attachment{}, err
+			}
+			a.Kind, a.MediaType, a.Data = "text", "text/plain", text
+			return a, nil
+		}
 		a.Kind, a.MediaType = "text", "text/plain"
+		if detected := mime.TypeByExtension(ext); detected != "" {
+			a.MediaType = detected
+		}
 		if !isText(b) {
-			return backend.Attachment{}, fmt.Errorf("%s is binary and not an image/PDF", p)
+			return backend.Attachment{}, fmt.Errorf("%s is a binary format Water cannot read directly; attach text, Markdown, JSON, CSV, YAML, a supported image/PDF, or on macOS a .doc, .docx, .rtf, or .odt document", p)
 		}
 	}
 	return a, nil
+}
+
+func isOfficeDocument(ext string) bool {
+	switch ext {
+	case ".doc", ".docx", ".rtf", ".odt":
+		return true
+	default:
+		return false
+	}
+}
+
+// extractOfficeText turns a user-attached office document into bounded text.
+// It deliberately uses exec.CommandContext, never a shell: the filename is
+// one argv value after -- and cannot become an instruction or command.
+func extractOfficeText(path string) ([]byte, error) {
+	if runtime.GOOS != "darwin" {
+		return nil, fmt.Errorf("%s is an office document; automatic extraction is currently available on macOS only", path)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/usr/bin/textutil", "-convert", "txt", "-stdout", "--", path).Output()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("extracting %s timed out", path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("could not extract text from %s: %w", path, err)
+	}
+	if len(out) > MaxExtractedTextBytes {
+		return nil, fmt.Errorf("%s expands to %d bytes of text; limit is %d", path, len(out), MaxExtractedTextBytes)
+	}
+	if !isText(out) {
+		return nil, fmt.Errorf("%s did not produce readable text", path)
+	}
+	return out, nil
 }
 
 func isText(b []byte) bool {

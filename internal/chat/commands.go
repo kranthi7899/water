@@ -71,7 +71,7 @@ var Commands = []Command{
 	{"why", "/why", "traceability for the last response: experience entries, skills, inbox"},
 	{"skills", "/skills", "which skills loaded on the last turn and why"},
 	{"flag", "/flag [reason]", "mark the last response bad for the feedback loop"},
-	{"attach", "/attach <path> | /attach list | /attach clear", "attach a file for the rest of the session (@path works per turn)"},
+	{"attach", "/attach <path> | /attach list | /attach clear", "attach a document, image, or text file for this session (@path works per turn)"},
 	{"editor", "/editor", "compose the next message in $EDITOR"},
 	{"copy", "/copy [N]", "copy the last (or Nth-from-last) reply to the clipboard (Ctrl+Y)"},
 	{"undo", "/undo", "drop the last exchange from the active context (transcript is kept)"},
