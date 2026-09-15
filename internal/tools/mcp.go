@@ -70,6 +70,12 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 	if callTimeout <= 0 {
 		callTimeout = DefaultCallTimeout
 	}
+	// A human may reasonably need longer than the normal tool deadline to
+	// review a write or command. The MCP child waits on the private approval
+	// bridge, not stdin, so this does not stall other requests.
+	if svc.Policy != nil && svc.Policy.ApprovalSocket != "" && callTimeout < 5*time.Minute {
+		callTimeout = 5 * time.Minute
+	}
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
 	for sc.Scan() {

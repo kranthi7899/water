@@ -16,6 +16,7 @@ import (
 	"water/internal/config"
 	"water/internal/roles"
 	"water/internal/session"
+	"water/internal/tools"
 	"water/internal/voice"
 )
 
@@ -102,6 +103,21 @@ func (a *App) runChat(ctx context.Context, start, resume string, picker bool) er
 			}
 			return sel.Backend, "session override (/backend)", nil
 		},
+	}
+	// Interactive chat follows the same broad shape as Codex's ask-for-
+	// approval profile: the directory the user launched from is the only
+	// workspace, while writes and commands require an explicit per-action
+	// decision. Headless runs and orchestration do not receive this overlay.
+	if workspace, werr := os.Getwd(); werr == nil {
+		if approvals, aerr := tools.NewApprovalBroker(); aerr == nil {
+			defer approvals.Close()
+			opts.Approvals = approvals
+			opts.WorkspacePolicy = func(r *roles.Role) *tools.Policy {
+				return tools.InteractiveWorkspacePolicy(r.Slug, r.RoleID, workspace, config.Home(), approvals.Socket())
+			}
+		} else {
+			fmt.Fprintln(os.Stderr, "warning: interactive action approvals unavailable; local tools remain disabled:", aerr)
+		}
 	}
 	// Voice is wired whenever the provider works, so /voice on and Ctrl+B
 	// work without restarting; --voice only decides whether it starts on.

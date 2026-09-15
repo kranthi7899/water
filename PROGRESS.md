@@ -237,3 +237,10 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 - Plain-text documents are dynamically accepted (including `.md`, `.yaml`, `.json`, `.csv`, and source files).
 - macOS `.doc`, `.docx`, `.rtf`, and `.odt` attachments are converted through the system `textutil` reader into bounded untrusted text.
 - PDFs and supported images retain their native structured delivery to Claude. Opaque binaries still refuse clearly instead of pretending to be readable.
+
+## Interactive workspace approvals (2026-09-15)
+
+- `water` now gives the active chat role a session-only workspace rooted at the directory where Water was launched. It can read/list only inside that root; Water's own state remains protected.
+- Every write and shell command stops on a fixed chat approval card: `y` allows exactly that action once, `n` denies it. The MCP child waits over a private Unix socket, rather than printing over the terminal.
+- macOS shell actions are confined by `sandbox-exec` and have no network access. Linux and Windows shell actions remain refused until a real kernel sandbox exists. Headless `water run` and orchestration retain their deny-by-default posture.
+- Validation: 103 named tests pass plus `go vet`; the real Unix-socket handshake was separately verified, including that a denied write leaves no file behind.

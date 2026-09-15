@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"io/fs"
@@ -21,6 +22,7 @@ import (
 	"water/internal/roles"
 	"water/internal/session"
 	"water/internal/theme"
+	"water/internal/tools"
 )
 
 // BackendInfo is what the header and /status show for the current role.
@@ -47,6 +49,10 @@ type Options struct {
 	VoiceOn       bool // start with spoken replies on
 	BudgetLine    func() string
 	OnRateLimit   func(rl *backend.RateLimit)
+	// WorkspacePolicy grants the active interactive role a bounded local
+	// workspace. It is absent for the existing deny-by-default behavior.
+	WorkspacePolicy func(role *roles.Role) *tools.Policy
+	Approvals       *tools.ApprovalBroker
 }
 
 type mode int
@@ -55,6 +61,7 @@ const (
 	modePicker mode = iota
 	modeChat
 	modeConfirm
+	modeApproval
 )
 
 type turnMsg struct {
@@ -131,6 +138,7 @@ type model struct {
 	started  time.Time
 	kitty    bool
 	pending  string // slug awaiting delete confirmation
+	approval *tools.PendingApproval
 	lines    []string
 	err      error
 	quitting bool
@@ -195,6 +203,17 @@ func (m *model) enterRole(slug, resume string) error {
 	env, info, err := m.opts.EnvFor(r)
 	if err != nil {
 		return err
+	}
+	if m.opts.WorkspacePolicy != nil {
+		// Env is shared by the app, but a chat scope belongs to exactly one
+		// active role. Copy the map before adding the temporary capability so
+		// a /consult cannot inherit this role's machine access.
+		local := make(map[string]*tools.Policy, len(env.RoleTools)+1)
+		for k, v := range env.RoleTools {
+			local[k] = v
+		}
+		local[r.Slug] = m.opts.WorkspacePolicy(r)
+		env.RoleTools = local
 	}
 	store := m.opts.StoreFor(r)
 	s, err := Open(m.opts.Registry, r, env, store, resume)
@@ -297,8 +316,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tickMsg:
+		if m.busy && m.approval == nil && m.opts.Approvals != nil {
+			if pending, ok := m.opts.Approvals.Next(); ok {
+				m.approval = pending
+				m.mode = modeApproval
+				m.status = "approval required — y allow once · n deny"
+			}
+		}
 		if m.busy {
-			m.status = fmt.Sprintf("%s (%s)", m.busyText, time.Since(m.busyAt).Round(100*time.Millisecond))
+			if m.mode != modeApproval {
+				m.status = fmt.Sprintf("%s (%s)", m.busyText, time.Since(m.busyAt).Round(100*time.Millisecond))
+			}
 			return m, tick()
 		}
 		return m, nil
@@ -341,6 +369,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updatePicker(msg)
 		case modeConfirm:
 			return m.updateConfirm(msg)
+		case modeApproval:
+			return m.updateApproval(msg)
 		default:
 			return m.updateChat(msg)
 		}
@@ -399,6 +429,29 @@ func (m *model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeChat
 		m.status = "kept"
 	}
+	return m, nil
+}
+
+// updateApproval is the only place an MCP tool action can cross from a
+// request to execution. The child process remains blocked on its private
+// socket until this exact prompt receives y or n.
+func (m *model) updateApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.approval == nil {
+		m.mode = modeChat
+		return m, nil
+	}
+	switch strings.ToLower(msg.String()) {
+	case "y":
+		m.approval.Decide(true)
+		m.status = "approved once — waiting for tool result"
+	case "n", "esc", "ctrl+c":
+		m.approval.Decide(false)
+		m.status = "denied — waiting for the role to continue"
+	default:
+		return m, nil
+	}
+	m.approval = nil
+	m.mode = modeChat
 	return m, nil
 }
 
@@ -849,6 +902,18 @@ func (m *model) View() tea.View {
 		rows = append(rows, fit(m.hero(), r.Hero.H, m.width)...)
 	}
 	chatLines := strings.Split(m.vp.View(), "\n")
+	if m.mode == modeApproval && m.approval != nil {
+		// Keep CHAT and INPUT geometry stable: approval occupies the tail of
+		// the chat region, leaving the composer where it always is.
+		overlay := []string{
+			m.fg(m.theme.Palette.Accent, "  ACTION APPROVAL · "+strings.ToUpper(m.approval.Request.Role)),
+			m.fg(m.theme.Palette.Foreground, "  "+approvalSummary(m.approval.Request)),
+			m.fg(m.theme.Palette.Muted, "  y allow once · n deny · executes only inside the workspace sandbox"),
+		}
+		chatLines = fit(chatLines, r.Chat.H, m.width)
+		start := max(0, r.Chat.H-len(overlay))
+		chatLines = append(chatLines[:start], overlay...)
+	}
 	// Slash autocomplete: a dropdown drawn over the bottom of the CHAT
 	// region (content, not geometry: CHAT/INPUT rows are unchanged).
 	if matches := Complete(m.ed.Value()); len(matches) > 0 && !m.busy {
@@ -902,6 +967,30 @@ func (m *model) View() tea.View {
 		v.Cursor = &tea.Cursor{Position: tea.Position{X: r.Input.Col + x, Y: r.Input.Row + y}, Color: col, Shape: tea.CursorBar, Blink: true}
 	}
 	return v
+}
+
+// approvalSummary makes the consequential part of a request legible without
+// dumping an entire generated file into a three-line terminal approval card.
+func approvalSummary(req tools.ApprovalRequest) string {
+	path, _ := req.Args["path"].(string)
+	command, _ := req.Args["command"].(string)
+	content, _ := req.Args["content"].(string)
+	switch req.Tool {
+	case tools.ToolWriteFile:
+		preview := strings.ReplaceAll(strings.TrimSpace(content), "\n", " ")
+		if len(preview) > 140 {
+			preview = preview[:140] + "…"
+		}
+		if preview == "" {
+			return fmt.Sprintf("write_file %s (%d bytes)", path, len(content))
+		}
+		return fmt.Sprintf("write_file %s (%d bytes): %s", path, len(content), preview)
+	case tools.ToolRun:
+		return "run " + command
+	default:
+		args, _ := json.Marshal(req.Args)
+		return req.Tool + " " + string(args)
+	}
 }
 
 func (m *model) pickerView() string {

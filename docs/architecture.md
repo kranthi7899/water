@@ -15,6 +15,7 @@
 | Persona files belong to their folder | `identity.Verify` in `persona.Load` | `identity` tests, `TestSkillSchemaValid` |
 | `claude` always runs with `--strict-mcp-config` and `--tools ""` | `ClaudeSubscription.BuildArgs` | `TestStrictMCPConfigSurvives` |
 | Tools: deny by default, roots explicit, symlinks/`..` confined | `tools.Policy.Authorize`, `ResolveWithinRoots` | `TestRoleWithoutToolsInvokesNothing`, `TestReadOutsideRootsFails` |
+| Interactive write/command actions pause for a correlated one-time approval | `tools.ApprovalBroker` → `chat.updateApproval` | `TestWriteRequiresInteractiveApproval`, `TestInteractiveWorkspaceApprovalIsScopedToActiveRole` |
 | Chat/input geometry is theme-invariant | `layout.Compute` takes no theme input | `TestThemeDoesNotMoveChat`, `TestHeroNeverCollides` |
 
 ## One orchestrated run (hierarchy router)
@@ -46,6 +47,13 @@ from terminal size alone. Themes (`themes/<slug>.yaml`) supply palette and hero 
 scaled into a fixed hero box and dropped when the terminal is too small. Transcripts are per-role
 JSONL under `~/.water/sessions/<role>/`; `Open` reads only the tail after the last summary
 checkpoint, so compaction never needs the whole file.
+
+When launched from a directory, chat also creates a session-only local workspace policy for its
+active role. Reads/listing inside that directory are permitted; every write or shell command enters
+a fixed-height approval card in CHAT and waits for `y`/`n`. The MCP child is connected to the TUI by
+a private Unix socket, so it never prints its own prompt over the terminal. The policy is copied only
+for the active role, so `/consult` cannot inherit it. Headless sessions and orchestration do not use
+this overlay.
 
 ## Extension points
 

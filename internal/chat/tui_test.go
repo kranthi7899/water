@@ -15,6 +15,7 @@ import (
 	"water/internal/roles"
 	"water/internal/session"
 	themepkg "water/internal/theme"
+	"water/internal/tools"
 )
 
 func testModel(t *testing.T) *model {
@@ -90,5 +91,42 @@ func TestCompletedTurnClearsComposer(t *testing.T) {
 	got := updated.(*model)
 	if got.busy || got.ed.Value() != "" {
 		t.Fatalf("completion left composer state: busy=%v value=%q", got.busy, got.ed.Value())
+	}
+}
+
+func TestInteractiveWorkspaceApprovalIsScopedToActiveRole(t *testing.T) {
+	m := testModel(t)
+	root := t.TempDir()
+	m.opts.WorkspacePolicy = func(r *roles.Role) *tools.Policy {
+		return tools.InteractiveWorkspacePolicy(r.Slug, r.RoleID, root, t.TempDir(), "test-socket")
+	}
+	m.width, m.height = 100, 30
+	if err := m.enterRole("ceo", ""); err != nil {
+		t.Fatal(err)
+	}
+	pol := m.sess.Env.RoleTools["ceo"]
+	if pol == nil || len(pol.ToolNames()) != 4 || m.sess.Env.RoleTools["cto"] != nil {
+		t.Fatalf("interactive scope leaked or missing: %+v", m.sess.Env.RoleTools)
+	}
+	m.busy = true
+	m.mode = modeApproval
+	m.approval = tools.NewPendingApproval(tools.ApprovalRequest{Role: "ceo", Tool: tools.ToolWriteFile, Args: map[string]any{"path": root + "/brief.md"}})
+	if view := m.View().Content; !strings.Contains(view, "ACTION APPROVAL") || !strings.Contains(view, "allow once") {
+		t.Fatalf("approval UI not rendered: %s", view)
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'y', Text: "y"})
+	got := updated.(*model)
+	if got.mode != modeChat || got.approval != nil || !strings.Contains(got.status, "approved once") {
+		t.Fatalf("approval acceptance: mode=%v approval=%+v status=%q", got.mode, got.approval, got.status)
+	}
+}
+
+func TestApprovalSummaryShowsEffectWithoutDumpingContent(t *testing.T) {
+	got := approvalSummary(tools.ApprovalRequest{Tool: tools.ToolWriteFile, Args: map[string]any{"path": "/work/brief.md", "content": strings.Repeat("x", 200)}})
+	if !strings.Contains(got, "/work/brief.md") || !strings.Contains(got, "200 bytes") || len(got) > 210 {
+		t.Fatalf("write summary = %q", got)
+	}
+	if got := approvalSummary(tools.ApprovalRequest{Tool: tools.ToolRun, Args: map[string]any{"command": "cupsfilter deck.html > deck.pdf"}}); got != "run cupsfilter deck.html > deck.pdf" {
+		t.Fatalf("run summary = %q", got)
 	}
 }

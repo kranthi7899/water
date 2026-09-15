@@ -37,6 +37,10 @@ type Policy struct {
 	Filesystem FSPolicy    `json:"filesystem"`
 	Shell      ShellPolicy `json:"shell"`
 	Network    string      `json:"network"` // none
+	// ApprovalSocket is a private session socket used only by an interactive
+	// chat parent to approve one write or shell action. It is absent for
+	// orchestration and headless runs, which therefore remain deny-by-default.
+	ApprovalSocket string `json:"approval_socket,omitempty"`
 	// Trace is the narrow verification capability (Part 1 follow-up):
 	// "current-run" lets the role resolve evidence references against the
 	// trace of the run it is participating in. Not an MCP tool; it never
@@ -72,6 +76,29 @@ var ErrDenied = errors.New("denied by tool policy")
 // HasTrace reports whether the role may resolve evidence references in its
 // own run's trace.
 func (p *Policy) HasTrace() bool { return p != nil && p.Trace == "current-run" }
+
+// RequiresApproval identifies the actions with external effects. Reads and
+// directory listings within an already-approved workspace do not prompt; a
+// write or process launch always does.
+func (p *Policy) RequiresApproval(tool string) bool {
+	return p != nil && p.ApprovalSocket != "" && (tool == ToolWriteFile || tool == ToolRun)
+}
+
+// InteractiveWorkspacePolicy is the local-chat baseline: one explicit
+// workspace is readable and writable, while every write and command waits for
+// approval from the person at the terminal. It is never used for headless
+// runs or orchestration.
+func InteractiveWorkspacePolicy(role, roleID, workspace, protected, approvalSocket string) *Policy {
+	return &Policy{
+		Role:           role,
+		RoleID:         roleID,
+		ApprovalSocket: approvalSocket,
+		Filesystem:     FSPolicy{Mode: "read-write", Roots: []string{workspace}},
+		Shell:          ShellPolicy{Mode: "confirm-each"},
+		Network:        "none",
+		Protected:      []string{protected},
+	}
+}
 
 // Empty reports whether the policy grants no subprocess tools at all. Trace
 // access is deliberately excluded: it is served in-process, never over MCP.
@@ -171,7 +198,10 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		case "unrestricted":
 			return Decision{true, "shell.mode=unrestricted (confined by sandbox)"}, args
 		case "confirm-each":
-			return Decision{false, "shell.mode=confirm-each needs an interactive approval channel, which this build does not have"}, args
+			if p.ApprovalSocket == "" {
+				return Decision{false, "shell.mode=confirm-each needs an interactive approval channel, which this build does not have"}, args
+			}
+			return Decision{true, "shell.mode=confirm-each; awaiting user approval (confined by sandbox)"}, args
 		case "allowlist":
 			cmd := strings.TrimSpace(str("command"))
 			// The allowlist names single simple commands. Chaining, pipes,

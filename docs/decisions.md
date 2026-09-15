@@ -57,6 +57,18 @@ bounded untrusted text. This is not role filesystem access. Spreadsheets, slide 
 executables and other opaque binaries still fail loudly; each needs a format-specific reader before
 Water can make a truthful promise to read it.
 
+## Interactive local-workspace approvals (2026-09-15)
+
+**Revision to the original no-tool chat posture.** Comparing Water with the public Codex source and
+official documentation established that a local agent need not choose between no machine capability
+and unrestricted disk access. Codex separates the technical sandbox from per-call approvals and
+correlates each answer with the waiting command. Water now adapts that shape for interactive chat:
+the launch directory is the bounded workspace; reads/listing stay inside it; every write and command
+requires a one-time `y`/`n` approval card. The MCP child reaches that card over a private Unix socket,
+not `/dev/tty`, so it cannot corrupt or impersonate the chat UI. Shell remains macOS-only because it
+is refused without kernel-level confinement. Orchestration and headless execution retain the prior
+deny-by-default policy.
+
 ## Part 10 — the open questions, resolved or flagged
 
 1. **CEO persona scope (people decisions).** *Considered revision, not drift.* The sibling project's
