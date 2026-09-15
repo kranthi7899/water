@@ -100,6 +100,16 @@ func TestWriteRequiresInteractiveApproval(t *testing.T) {
 }
 
 func TestInteractivePlanGetsOneApprovalAndExecutesExactActions(t *testing.T) {
+	if !SandboxAvailable() {
+		// The plan includes a run action, and shell.mode=confirm-each is
+		// refused outright wherever no OS sandbox exists (macOS only, see
+		// docs/decisions.md) — before any approval is ever requested. On such
+		// a host the test's own wait for that prompt would time out, not
+		// because approval is broken but because the run action is correctly
+		// refused pre-prompt. Skip rather than fake a capability this host
+		// doesn't have.
+		t.Skip("no OS sandbox on this platform; run actions are refused pre-prompt by design")
+	}
 	b, err := NewApprovalBroker()
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) {
