@@ -43,9 +43,9 @@ func (a *App) voiceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			vp, ok := voice.Open(cfg.Voice.Provider)
-			if !ok {
-				return exitWith(ExitUsage, fmt.Errorf("provider %q not registered (%v)", cfg.Voice.Provider, voice.Names()))
+			vp, err := a.voiceProvider(cfg, "ceo")
+			if err != nil {
+				return exitWith(ExitUsage, err)
 			}
 			if !vp.Available() {
 				return exitWith(ExitUsage, fmt.Errorf("%s", voice.Absence(vp)))

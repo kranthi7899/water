@@ -172,8 +172,8 @@ func (a *App) doctorCmd() *cobra.Command {
 			add("sessions", "ok", fmt.Sprintf("%s (keep %d, max age %s, pinned exempt)", filepath.Join(config.Home(), "sessions"), cfg.Sessions.Keep, cfg.Sessions.MaxAge))
 
 			// Voice.
-			if vp, ok := voice.Open(cfg.Voice.Provider); !ok {
-				add("voice", "fail", fmt.Sprintf("provider %q not registered", cfg.Voice.Provider))
+			if vp, verr := a.voiceProvider(cfg, "ceo"); verr != nil {
+				add("voice", "fail", verr.Error())
 			} else if !vp.Available() {
 				add("voice", "warn", voice.Absence(vp))
 			} else {

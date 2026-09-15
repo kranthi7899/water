@@ -165,6 +165,27 @@ func TestApprovalCardPagesWithoutMovingComposer(t *testing.T) {
 	}
 }
 
+func TestVoiceFactoryFollowsActiveRole(t *testing.T) {
+	m := testModel(t)
+	m.opts.VoiceFor = func(r *roles.Role) func(string) error {
+		return func(string) error { return nil }
+	}
+	m.opts.VoiceOn = true
+	m.width, m.height = 100, 30
+	if err := m.enterRole("ceo", ""); err != nil {
+		t.Fatal(err)
+	}
+	if m.sess.Voice == nil || !m.sess.VoiceOn {
+		t.Fatal("CEO did not receive voice renderer")
+	}
+	if err := m.enterRole("cto", ""); err != nil {
+		t.Fatal(err)
+	}
+	if m.sess.Voice == nil || !m.sess.VoiceOn {
+		t.Fatal("CTO did not receive its voice renderer")
+	}
+}
+
 func TestApprovalSummaryShowsEffectWithoutDumpingContent(t *testing.T) {
 	got := approvalSummary(tools.ApprovalRequest{Tool: tools.ToolWriteFile, Args: map[string]any{"path": "/work/brief.md", "content": strings.Repeat("x", 200)}})
 	if !strings.Contains(got, "/work/brief.md") || !strings.Contains(got, "200 bytes") || len(got) > 210 {

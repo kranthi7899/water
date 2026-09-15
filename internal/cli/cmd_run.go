@@ -94,9 +94,11 @@ func (a *App) runCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "tool denied:", d)
 			}
 			if a.flags.voice {
-				if vp, ok := voice.Open(cfg.Voice.Provider); ok && vp.Available() {
+				if vp, verr := a.voiceProvider(cfg, role.Slug); verr == nil && vp.Available() {
 					_ = vp.Speak(ctx, resp.Text)
-				} else if ok {
+				} else if verr != nil {
+					fmt.Fprintln(os.Stderr, "voice:", verr)
+				} else {
 					fmt.Fprintln(os.Stderr, "voice:", voice.Absence(vp))
 				}
 			}

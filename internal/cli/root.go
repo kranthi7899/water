@@ -76,7 +76,7 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 	pf.BoolVarP(&a.flags.yes, "yes", "y", false, "assume yes; never prompt")
 	pf.BoolVarP(&a.flags.quiet, "quiet", "q", false, "suppress progress output")
 	pf.BoolVarP(&a.flags.verbose, "verbose", "v", false, "show per-node responses as they arrive")
-	pf.BoolVar(&a.flags.voice, "voice", false, "speak replies aloud (voice.provider must be \"os\")")
+	pf.BoolVar(&a.flags.voice, "voice", false, "speak replies aloud (uses configured voice provider)")
 	pf.BoolVar(&a.flags.debug, "debug", false, "log every model subprocess: real flags (prompt text elided), pid, duration, exit, last stderr line")
 
 	root.AddCommand(

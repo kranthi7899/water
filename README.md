@@ -70,7 +70,7 @@ keyboard protocol); Ctrl+X opens `$EDITOR`.
     internal/diagnose     the seven topology diagnostics over a trace + checkpoint
     internal/dashboard    read-only HTTP surface
     internal/auth         login triggering and the round-trip gate
-    internal/voice        OS text-to-speech (say / espeak); listen is a documented no-op
+    internal/voice        local or expressive role-aware speech; listen is a documented no-op
     internal/guards       guard tests for every invariant and gate
 
 See `docs/architecture.md`, `docs/tools.md`, and `docs/decisions.md` (investigations, Part 10

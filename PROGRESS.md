@@ -252,3 +252,9 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 - Validation: plan rejection leaves every target untouched; an invalid path never reaches the approval UI; a two-step plan gets exactly one correlated prompt; short-terminal paging preserves chat/input geometry. Full suite: 109 named tests plus `go vet`.
 - Voice status: **working TTS** on this Mac. `water voice 'Water voice verification.'` launched `/usr/bin/say` and exited 0. Interactive chat exposes `○ >` when speech is available but off, `♪ >` when on; `/voice on|off|status` and Ctrl+B toggle it. The OS provider speaks completed role replies only.
 - Speech-to-text / microphone listening remains deliberately unshipped (`Listen` returns a clear unavailable message). Audio is never passed to the model; a future STT provider would transcribe to text before the normal role pipeline.
+
+## Expressive role voices (2026-09-15)
+
+- Added optional `voice.provider: openai`, a role-aware expressive speech renderer: CEO `marin`, COO `cedar`, CTO `ash`, and Design `coral`, each with a fixed delivery profile. Switching roles selects the corresponding renderer while leaving the text session, memory, and backend unchanged.
+- This is deliberately **not** enabled by default: it requires both `voice.allow_metered: true` and `OPENAI_API_KEY`. It cannot use or leak Claude/Codex subscription credentials; no key is stored in Water configuration or handed to subprocesses.
+- Validation: in-process API test verifies role voice, style instruction, completed reply text only, returned-audio playback, and chunking; another test proves the provider fails closed without the explicit metered opt-in. Live microphone/STT remains unshipped by design.

@@ -46,10 +46,14 @@ type Options struct {
 	ResumeSlug    string
 	Picker        bool
 	Voice         func(text string) error
-	Profile       theme.Profile
-	VoiceOn       bool // start with spoken replies on
-	BudgetLine    func() string
-	OnRateLimit   func(rl *backend.RateLimit)
+	// VoiceFor lets each role retain a distinct renderer while the model and
+	// text conversation remain role-agnostic. Voice is kept as a test-friendly
+	// fallback for existing callers.
+	VoiceFor    func(role *roles.Role) func(text string) error
+	Profile     theme.Profile
+	VoiceOn     bool // start with spoken replies on
+	BudgetLine  func() string
+	OnRateLimit func(rl *backend.RateLimit)
 	// WorkspacePolicy grants the active interactive role a bounded local
 	// workspace. It is absent for the existing deny-by-default behavior.
 	WorkspacePolicy func(role *roles.Role) *tools.Policy
@@ -227,7 +231,10 @@ func (m *model) enterRole(slug, resume string) error {
 	s.Retention = m.opts.Retention
 	s.Summariser = ModelSummariser(r, env)
 	s.Voice = m.opts.Voice
-	s.VoiceOn = m.opts.Voice != nil && m.opts.VoiceOn
+	if m.opts.VoiceFor != nil {
+		s.Voice = m.opts.VoiceFor(r)
+	}
+	s.VoiceOn = s.Voice != nil && m.opts.VoiceOn
 	s.BudgetLine = m.opts.BudgetLine
 	s.OnRateLimit = m.opts.OnRateLimit
 	if m.opts.SwitchBackend != nil {

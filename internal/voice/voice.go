@@ -58,5 +58,8 @@ func Absence(p Provider) string {
 	if o, ok := p.(*OS); ok {
 		return o.Absence()
 	}
+	if o, ok := p.(*OpenAI); ok {
+		return o.Absence()
+	}
 	return ErrUnavailable.Error()
 }

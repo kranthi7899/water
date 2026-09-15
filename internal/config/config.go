@@ -97,7 +97,30 @@ type MemoryConfig struct {
 }
 
 type VoiceConfig struct {
-	Provider string `yaml:"provider"` // os | noop
+	Provider     string `yaml:"provider"` // os | openai | noop
+	AllowMetered bool   `yaml:"allow_metered"`
+	Model        string `yaml:"model"`
+	CEOVoice     string `yaml:"ceo_voice"`
+	COOVoice     string `yaml:"coo_voice"`
+	CTOVoice     string `yaml:"cto_voice"`
+	DesignVoice  string `yaml:"design_voice"`
+}
+
+// VoiceFor returns the selected voice identifier for a role. Empty values are
+// intentional: providers then use their own safe profile defaults.
+func (c VoiceConfig) VoiceFor(role string) string {
+	switch role {
+	case "ceo":
+		return c.CEOVoice
+	case "coo":
+		return c.COOVoice
+	case "cto":
+		return c.CTOVoice
+	case "design":
+		return c.DesignVoice
+	default:
+		return ""
+	}
 }
 
 type OrchestrationConfig struct {
@@ -175,6 +198,12 @@ func defaults() map[string]string {
 		"memory.max_entries":           "200",
 		"memory.max_bytes":             "32768",
 		"voice.provider":               "os",
+		"voice.allow_metered":          "false",
+		"voice.model":                  "gpt-4o-mini-tts",
+		"voice.ceo_voice":              "",
+		"voice.coo_voice":              "",
+		"voice.cto_voice":              "",
+		"voice.design_voice":           "",
 		"orchestration.router":         "hierarchy",
 		"orchestration.max_parallel":   "4",
 		"orchestration.timeout":        "20m",
@@ -270,6 +299,12 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Memory.MaxEntries = atoi("memory.max_entries")
 	r.Memory.MaxBytes = atoi("memory.max_bytes")
 	r.Voice.Provider = flat["voice.provider"]
+	r.Voice.AllowMetered = abool("voice.allow_metered")
+	r.Voice.Model = flat["voice.model"]
+	r.Voice.CEOVoice = flat["voice.ceo_voice"]
+	r.Voice.COOVoice = flat["voice.coo_voice"]
+	r.Voice.CTOVoice = flat["voice.cto_voice"]
+	r.Voice.DesignVoice = flat["voice.design_voice"]
 	r.Orchestration.Router = flat["orchestration.router"]
 	r.Orchestration.MaxParallel = atoi("orchestration.max_parallel")
 	r.Orchestration.Timeout = flat["orchestration.timeout"]
@@ -315,6 +350,12 @@ func (r *Resolved) Flat() map[string]string {
 		"memory.max_entries":           strconv.Itoa(r.Memory.MaxEntries),
 		"memory.max_bytes":             strconv.Itoa(r.Memory.MaxBytes),
 		"voice.provider":               r.Voice.Provider,
+		"voice.allow_metered":          strconv.FormatBool(r.Voice.AllowMetered),
+		"voice.model":                  r.Voice.Model,
+		"voice.ceo_voice":              r.Voice.CEOVoice,
+		"voice.coo_voice":              r.Voice.COOVoice,
+		"voice.cto_voice":              r.Voice.CTOVoice,
+		"voice.design_voice":           r.Voice.DesignVoice,
 		"orchestration.router":         r.Orchestration.Router,
 		"orchestration.max_parallel":   strconv.Itoa(r.Orchestration.MaxParallel),
 		"orchestration.timeout":        r.Orchestration.Timeout,

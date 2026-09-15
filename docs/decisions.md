@@ -140,6 +140,22 @@ deny-by-default policy.
   unmarked message (guard test).
 - **Voice `Listen` is a documented no-op.** No local STT binding was judged reliable; shipping
   `Speak` alone was the honest option the prompt allowed for.
+
+## Expressive per-role voice (2026-09-15)
+
+**Decision: adapt, opt-in only.** The macOS `say` provider is useful as a free accessibility
+fallback, but it does not provide a durable, expressive agent voice. Water now supports an optional
+OpenAI speech provider with a fixed sonic profile per role: CEO `marin`, COO `cedar`, CTO `ash`, and
+Design `coral`, each with role-specific delivery instructions. This renderer receives only a completed
+text reply; it never sees a prompt, persona, memory, tool output, or microphone audio.
+
+This is not covered by a Claude/Codex/ChatGPT subscription and must not become a surprise metered path.
+It stays disabled unless both `voice.allow_metered: true` and `OPENAI_API_KEY` are present. The key is
+environment-only, never saved in Water configuration or passed to model subprocesses. Built-in voices
+may be overridden with `voice.ceo_voice`, `voice.coo_voice`, `voice.cto_voice`, and
+`voice.design_voice`; a custom voice ID is accepted only where the account is eligible and has obtained
+the provider's required consent. Live speech-to-speech / microphone conversation remains out of scope:
+it would replace the subscription-CLI model contract with a separate Realtime API architecture.
 - **Linux sandboxing is not implemented.** `sandbox-exec` on macOS is wired for the (currently
   unused) shell tool; Landlock is the planned Linux fit. No role has shell, so nothing is exposed,
   but the doc must not imply confinement exists where it does not.

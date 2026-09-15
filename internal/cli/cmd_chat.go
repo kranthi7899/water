@@ -119,14 +119,24 @@ func (a *App) runChat(ctx context.Context, start, resume string, picker bool) er
 			fmt.Fprintln(os.Stderr, "warning: interactive action approvals unavailable; local tools remain disabled:", aerr)
 		}
 	}
-	// Voice is wired whenever the provider works, so /voice on and Ctrl+B
-	// work without restarting; --voice only decides whether it starts on.
-	if vp, ok := voice.Open(cfg.Voice.Provider); ok && vp.Available() {
-		opts.Voice = func(text string) error { return vp.Speak(ctx, text) }
+	// Voice is wired whenever a provider is ready, so /voice on and Ctrl+B
+	// work without restarting. The factory is role-aware: a CEO session and a
+	// Design session may use distinct expressive profiles without changing the
+	// text/model path.
+	if vp, verr := a.voiceProvider(cfg, "ceo"); verr == nil && vp.Available() {
+		opts.VoiceFor = func(r *roles.Role) func(text string) error {
+			p, err := a.voiceProvider(cfg, r.Slug)
+			if err != nil || !p.Available() {
+				return nil
+			}
+			return func(text string) error { return p.Speak(ctx, text) }
+		}
 		opts.VoiceOn = a.flags.voice
 	} else if a.flags.voice {
 		msg := voice.ErrUnavailable.Error()
-		if ok {
+		if verr != nil {
+			msg = verr.Error()
+		} else {
 			msg = voice.Absence(vp)
 		}
 		fmt.Fprintln(os.Stderr, "voice:", msg, "— continuing without speech")
