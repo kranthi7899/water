@@ -307,6 +307,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
 		} else {
+			// The submit path clears the editor before starting the call, but a
+			// completed asynchronous redraw must make the same guarantee. The
+			// composer is a draft area, never a second rendering of the message
+			// that has already been sent into the transcript.
+			m.ed.Reset()
 			m.status = fmt.Sprintf("%s · %s", msg.turn.Backend, msg.turn.Duration.Round(time.Millisecond))
 		}
 		m.rebuildTranscript()

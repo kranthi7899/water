@@ -73,3 +73,22 @@ func TestTabCompletesSlashCommand(t *testing.T) {
 		t.Fatalf("summary: %q", s)
 	}
 }
+
+// TestCompletedTurnClearsComposer guards the async completion path. A sent
+// prompt belongs in the transcript; it must never remain in the composer as a
+// misleading second, editable copy after the agent has replied.
+func TestCompletedTurnClearsComposer(t *testing.T) {
+	m := testModel(t)
+	m.width, m.height = 100, 30
+	if err := m.enterRole("ceo", ""); err != nil {
+		t.Fatal(err)
+	}
+	m.relayout()
+	m.ed.SetValue("write a brief")
+	m.busy = true
+	updated, _ := m.Update(turnMsg{turn: Turn{Backend: "fake-sub"}})
+	got := updated.(*model)
+	if got.busy || got.ed.Value() != "" {
+		t.Fatalf("completion left composer state: busy=%v value=%q", got.busy, got.ed.Value())
+	}
+}
