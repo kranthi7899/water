@@ -87,6 +87,8 @@ type Session struct {
 	history     []string
 	histIdx     int
 	lastSkills  []string
+	pendingUser string
+	pendingTurn int
 }
 
 // Open starts or resumes a session for role. slug "" creates a new one.
@@ -108,6 +110,7 @@ func (s *Session) resume(slug string) error {
 	}
 	s.Slug, s.Name, s.Pinned = slug, c.Name, c.Pinned
 	s.turns, s.summary, s.consults = nil, "", nil
+	s.pendingUser, s.pendingTurn = "", 0
 	if c.Summary != nil {
 		s.summary = c.Summary.Text
 	}
@@ -133,6 +136,9 @@ func (s *Session) resume(slug string) error {
 				}
 			}
 		}
+	}
+	if cur != nil && strings.TrimSpace(cur.User) != "" {
+		s.pendingUser, s.pendingTurn = cur.User, cur.N
 	}
 	return nil
 }
@@ -209,6 +215,7 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	}
 	atts = append(atts, s.attachments...)
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindUser, Turn: n, Text: text})
+	s.pendingUser, s.pendingTurn = text, n
 	start := time.Now()
 	resp, p, err := agent.RunTurn(ctx, s.Role, s.Env, s.prior(), prompt, atts)
 	if s.OnRateLimit != nil && resp.RateLimit != nil {
@@ -225,6 +232,7 @@ func (s *Session) Send(ctx context.Context, text string) (Turn, error) {
 	// the model, whether or not the backend reports delivery (5.5).
 	t := Turn{N: n, User: text, Reply: resp.Text, Prompt: p, Backend: resp.Backend, Model: resp.Model, Duration: time.Since(start), At: start, Untrusted: resp.ConsumedUntrusted() || len(atts) > 0, InputTokens: resp.InputTokens, ContextWindow: resp.ContextWindow, ToolEvents: resp.ToolEvents}
 	s.turns = append(s.turns, t)
+	s.pendingUser, s.pendingTurn = "", 0
 	s.lastSkills = p.Skills
 	_ = s.Store.Append(s.Slug, session.Entry{Kind: session.KindAssistant, Turn: n, Text: resp.Text, Backend: resp.Backend, Skills: p.Skills, MemoryIDs: p.MemoryIDs, InboxIDs: p.InboxIDs})
 	if n%session.AutoCompactEvery == 0 {
@@ -542,10 +550,21 @@ func (s *Session) LastReply(n int) (string, bool) {
 
 // LastUser returns the most recent user message.
 func (s *Session) LastUser() (string, bool) {
+	if strings.TrimSpace(s.pendingUser) != "" {
+		return s.pendingUser, true
+	}
 	if len(s.turns) == 0 {
 		return "", false
 	}
 	return s.turns[len(s.turns)-1].User, true
+}
+
+// PendingUser returns the latest submitted prompt with no assistant reply.
+func (s *Session) PendingUser() (string, int, bool) {
+	if strings.TrimSpace(s.pendingUser) == "" {
+		return "", 0, false
+	}
+	return s.pendingUser, s.pendingTurn, true
 }
 
 // Export renders the active context as markdown.

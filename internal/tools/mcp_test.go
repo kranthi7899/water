@@ -72,6 +72,54 @@ func TestMCPHungCallDoesNotBlockServer(t *testing.T) {
 	}
 }
 
+func TestMCPCancelNotificationStopsMatchingCall(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("fine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(&Policy{Role: "cto", Filesystem: FSPolicy{Mode: "read-only", Roots: []string{root}}}, nil)
+	svc.CallTimeout = 5 * time.Second
+	svc.testDelay = 10 * time.Second
+
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- ServeStdio(context.Background(), inR, outW, svc) }()
+	replies := make(chan map[string]any, 8)
+	go func() {
+		sc := bufio.NewScanner(outR)
+		for sc.Scan() {
+			var m map[string]any
+			if json.Unmarshal(sc.Bytes(), &m) == nil {
+				replies <- m
+			}
+		}
+	}()
+	send := func(s string) { _, _ = inW.Write([]byte(s + "\n")) }
+	send(`{"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"read_file","arguments":{"path":"ok.txt"}}}`)
+	send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"slow","reason":"user cancelled"}}`)
+
+	select {
+	case msg := <-replies:
+		if msg["id"] != "slow" {
+			t.Fatalf("unexpected reply: %v", msg)
+		}
+		res := msg["result"].(map[string]any)
+		text := res["content"].([]any)[0].(map[string]any)["text"].(string)
+		if res["isError"] != true || !strings.Contains(text, "context canceled") {
+			t.Fatalf("cancelled call result: %v", res)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancel notification did not stop the call")
+	}
+	inW.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("server kept running after stdin closed")
+	}
+}
+
 // TestReadNonRegularFileRefused — a named pipe under a root is refused
 // immediately instead of blocking open() forever.
 func TestReadNonRegularFileRefused(t *testing.T) {

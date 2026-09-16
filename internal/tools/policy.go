@@ -196,23 +196,34 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		if p.Filesystem.Mode != "read-write" {
 			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode) + " (write requires read-write)"}, args
 		}
-		// The target may not exist yet: resolve its parent directory.
-		target := str("path")
-		parent, root, err := ResolveWithinRoots(p.Filesystem.Roots, filepath.Dir(target))
-		if err != nil {
-			return Decision{false, "parent outside declared roots: " + err.Error()}, args
+		if _, ok := args["content"].(string); !ok {
+			return Decision{false, "write_file requires string content"}, args
 		}
-		if prot, hit := p.protectedHit(filepath.Join(parent, filepath.Base(target))); hit {
+		// Resolve the leaf too: an existing output file can itself be a
+		// symlink. Checking only its parent permits writes outside the root.
+		target, root, err := ResolveWithinRoots(p.Filesystem.Roots, str("path"))
+		if err != nil {
+			return Decision{false, "target outside declared roots: " + err.Error()}, args
+		}
+		if prot, hit := p.protectedHit(target); hit {
 			return Decision{false, "path is inside water's own state directory (" + prot + ")"}, args
 		}
 		out := cloneArgs(args)
-		out["path"] = filepath.Join(parent, filepath.Base(target))
+		out["path"] = target
 		return Decision{true, "filesystem.mode=read-write root=" + root}, out
 	case ToolRun:
 		if p.BatchActions {
 			return Decision{false, "interactive workspace requires apply_actions so related effects can be reviewed together"}, args
 		}
 		mode := orNone(p.Shell.Mode)
+		if strings.TrimSpace(str("command")) == "" {
+			return Decision{false, "run requires a nonempty command"}, args
+		}
+		// argv is derived only by the allowlist matcher, never accepted from
+		// a request that the user reviewed as a different shell command.
+		if _, supplied := args["argv"]; supplied {
+			return Decision{false, "argv is internal; supply command only"}, args
+		}
 		if mode == "none" {
 			return Decision{false, "shell.mode=none"}, args
 		}

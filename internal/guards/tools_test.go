@@ -51,6 +51,20 @@ func TestStrictMCPConfigSurvives(t *testing.T) {
 	}
 }
 
+func TestClaudeIsolationFlagsAreMandatory(t *testing.T) {
+	base := map[string]bool{"--print": true, "--output-format": true, "--system-prompt": true, "--tools": true, "--strict-mcp-config": true}
+	for _, missing := range backend.LoadBearingFlags {
+		fs := map[string]bool{}
+		for k, v := range base {
+			fs[k] = v
+		}
+		delete(fs, missing)
+		if _, err := (&backend.ClaudeSubscription{}).BuildArgs(backend.FlagSetForTest(fs), backend.Request{System: "s", Prompt: "p"}, ""); err == nil {
+			t.Fatalf("missing %s did not fail closed", missing)
+		}
+	}
+}
+
 // TestRoleWithoutToolsInvokesNothing — a role with no tools: block exposes
 // zero tools and every call is denied and traced.
 func TestRoleWithoutToolsInvokesNothing(t *testing.T) {

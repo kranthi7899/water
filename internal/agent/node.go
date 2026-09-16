@@ -212,7 +212,7 @@ func Assemble(role *roles.Role, mem []memory.Entry, inbox []orchestrator.AgentMe
 		sel = persona.KeywordSelector{}
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("You are %s, the %s role-agent in the water system.\n", role.Name, role.Slug))
+	sb.WriteString(fmt.Sprintf("You reason like a %s — not playing a character, but applying the reasoning pattern that role calls for, as the %s role-agent in the water system.\n", role.Name, role.Slug))
 	if role.Orchestrator {
 		sb.WriteString("You are the orchestrator: you frame the problem, set direction, judge and adjudicate delegated work, and you alone write the final output.\n")
 	} else {
@@ -497,6 +497,7 @@ func ceoNode(role *roles.Role, env Env, h *orchestrator.HierarchyRouter, snap *s
 			return fmt.Errorf("memory snapshot: %w", err)
 		}
 		inbox := s.Inbox(role.Slug)
+		markInboxUntrusted(s, role.Slug, inbox)
 		first := s.Visits(role.Slug) == 0
 		var task, extra string
 		if first {
@@ -554,6 +555,7 @@ func cooNode(role *roles.Role, env Env, h *orchestrator.HierarchyRouter, snap *s
 			return fmt.Errorf("memory snapshot: %w", err)
 		}
 		inbox := s.Inbox(role.Slug)
+		markInboxUntrusted(s, role.Slug, inbox)
 		fresh := s.Unconsumed(role.Slug)
 		rollup := false
 		for _, m := range fresh {
@@ -669,6 +671,7 @@ func specialistNode(role *roles.Role, env Env, h *orchestrator.HierarchyRouter, 
 			return fmt.Errorf("memory snapshot: %w", err)
 		}
 		inbox := s.Inbox(role.Slug)
+		markInboxUntrusted(s, role.Slug, inbox)
 		fresh := s.Unconsumed(role.Slug)
 		var corr string
 		for i := len(fresh) - 1; i >= 0; i-- {
@@ -747,9 +750,22 @@ func RunTurn(ctx context.Context, role *roles.Role, env Env, prior []orchestrato
 	if len(prior) == 0 {
 		task = "Respond to the brief in your inbox."
 	}
+	// Souls describe the orchestrated graph (report to the COO, escalate to
+	// the CEO); a direct turn has no graph, so say so or specialists address
+	// a role that is not in the conversation.
+	task += "\nThis is a direct exchange with the user, not an orchestrated run: no other role takes part and nothing you write is routed to one. Address your reply to the user, not to the COO, CEO, or any other role."
 	p := Assemble(role, snap, inbox, task, env.selector(), toolsNote(env, role.Slug))
 	resp, err := call(ctx, role, env, p, attachments)
 	return resp, p, err
+}
+
+func markInboxUntrusted(s *orchestrator.State, role string, inbox []orchestrator.AgentMessage) {
+	for _, m := range inbox {
+		if m.Untrusted {
+			s.MarkUntrusted(role)
+			return
+		}
+	}
 }
 
 // Consult asks another role a question on behalf of the current one. The

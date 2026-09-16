@@ -59,6 +59,12 @@ const DefaultCallTimeout = 60 * time.Second
 // are still in flight, so the process exits with its parent instead of
 // lingering as an orphan.
 func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) error {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	if closer, ok := in.(io.Closer); ok {
+		stopClose := context.AfterFunc(ctx, func() { _ = closer.Close() })
+		defer stopClose()
+	}
 	var wmu sync.Mutex
 	write := func(v any) {
 		wmu.Lock()
@@ -76,6 +82,23 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 	if svc.Policy != nil && svc.Policy.ApprovalSocket != "" && callTimeout < 5*time.Minute {
 		callTimeout = 5 * time.Minute
 	}
+	var cmu sync.Mutex
+	calls := map[string]context.CancelFunc{}
+	cancelCall := func(id string) {
+		cmu.Lock()
+		cancel := calls[id]
+		cmu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+	defer func() {
+		cmu.Lock()
+		defer cmu.Unlock()
+		for _, cancel := range calls {
+			cancel()
+		}
+	}()
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
 	for sc.Scan() {
@@ -91,6 +114,10 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 			write(rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error"}})
 			continue
 		}
+		if req.Method == "notifications/cancelled" {
+			cancelCall(cancelledRequestID(req.Params))
+			continue
+		}
 		if req.Method != "tools/call" {
 			if res, reply := handle(ctx, svc, req); reply {
 				write(res)
@@ -99,6 +126,17 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 		}
 		go func(req rpcRequest) {
 			cctx, cancel := context.WithTimeout(ctx, callTimeout)
+			key := requestKey(req.ID)
+			if key != "" {
+				cmu.Lock()
+				calls[key] = cancel
+				cmu.Unlock()
+				defer func() {
+					cmu.Lock()
+					delete(calls, key)
+					cmu.Unlock()
+				}()
+			}
 			defer cancel()
 			if res, reply := handle(cctx, svc, req); reply {
 				write(res)
@@ -106,6 +144,20 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 		}(req)
 	}
 	return sc.Err()
+}
+
+func requestKey(id json.RawMessage) string {
+	return strings.TrimSpace(string(id))
+}
+
+func cancelledRequestID(params json.RawMessage) string {
+	var p struct {
+		RequestID json.RawMessage `json:"requestId"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	return requestKey(p.RequestID)
 }
 
 func handle(ctx context.Context, svc *Service, req rpcRequest) (rpcResponse, bool) {

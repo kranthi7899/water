@@ -11,21 +11,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ApprovalRequest is the exact action the user sees before it can run.
 type ApprovalRequest struct {
-	CallID  string          `json:"call_id"`
-	Role    string          `json:"role"`
-	Tool    string          `json:"tool"`
-	Args    map[string]any  `json:"args"`
-	Summary string          `json:"summary,omitempty"`
-	Actions []PlannedAction `json:"actions,omitempty"`
+	CallID    string          `json:"call_id"`
+	Role      string          `json:"role"`
+	Tool      string          `json:"tool"`
+	Args      map[string]any  `json:"args"`
+	Summary   string          `json:"summary,omitempty"`
+	Workspace string          `json:"workspace,omitempty"`
+	Actions   []PlannedAction `json:"actions,omitempty"`
 }
 
 // PlannedAction is one exact, already-authorised effect in an approval plan.
@@ -46,6 +49,7 @@ type PendingApproval struct {
 	Request ApprovalRequest
 	once    sync.Once
 	done    chan bool
+	expired atomic.Bool
 }
 
 // NewPendingApproval constructs one request holder. It is public so a UI can
@@ -55,6 +59,14 @@ func NewPendingApproval(req ApprovalRequest) *PendingApproval {
 }
 
 func (p *PendingApproval) Decide(allowed bool) { p.once.Do(func() { p.done <- allowed }) }
+
+// Expired reports whether the requester disconnected or timed out. Such a
+// prompt is not a reusable permission and must be removed from the UI.
+func (p *PendingApproval) Expired() bool { return p.expired.Load() }
+func (p *PendingApproval) expire() {
+	p.expired.Store(true)
+	p.Decide(false)
+}
 
 // ApprovalBroker owns one private socket and queues requests for an
 // interactive UI. It is intentionally session-local and never persisted.
@@ -95,11 +107,15 @@ func (b *ApprovalBroker) Socket() string { return b.socket }
 // Next returns the next tool action needing a user decision without blocking
 // the Bubble Tea update loop.
 func (b *ApprovalBroker) Next() (*PendingApproval, bool) {
-	select {
-	case p := <-b.reqs:
-		return p, true
-	default:
-		return nil, false
+	for {
+		select {
+		case p := <-b.reqs:
+			if !p.Expired() {
+				return p, true
+			}
+		default:
+			return nil, false
+		}
 	}
 }
 
@@ -131,19 +147,42 @@ func (b *ApprovalBroker) serve() {
 func (b *ApprovalBroker) handle(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
+	// Closing the broker must also release connections still decoding input.
+	closed := make(chan struct{})
+	defer close(closed)
+	go func() {
+		select {
+		case <-b.done:
+			_ = conn.Close()
+		case <-closed:
+		}
+	}()
 	var req ApprovalRequest
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, 2<<20)).Decode(&req); err != nil {
 		return
 	}
 	p := NewPendingApproval(req)
+	defer p.expire()
+	// There is exactly one request per connection. EOF, timeout or further
+	// client data invalidates it; waiting for a key must not outlive the caller.
+	disconnected := make(chan struct{})
+	go func() {
+		var extra [1]byte
+		_, _ = conn.Read(extra[:])
+		p.expire()
+		close(disconnected)
+	}()
 	select {
 	case b.reqs <- p:
+	case <-disconnected:
+		return
 	case <-b.done:
 		return
 	}
 	select {
 	case allowed := <-p.done:
-		_ = json.NewEncoder(conn).Encode(approvalReply{Allowed: allowed})
+		_ = json.NewEncoder(conn).Encode(approvalReply{Allowed: allowed && !p.Expired()})
+	case <-disconnected:
 	case <-b.done:
 	}
 }
@@ -160,15 +199,25 @@ func RequestApproval(ctx context.Context, socket string, req ApprovalRequest) (b
 		return false, fmt.Errorf("connect approval prompt: %w", err)
 	}
 	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	deadline := time.Now().Add(5 * time.Minute)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
 	}
+	_ = conn.SetDeadline(deadline)
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return false, fmt.Errorf("send approval request: %w", err)
 	}
 	var reply approvalReply
 	if err := json.NewDecoder(conn).Decode(&reply); err != nil {
+		if ctx.Err() != nil {
+			return false, fmt.Errorf("wait for approval: %w", ctx.Err())
+		}
 		return false, fmt.Errorf("wait for approval: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	return reply.Allowed, nil
 }

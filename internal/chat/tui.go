@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -288,22 +289,67 @@ func (m *model) relayout() {
 	}
 	rows := 1
 	if m.ed != nil {
+		m.ed.SetMaxRows(3)
+		m.ed.SetWidth(m.width)
 		rows = m.ed.Rows()
 	}
 	r, err := layout.Compute(layout.Spec{Width: m.width, Height: m.height, ShowHero: m.showHero, InputRows: rows})
 	if err != nil {
-		// Too small: fall back to a one-row header, no hero.
-		r, _ = layout.Compute(layout.Spec{Width: m.width, Height: max(m.height, 8), ShowHero: false, InputRows: 1})
+		r = compactRegions(m.width, m.height, rows)
 	}
 	m.regions = r
 	if m.ed != nil {
 		m.ed.SetWidth(r.Input.W)
-		m.ed.SetMaxRows(3)
+		if r.Input.H > 0 {
+			m.ed.SetMaxRows(r.Input.H)
+		}
 	}
 	m.vp.SetWidth(r.Chat.W)
 	m.vp.SetHeight(r.Chat.H)
 	m.vp.SetContent(strings.Join(m.lines, "\n"))
 	m.vp.GotoBottom()
+}
+
+func compactRegions(width, height, inputRows int) layout.Regions {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
+	}
+	r := layout.Regions{Width: width, Height: height}
+	r.Status = layout.Region{Name: "status", Row: height - 1, W: width, H: 1}
+	if height == 1 {
+		return r
+	}
+	headerRows := 1
+	if height < 3 {
+		headerRows = 0
+	}
+	if headerRows > 0 {
+		r.Header = layout.Region{Name: "header", Row: 0, W: width, H: headerRows}
+	}
+	rows := inputRows
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > 3 {
+		rows = 3
+	}
+	available := height - headerRows - r.Status.H
+	if rows > available {
+		rows = available
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	chatRows := height - headerRows - rows - r.Status.H
+	if chatRows < 0 {
+		chatRows = 0
+	}
+	r.Chat = layout.Region{Name: "chat", Row: headerRows, W: width, H: chatRows}
+	r.Input = layout.Region{Name: "input", Row: headerRows + chatRows, W: width, H: rows}
+	return r
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -325,7 +371,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	case tea.PasteMsg:
+		if m.mode != modeChat || m.ed == nil {
+			return m, nil
+		}
+		if m.busy {
+			m.status = m.busyText + " (input paused)"
+			return m, nil
+		}
+		cmd := m.ed.Update(msg)
+		m.relayout()
+		return m, cmd
 	case tickMsg:
+		if m.approval != nil && m.approval.Expired() {
+			m.clearApproval()
+			m.status = "approval expired — no permission was retained"
+		}
 		if m.busy && m.approval == nil && m.opts.Approvals != nil {
 			if pending, ok := m.opts.Approvals.Next(); ok {
 				m.approval = pending
@@ -341,6 +402,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case turnMsg:
+		// A completed or failed call cannot leave an actionable approval card.
+		m.clearApproval()
 		m.busy = false
 		if msg.err != nil {
 			m.status = "error: " + msg.err.Error()
@@ -446,6 +509,11 @@ func (m *model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // request to execution. The child process remains blocked on its private
 // socket until this exact prompt receives y or n.
 func (m *model) updateApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.approval != nil && m.approval.Expired() {
+		m.clearApproval()
+		m.status = "approval expired — no permission was retained"
+		return m, nil
+	}
 	if m.approval == nil {
 		m.mode = modeChat
 		return m, nil
@@ -467,7 +535,8 @@ func (m *model) updateApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "right", "down", "j":
-		m.approvalPage++ // approvalCard clamps this to the last valid page.
+		_, pages := m.approvalBody(m.approval.Request)
+		m.approvalPage = min(m.approvalPage+1, pages-1)
 		return m, nil
 	default:
 		return m, nil
@@ -477,6 +546,18 @@ func (m *model) updateApproval(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.approvalPage = 0
 	m.mode = modeChat
 	return m, nil
+}
+
+func (m *model) clearApproval() {
+	if m.approval != nil {
+		m.approval.Decide(false)
+	}
+	m.approval = nil
+	m.approvalDetails = false
+	m.approvalPage = 0
+	if m.mode == modeApproval {
+		m.mode = modeChat
+	}
 }
 
 func (m *model) updateChat(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -625,28 +706,21 @@ func (m *model) applyResult(res Result) tea.Cmd {
 	case ActResend:
 		return m.runTurn(res.Arg)
 	}
-	if res.Output != "" {
-		m.lines = append(m.lines, m.renderSystem(res.Output)...)
-	}
 	m.status = "ok"
 	// /backend and /model change what the header and status line report.
 	if m.sess.BackendName != "" {
 		m.info.Name = m.sess.BackendName
 	}
 	m.rebuildTranscriptIfContextChanged()
+	if res.Output != "" {
+		m.lines = append(m.lines, m.renderSystem(res.Output)...)
+	}
 	m.relayout()
 	return nil
 }
 
 func (m *model) rebuildTranscriptIfContextChanged() {
-	// After /clear, /resume, /compact the turns changed: rebuild but keep
-	// the system output appended above.
-	sys := m.lines
 	m.rebuildTranscript()
-	if len(m.sess.Turns()) == 0 && m.sess.Summary() == "" {
-		// keep the command output visible on an otherwise empty context
-		m.lines = append(m.lines, sys[max(0, len(sys)-12):]...)
-	}
 }
 
 func (m *model) openEditor() tea.Cmd {
@@ -788,6 +862,9 @@ func (m *model) rebuildTranscript() {
 	for _, t := range m.sess.Turns() {
 		m.lines = append(m.lines, m.renderUser(t.User)...)
 		m.lines = append(m.lines, m.renderReply(t)...)
+	}
+	if text, _, ok := m.sess.PendingUser(); ok {
+		m.lines = append(m.lines, m.renderUser(text)...)
 	}
 }
 
@@ -971,7 +1048,7 @@ func (m *model) View() tea.View {
 	if fc, err := theme.ParseHex(m.theme.Palette.Foreground); err == nil && m.opts.Profile != theme.None {
 		v.ForegroundColor = fc.Color()
 	}
-	if m.mode == modeChat && !m.busy {
+	if m.mode == modeChat && !m.busy && r.Input.Visible() {
 		cur := m.ed.Cursor()
 		x, y := m.ed.PromptWidth()+m.ed.CursorCell(), m.ed.CursorRow()
 		if cur != nil {
@@ -998,60 +1075,82 @@ func (m *model) approvalCard(req tools.ApprovalRequest) []string {
 	if len(req.Actions) > 0 {
 		title = fmt.Sprintf("  REVIEW %d ACTIONS", len(req.Actions))
 	}
-	lines := []string{m.fg(m.theme.Palette.Accent, title+" · "+strings.ToUpper(req.Role))}
-	if req.Summary != "" {
-		lines = append(lines, m.fg(m.theme.Palette.Foreground, "  "+truncateApproval(req.Summary, m.width-4)))
+	body, pages := m.approvalBody(req)
+	page := max(0, min(m.approvalPage, pages-1))
+	perPage := max(1, m.regions.Chat.H-2)
+	start := page * perPage
+	end := min(start+perPage, len(body))
+	heading := truncateApproval(title+" · "+strings.ToUpper(safeApprovalText(req.Role)), m.width)
+	lines := []string{m.styler.Bg(m.theme.Palette.Panel, m.styler.Bold(m.fg(m.theme.Palette.Foreground, heading)))}
+	for _, line := range body[start:end] {
+		lines = append(lines, m.fg(m.theme.Palette.Foreground, "  "+line))
 	}
+	footer := "y approve · n deny · d details"
+	if pages > 1 {
+		footer = fmt.Sprintf("y yes · n no · d detail · ←/→ %d/%d", page+1, pages)
+	}
+	lines = append(lines, m.fg(m.theme.Palette.Accent, truncateApproval(footer, m.width)))
+	return lines
+}
+
+// Paginate wrapped rows, including full commands and file contents. A long
+// command must be inspectable to its last character, not merely its first row.
+func (m *model) approvalBody(req tools.ApprovalRequest) ([]string, int) {
+	var raw []string
+	if req.Summary != "" {
+		raw = append(raw, "Intent (agent): "+req.Summary)
+	}
+	if req.Workspace != "" {
+		raw = append(raw, "Workspace: "+req.Workspace)
+	}
+	raw = append(raw, "Scope: workspace + system runtime; no network.")
 	actions := req.Actions
 	if len(actions) == 0 {
 		actions = []tools.PlannedAction{{Tool: req.Tool, Args: req.Args}}
 	}
-	// A small terminal must still let the person inspect every effect before
-	// approval. Page the card inside CHAT rather than silently clipping it or
-	// moving the composer. Details intentionally uses one action per page.
-	reserve := len(lines) + 1 // footer
-	perPage := m.regions.Chat.H - reserve
-	if m.approvalDetails {
-		perPage /= 2
-	}
-	if perPage < 1 {
-		perPage = 1
-	}
-	pages := (len(actions) + perPage - 1) / perPage
-	page := m.approvalPage
-	if page < 0 {
-		page = 0
-	}
-	if page >= pages {
-		page = pages - 1
-	}
-	start := page * perPage
-	end := start + perPage
-	if end > len(actions) {
-		end = len(actions)
-	}
-	for i, action := range actions[start:end] {
-		ordinal := start + i + 1
-		line := fmt.Sprintf("  %d. %s", ordinal, actionEffect(action))
-		lines = append(lines, m.fg(m.theme.Palette.Foreground, truncateApproval(line, m.width-2)))
-		if m.approvalDetails && action.Tool == tools.ToolRun {
-			cmd, _ := action.Args["command"].(string)
-			lines = append(lines, m.fg(m.theme.Palette.Muted, truncateApproval("     command: "+cmd, m.width-2)))
+	for i, action := range actions {
+		raw = append(raw, fmt.Sprintf("%d. %s", i+1, actionEffect(action)))
+		if m.approvalDetails {
+			if action.Tool == tools.ToolRun {
+				cmd, _ := action.Args["command"].(string)
+				raw = append(raw, "command: "+cmd)
+			}
+			if action.Tool == tools.ToolWriteFile {
+				content, _ := action.Args["content"].(string)
+				raw = append(raw, "file contents:\n"+content)
+			}
 		}
 	}
-	pageHint := ""
-	if pages > 1 {
-		pageHint = fmt.Sprintf(" · %d-%d/%d · ←/→ review", start+1, end, len(actions))
+	raw = append(raw, "Approve this plan once. Stop on failure; completed actions are not rolled back.")
+	var body []string
+	for _, line := range raw {
+		body = append(body, strings.Split(ansi.Hardwrap(safeApprovalText(line), max(1, m.width-4), true), "\n")...)
 	}
-	lines = append(lines, m.fg(m.theme.Palette.Muted, "  workspace-only · no network"+pageHint+" · y approve · n deny · d details"))
-	return lines
+	perPage := max(1, m.regions.Chat.H-2)
+	return body, max(1, (len(body)+perPage-1)/perPage)
 }
 
 func truncateApproval(s string, width int) string {
-	if width < 8 || len(s) <= width {
-		return s
+	return ansi.Truncate(safeApprovalText(s), max(0, width), "…")
+}
+
+// Tool arguments are data. Terminal control codes must never draw their own
+// approval buttons, clear the display, or manipulate the clipboard.
+func safeApprovalText(s string) string {
+	var out strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			out.WriteRune(r)
+		case r == '\t':
+			out.WriteString("    ")
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			fmt.Fprintf(&out, "[U+%04X]", r)
+		default:
+			out.WriteRune(r)
+		}
 	}
-	return s[:width-1] + "…"
+	return out.String()
 }
 
 func actionEffect(action tools.PlannedAction) string {

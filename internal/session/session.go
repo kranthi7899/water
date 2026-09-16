@@ -149,6 +149,15 @@ func (s *Store) Exists(slug string) bool {
 // "compaction never requires loading the whole file".
 const TailBytes = 512 * 1024
 
+// MaxOpenBytes is the largest transcript Open will read in one pass to keep a
+// recent summary plus active turns intact. Above this bound, Open preserves
+// the original tail-only no-deadlock behavior.
+const MaxOpenBytes = 8 * TailBytes
+
+// ErrContextIncomplete means the bounded loader could not prove it had the
+// whole active context for a session.
+var ErrContextIncomplete = errors.New("session active context is larger than the bounded loader")
+
 // Context is the active conversational context: the last summary (if any)
 // plus every entry after it. It is what a turn's prompt is built from.
 type Context struct {
@@ -162,10 +171,11 @@ type Context struct {
 	ReadFrom int64 // byte offset the tail read started at (diagnostics)
 }
 
-// Open loads the active context by reading only the tail of the file: it
-// seeks back TailBytes (or to the start), scans forward, and keeps the last
-// summary checkpoint and everything after it. Entries before that are never
-// loaded into memory.
+// Open loads the active context with a fixed upper bound: modest transcripts
+// are read from the start, while larger transcripts read the tail and require
+// a summary checkpoint inside it. It keeps the last summary checkpoint and
+// everything after it. If that cannot be proven inside the bound, Open returns
+// ErrContextIncomplete instead of silently dropping active turns.
 func (s *Store) Open(slug string) (*Context, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -187,7 +197,10 @@ func (s *Store) Open(slug string) (*Context, error) {
 			c.Header, c.Name = h, h.Name
 		}
 	}
-	start := st.Size() - TailBytes
+	start := int64(0)
+	if st.Size() > MaxOpenBytes {
+		start = st.Size() - TailBytes
+	}
 	if start < 0 {
 		start = 0
 	}
@@ -211,6 +224,9 @@ func (s *Store) Open(slug string) (*Context, error) {
 		if err := json.Unmarshal(line, &e); err != nil {
 			continue
 		}
+		if e.Turn > c.Turns {
+			c.Turns = e.Turn
+		}
 		switch e.Kind {
 		case KindHeader:
 			c.Header, c.Name = e, e.Name
@@ -227,13 +243,10 @@ func (s *Store) Open(slug string) (*Context, error) {
 			c.Entries = c.Entries[:0]
 			continue
 		}
-		if e.Turn > c.Turns {
-			c.Turns = e.Turn
-		}
 		c.Entries = append(c.Entries, e)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w for %q: %v", ErrContextIncomplete, slug, err)
 	}
 	if !c.Pinned {
 		c.Pinned = s.pinned(slug)

@@ -78,6 +78,10 @@ func (c *ClaudeSubscription) Available(ctx context.Context) Availability {
 		av.Detail = "claude CLI lacks --system-prompt; upgrade claude"
 		return av
 	}
+	if !fs["--tools"] || !fs["--strict-mcp-config"] {
+		av.Detail = "claude CLI lacks isolation flags (--tools/--strict-mcp-config); upgrade claude"
+		return av
+	}
 
 	// `claude auth status` prints JSON in recent releases. If the subcommand is
 	// missing we cannot confirm auth; report installed-but-unknown rather than
@@ -147,9 +151,10 @@ func (c *ClaudeSubscription) BuildArgs(fs flagSet, req Request, mcpCfg string) (
 	}
 	// Persona agents answer; they do not run the CLI's own tools on the
 	// user's machine. Water's MCP tools are the only tool path.
-	if fs["--tools"] {
-		args = append(args, "--tools", "")
+	if !fs["--tools"] {
+		return nil, fmt.Errorf("claude CLI lacks load-bearing --tools flag; cannot guarantee tool isolation")
 	}
+	args = append(args, "--tools", "")
 	if fs["--no-session-persistence"] {
 		args = append(args, "--no-session-persistence")
 	}
@@ -158,9 +163,10 @@ func (c *ClaudeSubscription) BuildArgs(fs flagSet, req Request, mcpCfg string) (
 	}
 	// No MCP servers except Water's own: persona agents must not see the
 	// user's connectors.
-	if fs["--strict-mcp-config"] {
-		args = append(args, "--strict-mcp-config")
+	if !fs["--strict-mcp-config"] {
+		return nil, fmt.Errorf("claude CLI lacks load-bearing --strict-mcp-config flag; cannot block inherited connectors")
 	}
+	args = append(args, "--strict-mcp-config")
 	if mcpCfg != "" {
 		if !fs["--mcp-config"] || !fs["--strict-mcp-config"] {
 			return nil, fmt.Errorf("claude CLI lacks --mcp-config/--strict-mcp-config; tools unavailable")
@@ -257,6 +263,9 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 	}
 
 	resp.RateLimit = parseRateLimit(stdout)
+	if err != nil && errors.Is(err, ErrCallTimeout) {
+		return resp, fmt.Errorf("claude failed: %w", err)
+	}
 	if res, ok := parseClaudeResult(stdout); ok {
 		resp.Text = strings.TrimSpace(res.Result)
 		resp.InputTokens = res.Usage.InputTokens + res.Usage.CacheReadInput + res.Usage.CacheCreationInput
