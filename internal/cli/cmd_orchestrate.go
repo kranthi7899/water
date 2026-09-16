@@ -6,15 +6,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
-	"water/internal/agent"
-	"water/internal/backend"
-	"water/internal/config"
 	"water/internal/orchestrator"
-	"water/internal/trace"
 )
 
 func (a *App) orchestrateCmd() *cobra.Command {
@@ -66,102 +61,11 @@ func (a *App) orchestrateCmd() *cobra.Command {
 				}
 				st = orchestrator.NewState("", brief, reg.OrchestratorSlugs())
 			}
-			def, err := a.selectBackend(ctx)
-			if err != nil {
-				return err
-			}
-			if w := meteredLeakWarning(def); w != "" && !a.jsonMode() {
-				fmt.Fprintln(os.Stderr, "warning:", w)
-			}
-			env, _, err := a.roleEnv(ctx, reg, def)
-			if err != nil {
-				return exitWith(ExitBackend, err)
-			}
-
-			orch := reg.Orchestrator()
-			var delegates []string
-			for _, r := range reg.Delegates() {
-				delegates = append(delegates, r.Slug)
-			}
-			router, ok := orchestrator.NewRouter(cfg.Orchestration.Router, orch.Slug, delegates)
-			if !ok {
-				return exitWith(ExitUsage, fmt.Errorf("unknown router %q (known: %v)", cfg.Orchestration.Router, orchestrator.RouterNames()))
-			}
-			if h, ok := router.(*orchestrator.HierarchyRouter); ok {
-				h.MaxRounds = cfg.Orchestration.MaxRounds
-				if solo {
-					// Measurement mode (Part 2 follow-up): CEO answers alone,
-					// delegating nothing. Same brief, same persona, no graph.
-					h.COO, h.Specialists = "", nil
-				}
-			}
-			st.SetEdges(orchestrator.EdgesFor(router))
-
-			rec, err := trace.New(cfg.Telemetry.TraceDir, st.RunID)
-			if err != nil {
-				return err
-			}
-			sf := a.surfaces()
-			env.Surface, env.Trace = sf, rec
-			g := &orchestrator.Graph{Nodes: map[string]orchestrator.Node{}, Router: router}
-			for _, r := range reg.All() {
-				if h, ok := router.(*orchestrator.HierarchyRouter); ok {
-					g.Nodes[r.Slug] = agent.HierarchyNode(r, env, h)
-				} else {
-					g.Nodes[r.Slug] = agent.Node(r, env, delegates)
-				}
-			}
-			active := newActiveNodes()
-			ex := &orchestrator.Executor{
-				MaxParallel:  cfg.Orchestration.MaxParallel,
-				Timeout:      runTimeout(cfg),
-				MaxSteps:     cfg.Orchestration.MaxSteps,
-				Checkpointer: cp,
-				Hooks: orchestrator.Hooks{
-					NodeStarted:  func(role string) { active.start(role); sf.NodeStarted(role); rec.NodeStarted(role) },
-					NodeFinished: func(role string, d time.Duration, err error) { active.finish(role); rec.NodeFinished(role, d, err) },
-					Checkpointed: func(step int) { rec.Checkpoint(step) },
-				},
-			}
-			// Live debugging: `water debug dump <run-id>` signals this process,
-			// which writes a state dump without stopping the run.
-			_ = os.MkdirAll(cfg.Orchestration.CheckpointDir, 0o755)
-			pf := pidFile(cfg.Orchestration.CheckpointDir, st.RunID)
-			_ = os.WriteFile(pf, []byte(fmt.Sprintf(`{"pid":%d,"started":%q}`, os.Getpid(), time.Now().Format(time.RFC3339))), 0o600)
-			defer os.Remove(pf)
-			disarm := armStateDump(func() (string, error) { return writeStateDump(cfg.Telemetry.TraceDir, st, router, active) })
-			defer disarm()
-			if !a.jsonMode() && !a.flags.quiet {
-				fmt.Fprintf(os.Stderr, "live dump: water debug dump %s\n", st.RunID)
-			}
-			sf.RunStarted(st.RunID, brief)
-			rec.RunStarted(brief)
-			st.Observe(func(m orchestrator.AgentMessage) { rec.Message(m); sf.MessageSent(m) })
-			runErr := ex.Run(ctx, g, st)
-			final, _ := st.FinalOutput()
-			if runErr != nil {
-				rec.Error(runErr)
-			}
-			stats := rec.Finish()
-			sf.RunFinished(final, stats)
-			_ = backend.SaveRateLimit(config.Home(), stats.LastRateLimit)
-			if runErr != nil {
-				if cfg.Orchestration.Checkpointer == orchestrator.FileCheckpointerName {
-					fmt.Fprintf(os.Stderr, "checkpoint saved; resume with: water orchestrate --resume %s\n", st.RunID)
-				}
-				if errors.Is(runErr, backend.ErrRateLimited) {
-					msg := "run interrupted by the subscription rate limit, not by a failure"
-					if stats.LastRateLimit != nil && !stats.LastRateLimit.FiveHourResets.IsZero() {
-						msg += " (window resets " + stats.LastRateLimit.FiveHourResets.Local().Format("Mon 15:04") + ")"
-					}
-					return exitWith(ExitRateLimited, fmt.Errorf("%s; `water orchestrate --resume %s` continues it", msg, st.RunID))
-				}
-				return exitWith(ExitBackend, runErr)
-			}
-			if final == "" {
-				return exitWith(ExitError, errors.New("run completed without FinalOutput"))
-			}
-			return nil
+			_, err = a.runOrchestration(ctx, cfg, reg, st, brief, cp, orchOpts{
+				Solo:       solo,
+				ResumeHint: "water orchestrate --resume",
+			})
+			return err
 		},
 	}
 	c.Flags().StringVar(&resume, "resume", "", "resume a checkpointed run by id (the id printed when the run started)")
