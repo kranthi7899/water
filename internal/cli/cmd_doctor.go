@@ -177,7 +177,22 @@ func (a *App) doctorCmd() *cobra.Command {
 			} else if !vp.Available() {
 				add("voice", "warn", voice.Absence(vp))
 			} else {
-				add("voice", "ok", vp.Name()+" (speak only; listen is a documented no-op)")
+				detail := vp.Name() + " (speak only; listen is a documented no-op)"
+				if cfg.Voice.Provider == "os" {
+					var parts []string
+					for _, r := range []string{"ceo", "coo", "cto", "design"} {
+						v := voice.NewOSFor(r, cfg.Voice.VoiceFor(r)).Voice()
+						if v == "" {
+							v = "system default"
+						}
+						parts = append(parts, r+"="+v)
+						if o := cfg.Voice.VoiceFor(r); voice.OverrideIgnored(o) {
+							add("voice", "warn", fmt.Sprintf("voice.%s_voice %q is not installed; using %s", r, o, v))
+						}
+					}
+					detail += " · " + strings.Join(parts, ", ")
+				}
+				add("voice", "ok", detail)
 			}
 			if cfg.Onboard.VerifiedAt != "" {
 				add("onboard", "ok", "verified round trip at "+cfg.Onboard.VerifiedAt)

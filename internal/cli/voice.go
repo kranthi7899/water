@@ -21,6 +21,11 @@ func (a *App) voiceProvider(cfg *config.Resolved, role string) (voice.Provider, 
 			AllowMetered: cfg.Voice.AllowMetered,
 		}), nil
 	}
+	if cfg.Voice.Provider == "os" {
+		// Free per-role differentiation: same system engine, a distinct
+		// installed voice and pace per role.
+		return voice.NewOSFor(role, cfg.Voice.VoiceFor(role)), nil
+	}
 	vp, ok := voice.Open(cfg.Voice.Provider)
 	if !ok {
 		return nil, fmt.Errorf("provider %q not registered (%v)", cfg.Voice.Provider, voice.Names())

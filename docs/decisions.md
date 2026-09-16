@@ -156,6 +156,16 @@ may be overridden with `voice.ceo_voice`, `voice.coo_voice`, `voice.cto_voice`, 
 `voice.design_voice`; a custom voice ID is accepted only where the account is eligible and has obtained
 the provider's required consent. Live speech-to-speech / microphone conversation remains out of scope:
 it would replace the subscription-CLI model contract with a separate Realtime API architecture.
+
+**Follow-up (2026-09-16): free per-role OS voices.** The default `os` provider now also differs by
+role, at no cost: CEO Daniel at 172 wpm, COO Samantha at 185, CTO Rishi at 190, Design Moira at 180
+(all ship with macOS). If you have downloaded a Premium or Enhanced voice (System Settings →
+Accessibility → Spoken Content), it is used first: Jamie/Evan, Ava, Nathan/Tom, Zoe/Serena. Installed
+voices are read once from `say -v ?`. `voice.<role>_voice` overrides the choice only when that voice
+is installed; otherwise the role default is used and `water doctor` warns. Both providers flatten
+markdown before speaking (code blocks become "code block omitted"; no asterisks, pipes or URLs).
+It is still the same system engine, so roles are easier to tell apart but no more expressive.
+On Linux, espeak uses per-role variants; this is unverified.
 - **Linux sandboxing is not implemented.** `sandbox-exec` on macOS is wired for the (currently
   unused) shell tool; Landlock is the planned Linux fit. No role has shell, so nothing is exposed,
   but the doc must not imply confinement exists where it does not.

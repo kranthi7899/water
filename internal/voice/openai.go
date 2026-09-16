@@ -116,7 +116,7 @@ func (o *OpenAI) Speak(ctx context.Context, text string) error {
 	if !o.Available() {
 		return errors.New(o.Absence())
 	}
-	for _, chunk := range speechChunks(text, 4096) {
+	for _, chunk := range speechChunks(Speakable(text), 4096) {
 		if err := o.speakChunk(ctx, chunk); err != nil {
 			return err
 		}

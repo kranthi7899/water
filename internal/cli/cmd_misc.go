@@ -34,16 +34,17 @@ func (a *App) versionCmd() *cobra.Command {
 }
 
 func (a *App) voiceCmd() *cobra.Command {
-	return &cobra.Command{
+	var role string
+	c := &cobra.Command{
 		Use:   "voice [text]",
-		Short: "Speak text through the OS provider (test the voice path)",
+		Short: "Speak text in a role's voice (test the voice path)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.config()
 			if err != nil {
 				return err
 			}
-			vp, err := a.voiceProvider(cfg, "ceo")
+			vp, err := a.voiceProvider(cfg, role)
 			if err != nil {
 				return exitWith(ExitUsage, err)
 			}
@@ -57,6 +58,8 @@ func (a *App) voiceCmd() *cobra.Command {
 			return vp.Speak(context.Background(), text)
 		},
 	}
+	c.Flags().StringVar(&role, "role", "ceo", "speak as this role (ceo, coo, cto, design)")
+	return c
 }
 
 func (a *App) dashboardCmd() *cobra.Command {
