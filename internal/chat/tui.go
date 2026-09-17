@@ -1080,7 +1080,7 @@ func (m *model) approvalCard(req tools.ApprovalRequest) []string {
 	perPage := max(1, m.regions.Chat.H-2)
 	start := page * perPage
 	end := min(start+perPage, len(body))
-	heading := truncateApproval(title+" · "+strings.ToUpper(safeApprovalText(req.Role)), m.width)
+	heading := truncateApproval(title+" · "+strings.ToUpper(SafeApprovalText(req.Role)), m.width)
 	lines := []string{m.styler.Bg(m.theme.Palette.Panel, m.styler.Bold(m.fg(m.theme.Palette.Foreground, heading)))}
 	for _, line := range body[start:end] {
 		lines = append(lines, m.fg(m.theme.Palette.Foreground, "  "+line))
@@ -1108,6 +1108,12 @@ func (m *model) approvalBody(req tools.ApprovalRequest) ([]string, int) {
 	if len(actions) == 0 {
 		actions = []tools.PlannedAction{{Tool: req.Tool, Args: req.Args}}
 	}
+	for _, action := range actions {
+		if action.Tool == tools.ToolOpenPage {
+			raw = append(raw, "Opens a page in your browser, outside the sandbox. Water refuses it unless the page is self-contained: no scripts or remote URLs.")
+			break
+		}
+	}
 	for i, action := range actions {
 		raw = append(raw, fmt.Sprintf("%d. %s", i+1, actionEffect(action)))
 		if m.approvalDetails {
@@ -1124,19 +1130,19 @@ func (m *model) approvalBody(req tools.ApprovalRequest) ([]string, int) {
 	raw = append(raw, "Approve this plan once. Stop on failure; completed actions are not rolled back.")
 	var body []string
 	for _, line := range raw {
-		body = append(body, strings.Split(ansi.Hardwrap(safeApprovalText(line), max(1, m.width-4), true), "\n")...)
+		body = append(body, strings.Split(ansi.Hardwrap(SafeApprovalText(line), max(1, m.width-4), true), "\n")...)
 	}
 	perPage := max(1, m.regions.Chat.H-2)
 	return body, max(1, (len(body)+perPage-1)/perPage)
 }
 
 func truncateApproval(s string, width int) string {
-	return ansi.Truncate(safeApprovalText(s), max(0, width), "…")
+	return ansi.Truncate(SafeApprovalText(s), max(0, width), "…")
 }
 
 // Tool arguments are data. Terminal control codes must never draw their own
 // approval buttons, clear the display, or manipulate the clipboard.
-func safeApprovalText(s string) string {
+func SafeApprovalText(s string) string {
 	var out strings.Builder
 	for _, r := range s {
 		switch {
@@ -1160,6 +1166,8 @@ func actionEffect(action tools.PlannedAction) string {
 	switch action.Tool {
 	case tools.ToolWriteFile:
 		return fmt.Sprintf("write %s (%d bytes)", path, len(content))
+	case tools.ToolOpenPage:
+		return fmt.Sprintf("open %s in your browser", path)
 	case tools.ToolRun:
 		fields := strings.Fields(command)
 		if len(fields) == 0 {

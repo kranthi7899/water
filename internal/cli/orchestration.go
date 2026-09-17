@@ -22,34 +22,23 @@ type orchOpts struct {
 	// ResumeHint is the command prefix offered after an interrupted run,
 	// e.g. "water orchestrate --resume". Empty suppresses the hint.
 	ResumeHint string
-	// AfterRun runs once the graph has produced a final output, while the
-	// trace is still open so any further model call is recorded against it.
-	AfterRun func(ctx context.Context, env agent.Env, st *orchestrator.State, final string) error
-}
-
-// orchRun is a completed orchestration.
-type orchRun struct {
-	State *orchestrator.State
-	Env   agent.Env
-	Final string
-	Stats trace.Stats
 }
 
 // runOrchestration executes one graph run against an already-built state: it
 // resolves backends and per-role tool policies, builds the router and graph,
 // opens the trace, runs the executor, and maps failures onto exit codes. The
 // caller owns the state (fresh or resumed) and the checkpointer.
-func (a *App) runOrchestration(ctx context.Context, cfg *config.Resolved, reg *roles.Registry, st *orchestrator.State, brief string, cp orchestrator.Checkpointer, opts orchOpts) (*orchRun, error) {
+func (a *App) runOrchestration(ctx context.Context, cfg *config.Resolved, reg *roles.Registry, st *orchestrator.State, brief string, cp orchestrator.Checkpointer, opts orchOpts) error {
 	def, err := a.selectBackend(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if w := meteredLeakWarning(def); w != "" && !a.jsonMode() {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
 	env, _, err := a.roleEnv(ctx, reg, def)
 	if err != nil {
-		return nil, exitWith(ExitBackend, err)
+		return exitWith(ExitBackend, err)
 	}
 
 	orch := reg.Orchestrator()
@@ -59,7 +48,7 @@ func (a *App) runOrchestration(ctx context.Context, cfg *config.Resolved, reg *r
 	}
 	router, ok := orchestrator.NewRouter(cfg.Orchestration.Router, orch.Slug, delegates)
 	if !ok {
-		return nil, exitWith(ExitUsage, fmt.Errorf("unknown router %q (known: %v)", cfg.Orchestration.Router, orchestrator.RouterNames()))
+		return exitWith(ExitUsage, fmt.Errorf("unknown router %q (known: %v)", cfg.Orchestration.Router, orchestrator.RouterNames()))
 	}
 	if h, ok := router.(*orchestrator.HierarchyRouter); ok {
 		h.MaxRounds = cfg.Orchestration.MaxRounds
@@ -73,7 +62,7 @@ func (a *App) runOrchestration(ctx context.Context, cfg *config.Resolved, reg *r
 
 	rec, err := trace.New(cfg.Telemetry.TraceDir, st.RunID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	sf := a.surfaces()
 	env.Surface, env.Trace = sf, rec
@@ -116,15 +105,10 @@ func (a *App) runOrchestration(ctx context.Context, cfg *config.Resolved, reg *r
 	if runErr != nil {
 		rec.Error(runErr)
 	}
-	// finish closes the trace exactly once, on every path out of here.
-	finish := func() trace.Stats {
-		stats := rec.Finish()
-		sf.RunFinished(final, stats)
-		_ = backend.SaveRateLimit(config.Home(), stats.LastRateLimit)
-		return stats
-	}
+	stats := rec.Finish()
+	sf.RunFinished(final, stats)
+	_ = backend.SaveRateLimit(config.Home(), stats.LastRateLimit)
 	if runErr != nil {
-		stats := finish()
 		if cfg.Orchestration.Checkpointer == orchestrator.FileCheckpointerName && opts.ResumeHint != "" {
 			fmt.Fprintf(os.Stderr, "checkpoint saved; resume with: %s %s\n", opts.ResumeHint, st.RunID)
 		}
@@ -134,21 +118,14 @@ func (a *App) runOrchestration(ctx context.Context, cfg *config.Resolved, reg *r
 				msg += " (window resets " + stats.LastRateLimit.FiveHourResets.Local().Format("Mon 15:04") + ")"
 			}
 			if opts.ResumeHint != "" {
-				return nil, exitWith(ExitRateLimited, fmt.Errorf("%s; `%s %s` continues it", msg, opts.ResumeHint, st.RunID))
+				return exitWith(ExitRateLimited, fmt.Errorf("%s; `%s %s` continues it", msg, opts.ResumeHint, st.RunID))
 			}
-			return nil, exitWith(ExitRateLimited, errors.New(msg))
+			return exitWith(ExitRateLimited, errors.New(msg))
 		}
-		return nil, exitWith(ExitBackend, runErr)
+		return exitWith(ExitBackend, runErr)
 	}
 	if final == "" {
-		finish()
-		return nil, exitWith(ExitError, errors.New("run completed without FinalOutput"))
+		return exitWith(ExitError, errors.New("run completed without FinalOutput"))
 	}
-	if opts.AfterRun != nil {
-		if err := opts.AfterRun(ctx, env, st, final); err != nil {
-			finish()
-			return nil, err
-		}
-	}
-	return &orchRun{State: st, Env: env, Final: final, Stats: finish()}, nil
+	return nil
 }

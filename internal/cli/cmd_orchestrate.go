@@ -61,11 +61,10 @@ func (a *App) orchestrateCmd() *cobra.Command {
 				}
 				st = orchestrator.NewState("", brief, reg.OrchestratorSlugs())
 			}
-			_, err = a.runOrchestration(ctx, cfg, reg, st, brief, cp, orchOpts{
+			return a.runOrchestration(ctx, cfg, reg, st, brief, cp, orchOpts{
 				Solo:       solo,
 				ResumeHint: "water orchestrate --resume",
 			})
-			return err
 		},
 	}
 	c.Flags().StringVar(&resume, "resume", "", "resume a checkpointed run by id (the id printed when the run started)")
