@@ -29,6 +29,9 @@ const (
 	// exposes this instead of raw write/run calls so one human decision can
 	// cover a reviewed set of related effects without becoming a broad grant.
 	ToolApplyActions = "apply_actions"
+	// ToolOpenPage shows a finished, self-contained page in the user's
+	// browser. It exists only as an action inside an approved plan.
+	ToolOpenPage = "open_page"
 )
 
 // Policy is the resolved, role-scoped permission set. It is serialised to a
@@ -89,7 +92,7 @@ func (p *Policy) HasTrace() bool { return p != nil && p.Trace == "current-run" }
 // directory listings within an already-approved workspace do not prompt; a
 // write or process launch always does.
 func (p *Policy) RequiresApproval(tool string) bool {
-	return p != nil && p.ApprovalSocket != "" && (tool == ToolWriteFile || tool == ToolRun || tool == ToolApplyActions)
+	return p != nil && p.ApprovalSocket != "" && (tool == ToolWriteFile || tool == ToolRun || tool == ToolApplyActions || tool == ToolOpenPage)
 }
 
 // InteractiveWorkspacePolicy is the local-chat baseline: one explicit
@@ -196,23 +199,60 @@ func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[stri
 		if p.Filesystem.Mode != "read-write" {
 			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode) + " (write requires read-write)"}, args
 		}
-		// The target may not exist yet: resolve its parent directory.
-		target := str("path")
-		parent, root, err := ResolveWithinRoots(p.Filesystem.Roots, filepath.Dir(target))
-		if err != nil {
-			return Decision{false, "parent outside declared roots: " + err.Error()}, args
+		if _, ok := args["content"].(string); !ok {
+			return Decision{false, "write_file requires string content"}, args
 		}
-		if prot, hit := p.protectedHit(filepath.Join(parent, filepath.Base(target))); hit {
+		// Resolve the leaf too: an existing output file can itself be a
+		// symlink. Checking only its parent permits writes outside the root.
+		target, root, err := ResolveWithinRoots(p.Filesystem.Roots, str("path"))
+		if err != nil {
+			return Decision{false, "target outside declared roots: " + err.Error()}, args
+		}
+		if prot, hit := p.protectedHit(target); hit {
 			return Decision{false, "path is inside water's own state directory (" + prot + ")"}, args
 		}
 		out := cloneArgs(args)
-		out["path"] = filepath.Join(parent, filepath.Base(target))
+		out["path"] = target
 		return Decision{true, "filesystem.mode=read-write root=" + root}, out
+	case ToolOpenPage:
+		// The browser runs outside the command sandbox, so this is never a
+		// standalone or headless capability: only an action in a plan the
+		// person at the terminal approves.
+		if p.ApprovalSocket == "" {
+			return Decision{false, "open_page is available only in an interactive session with approvals"}, args
+		}
+		if p.BatchActions {
+			return Decision{false, "open_page is available only as an action inside apply_actions"}, args
+		}
+		if p.Filesystem.Mode != "read-only" && p.Filesystem.Mode != "read-write" {
+			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode)}, args
+		}
+		target, root, err := ResolveWithinRoots(p.Filesystem.Roots, str("path"))
+		if err != nil {
+			return Decision{false, "page outside declared roots: " + err.Error()}, args
+		}
+		if prot, hit := p.protectedHit(target); hit {
+			return Decision{false, "path is inside water's own state directory (" + prot + ")"}, args
+		}
+		if ext := strings.ToLower(filepath.Ext(target)); ext != ".html" && ext != ".htm" {
+			return Decision{false, "open_page opens .html files only"}, args
+		}
+		out := cloneArgs(args)
+		out["path"] = target
+		return Decision{true, "open self-contained page in browser root=" + root}, out
 	case ToolRun:
 		if p.BatchActions {
 			return Decision{false, "interactive workspace requires apply_actions so related effects can be reviewed together"}, args
 		}
 		mode := orNone(p.Shell.Mode)
+		if strings.TrimSpace(str("command")) == "" {
+			return Decision{false, "run requires a nonempty command"}, args
+		}
+		// argv is derived only by the allowlist matcher, never accepted from
+		// a request that the user reviewed as a different shell command.
+		if _, supplied := args["argv"]; supplied {
+			return Decision{false, "argv is internal; supply command only"}, args
+		}
 		if mode == "none" {
 			return Decision{false, "shell.mode=none"}, args
 		}

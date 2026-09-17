@@ -148,10 +148,13 @@ func (e *Executor) runStep(ctx context.Context, g *Graph, s *State, nodes []stri
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []error
+	var scheduleErr error
+schedule:
 	for _, name := range nodes {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			scheduleErr = ctx.Err()
+			break schedule
 		case sem <- struct{}{}:
 		}
 		wg.Add(1)
@@ -188,6 +191,9 @@ func (e *Executor) runStep(ctx context.Context, g *Graph, s *State, nodes []stri
 			parts = append(parts, err.Error())
 		}
 		return errors.New(strings.Join(parts, "; "))
+	}
+	if scheduleErr != nil {
+		return scheduleErr
 	}
 	return nil
 }

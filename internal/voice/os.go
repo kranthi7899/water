@@ -22,9 +22,11 @@ func init() { Register("os", func() Provider { return NewOS() }) }
 // speech-to-text binding was judged reliable enough to ship, and shipping an
 // unreliable one is worse than none (spec 3D).
 type OS struct {
-	bin  string
-	args []string
-	Look func(string) (string, error) // exec.LookPath; overridable in tests
+	bin   string
+	args  []string
+	voice string                       // resolved per-role voice; empty means the system default
+	rate  int                          // words per minute; 0 means the engine default
+	Look  func(string) (string, error) // exec.LookPath; overridable in tests
 }
 
 // NewOS detects the platform TTS binary.
@@ -67,24 +69,23 @@ func (o *OS) Absence() string {
 	}
 }
 
-// Speak renders text through the OS TTS binary. Long text is spoken as-is;
-// the caller decides what to speak (typically the assistant's reply).
+// Speak renders text through the OS TTS binary, in this provider's per-role
+// voice when one was resolved. Markdown is flattened first so the engine does
+// not recite asterisks, fences and table pipes.
 func (o *OS) Speak(ctx context.Context, text string) error {
 	if o.bin == "" {
 		return errors.New(o.Absence())
 	}
-	text = strings.TrimSpace(text)
+	text = Speakable(text)
 	if text == "" {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, o.bin, o.args...)
+	args := append([]string{}, o.args...)
+	args = append(args, o.voiceArgs()...)
+	// `say`, spd-say and espeak all read stdin when no text argument is given.
+	cmd := exec.CommandContext(ctx, o.bin, args...)
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Env = backend.ScrubbedEnv()
-	if runtime.GOOS == "darwin" {
-		// `say` reads stdin when no text argument is given.
-		cmd = exec.CommandContext(ctx, o.bin)
-		cmd.Stdin = strings.NewReader(text)
-	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s: %w: %s", o.bin, err, strings.TrimSpace(string(out)))

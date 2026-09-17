@@ -258,3 +258,13 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 - Added optional `voice.provider: openai`, a role-aware expressive speech renderer: CEO `marin`, COO `cedar`, CTO `ash`, and Design `coral`, each with a fixed delivery profile. Switching roles selects the corresponding renderer while leaving the text session, memory, and backend unchanged.
 - This is deliberately **not** enabled by default: it requires both `voice.allow_metered: true` and `OPENAI_API_KEY`. It cannot use or leak Claude/Codex subscription credentials; no key is stored in Water configuration or handed to subprocesses.
 - Validation: in-process API test verifies role voice, style instruction, completed reply text only, returned-audio playback, and chunking; another test proves the provider fails closed without the explicit metered opt-in. Live microphone/STT remains unshipped by design.
+
+## Free per-role OS voice (2026-09-16)
+
+Status: committed on `feat/build-site`. Decision note: `docs/decisions.md` → "Expressive per-role voice" follow-up.
+
+- `voice.provider: os` (default) now gives each role its own voice and pace: CEO Daniel at 172 wpm, COO Samantha at 185, CTO Rishi at 190, Design Moira at 180. If a Premium or Enhanced voice is installed, it is used first. `voice.<role>_voice` overrides the choice only when that voice is installed. Code: `internal/voice/os_roles.go`, `cli/voice.go`.
+- `Speakable()` (`internal/voice/speakable.go`) flattens markdown before either provider speaks.
+- `water voice --role <slug> "text"` tests a role's voice. `water doctor` lists each role's voice and warns about overrides that aren't installed.
+- Fixed: on darwin, `OS.Speak` rebuilt the `say` command and lost `ScrubbedEnv`.
+- Validation: `go test ./...` passes (new: `TestOSRolesResolveDistinctInstalledVoices`, `TestOSVoiceArgs`, `TestParseSayVoices`, `TestSpeakableDropsMarkup`). All 4 roles spoke through `say` on this Mac. The Linux espeak variants are unverified.

@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"os/signal"
 
 	"github.com/spf13/cobra"
 
@@ -33,7 +33,9 @@ func (a *App) mcpServeCmd() *cobra.Command {
 					_ = tools.AppendEvents(logPath, ev)
 				}
 			})
-			return tools.ServeStdio(context.Background(), os.Stdin, os.Stdout, svc)
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer stop()
+			return tools.ServeStdio(ctx, os.Stdin, os.Stdout, svc)
 		},
 	}
 	c.Flags().StringVar(&policyPath, "policy", "", "policy file written by the parent water process")

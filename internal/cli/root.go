@@ -80,7 +80,7 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 	pf.BoolVar(&a.flags.debug, "debug", false, "log every model subprocess: real flags (prompt text elided), pid, duration, exit, last stderr line")
 
 	root.AddCommand(
-		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(), a.runCmd(), a.orchestrateCmd(),
+		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(), a.runCmd(), a.orchestrateCmd(), a.buildSiteCmd(),
 		a.diagnoseCmd(), a.dashboardCmd(), a.memoryCmd(), a.personaCmd(), a.experienceCmd(),
 		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(), a.replayCmd(), a.debugCmd(), a.skillsCmd(),
 	)

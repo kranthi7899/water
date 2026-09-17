@@ -155,13 +155,24 @@ func TestApprovalCardPagesWithoutMovingComposer(t *testing.T) {
 	m.approval = tools.NewPendingApproval(tools.ApprovalRequest{Role: "ceo", Tool: tools.ToolApplyActions, Actions: actions})
 	before := m.regions.Input
 	first := m.View().Content
-	if !strings.Contains(first, "1. write") || !strings.Contains(first, "←/→ review") || m.regions.Input != before {
+	if !strings.Contains(first, "1. write") || !strings.Contains(first, "←/→") || m.regions.Input != before {
 		t.Fatalf("first approval page did not preserve geometry: input=%+v before=%+v", m.regions.Input, before)
 	}
-	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
-	second := updated.(*model).View().Content
-	if !strings.Contains(second, "5. write") && !strings.Contains(second, "6. write") {
-		t.Fatal("next approval page did not expose later actions")
+	// Pages now count wrapped rows, not actions: long paths must be fully
+	// reviewable too. Reach every action while checking each page's geometry.
+	all := first
+	_, pages := m.approvalBody(m.approval.Request)
+	for i := 1; i < pages; i++ {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+		all += updated.(*model).View().Content
+		if m.regions.Input != before {
+			t.Fatal("approval page moved the composer")
+		}
+	}
+	for i := 1; i <= 6; i++ {
+		if !strings.Contains(all, fmt.Sprintf("%d. write", i)) {
+			t.Fatalf("action %d not reviewable", i)
+		}
 	}
 }
 

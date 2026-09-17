@@ -121,6 +121,8 @@ func runScrubbed(ctx context.Context, timeout time.Duration, dir string, stdin s
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
+	containProcessGroup(cmd)
+	cmd.WaitDelay = time.Second
 	var ob, eb bytes.Buffer
 	cmd.Stdout = &ob
 	cmd.Stderr = &eb

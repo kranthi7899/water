@@ -473,7 +473,7 @@ round trip passed. Start here when something's wrong.
   ✓ memory ceo               0 entries / 0 bytes (max 200 / 32768)
   …
   ✓ tools                    disabled (tools.enabled=false); every role invokes nothing
-  ✓ voice                    os (speak only; listen is a documented no-op)
+  ✓ voice                    os (speak only; listen is a documented no-op) · ceo=Daniel, coo=Samantha, cto=Rishi, design=Moira
   ✓ onboard                  verified round trip at 2026-09-15T22:06:36Z
 ```
 
@@ -529,7 +529,7 @@ Settings you're most likely to change:
 | `water debug dump <run-id>` | Writes the live state of a running orchestration (active nodes, subprocesses, goroutines) without stopping it. `orchestrate` prints this command when it starts |
 | `water dashboard [--addr 127.0.0.1:0] [--no-open]` | Read-only local web page of roles, runs, diagnostics and tool calls. Listens on loopback only |
 | `water skills` | Which skills each role has actually loaded across your recorded runs, and which never have. Read-only |
-| `water voice "text"` | Test speech output: `say` on macOS (verified), `spd-say` or `espeak` on Linux (not verified). There's no speech-to-text |
+| `water voice [--role cto] "text"` | Test speech output in a role's voice (each role has its own voice and pace): `say` on macOS (verified), `spd-say` or `espeak` on Linux (not verified). There's no speech-to-text |
 | `water version` | Print version, commit and build date |
 | `water persona show\|edit\|sign\|verify` | Inspect and re-stamp persona files. **Works only from a source checkout**; release binaries keep personas embedded and hidden |
 | `water experience <role> grow\|candidates` | Offline tools for growing persona experience. Developer-only |

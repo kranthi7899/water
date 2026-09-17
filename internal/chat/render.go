@@ -36,7 +36,7 @@ func operationSummary(t Turn) string {
 	if len(t.ToolEvents) == 0 {
 		return ""
 	}
-	var reads, lists, writes, runs int
+	var reads, lists, writes, runs, opens int
 	var dirs []string
 	for _, ev := range t.ToolEvents {
 		if !ev.Allowed {
@@ -58,6 +58,8 @@ func operationSummary(t Turn) string {
 			writes++
 		case tools.ToolRun:
 			runs++
+		case tools.ToolOpenPage:
+			opens++
 		}
 	}
 	var parts []string
@@ -72,6 +74,9 @@ func operationSummary(t Turn) string {
 	}
 	if runs > 0 {
 		parts = append(parts, fmt.Sprintf("ran %d shell command%s", runs, plural(runs, "", "s")))
+	}
+	if opens > 0 {
+		parts = append(parts, fmt.Sprintf("opened %d page%s in the browser", opens, plural(opens, "", "s")))
 	}
 	if len(parts) == 0 {
 		return ""

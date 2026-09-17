@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -23,7 +24,7 @@ import (
 //     the allowlist alone. Say so in docs; do not imply otherwise.
 //   - Windows: no confinement. Realistically weaker; documented as such.
 //
-// No role enables shell in v1, so this is exercised by tests only. Containers
+// Interactive chat may enable shell after approval. Containers
 // are strictly opt-in and not part of the default path.
 // SandboxAvailable reports whether this platform can confine a shell
 // command. Shell tools are refused where it cannot.
@@ -35,17 +36,14 @@ var SandboxAvailable = func() bool {
 	return err == nil
 }
 
-func Sandbox(cmd *exec.Cmd, p *Policy) *exec.Cmd {
-	if runtime.GOOS != "darwin" {
-		return cmd
-	}
-	if _, err := exec.LookPath("sandbox-exec"); err != nil {
-		return cmd
+func Sandbox(ctx context.Context, cmd *exec.Cmd, p *Policy) (*exec.Cmd, error) {
+	if !SandboxAvailable() {
+		return nil, fmt.Errorf("%w: no OS sandbox available", ErrDenied)
 	}
 	profile := SandboxProfile(p)
-	wrapped := exec.CommandContext(cmdContext(cmd), "sandbox-exec", append([]string{"-p", profile, cmd.Path}, cmd.Args[1:]...)...)
+	wrapped := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", append([]string{"-p", profile, cmd.Path}, cmd.Args[1:]...)...)
 	wrapped.Dir, wrapped.Env, wrapped.Stdin = cmd.Dir, cmd.Env, cmd.Stdin
-	return wrapped
+	return wrapped, nil
 }
 
 // SandboxProfile renders the macOS Seatbelt profile for a policy.
@@ -56,10 +54,24 @@ func SandboxProfile(p *Policy) string {
 	sb.WriteString("(allow sysctl-read)\n")
 	sb.WriteString("(allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") (subpath \"/System\") (subpath \"/Library\") (subpath \"/private/etc\") (subpath \"/dev\") (literal \"/\"))\n")
 	for _, r := range p.Filesystem.Roots {
+		if resolved, err := realPath(r); err == nil {
+			r = resolved
+		}
 		fmt.Fprintf(&sb, "(allow file-read* (subpath %q))\n", r)
 		if p.Filesystem.Mode == "read-write" {
 			fmt.Fprintf(&sb, "(allow file-write* (subpath %q))\n", r)
 		}
+	}
+	// These exclusions must survive a workspace containing Water's home.
+	// The path-level tool checks alone cannot constrain a spawned process.
+	for _, protected := range p.Protected {
+		if strings.TrimSpace(protected) == "" {
+			continue
+		}
+		if resolved, err := realPath(protected); err == nil {
+			protected = resolved
+		}
+		fmt.Fprintf(&sb, "(deny file-read* file-write* (subpath %q))\n", protected)
 	}
 	sb.WriteString("(deny network*)\n")
 	return sb.String()
