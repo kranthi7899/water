@@ -124,24 +124,32 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 			}
 			continue
 		}
-		go func(req rpcRequest) {
-			cctx, cancel := context.WithTimeout(ctx, callTimeout)
-			key := requestKey(req.ID)
+		// The cancel func is registered here, on the read loop, before the
+		// goroutine is even started — not inside it. notifications/cancelled
+		// is handled on this same loop, one line later at the earliest, so a
+		// cancel can never be read before its call is cancellable: there is
+		// no window for the notification to find the map empty and be
+		// silently dropped.
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		key := requestKey(req.ID)
+		if key != "" {
+			cmu.Lock()
+			calls[key] = cancel
+			cmu.Unlock()
+		}
+		go func(req rpcRequest, cctx context.Context, cancel context.CancelFunc, key string) {
+			defer cancel()
 			if key != "" {
-				cmu.Lock()
-				calls[key] = cancel
-				cmu.Unlock()
 				defer func() {
 					cmu.Lock()
 					delete(calls, key)
 					cmu.Unlock()
 				}()
 			}
-			defer cancel()
 			if res, reply := handle(cctx, svc, req); reply {
 				write(res)
 			}
-		}(req)
+		}(req, cctx, cancel, key)
 	}
 	return sc.Err()
 }
