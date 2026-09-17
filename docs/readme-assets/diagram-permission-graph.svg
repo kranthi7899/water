@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 460" width="800" height="460">
+  <rect x="0" y="0" width="800" height="460" fill="#050505"></rect>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#ECE8D8"></path>
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#D81E05"></path>
+    </marker>
+  </defs>
+
+  <rect x="300" y="16" width="200" height="60" fill="#0B52A8"></rect>
+  <text x="400" y="42" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="16" font-weight="700">CEO</text>
+  <text x="400" y="62" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">frame &#183; adjudicate &#183; final</text>
+
+  <rect x="310" y="150" width="180" height="52" fill="#2A2D33"></rect>
+  <text x="400" y="174" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700">COO</text>
+  <text x="400" y="192" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">assign &#183; verify &#183; forward</text>
+
+  <rect x="90" y="290" width="190" height="60" fill="none" stroke="#ECE8D8" stroke-width="1"></rect>
+  <text x="185" y="316" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700">CTO</text>
+  <text x="185" y="334" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">feasibility &#183; verified fact</text>
+
+  <rect x="520" y="290" width="190" height="60" fill="none" stroke="#ECE8D8" stroke-width="1"></rect>
+  <text x="615" y="316" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="700">DESIGN</text>
+  <text x="615" y="334" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">user fit &#183; exposure</text>
+
+  <line x1="380" y1="76" x2="380" y2="150" stroke="#ECE8D8" stroke-width="1" marker-end="url(#arrow)"></line>
+  <line x1="420" y1="150" x2="420" y2="76" stroke="#ECE8D8" stroke-width="1" marker-end="url(#arrow)"></line>
+  <text x="315" y="118" text-anchor="middle" fill="#7E7E7E" font-family="Menlo, Consolas, monospace" font-size="8">direction, decision</text>
+  <text x="485" y="118" text-anchor="middle" fill="#7E7E7E" font-family="Menlo, Consolas, monospace" font-size="8">status, dissent</text>
+
+  <line x1="330" y1="202" x2="220" y2="290" stroke="#ECE8D8" stroke-width="1" marker-end="url(#arrow)"></line>
+  <line x1="250" y1="290" x2="360" y2="202" stroke="#ECE8D8" stroke-width="1" marker-end="url(#arrow)"></line>
+  <line x1="470" y1="202" x2="580" y2="290" stroke="#ECE8D8" stroke-width="1" marker-end="url(#arrow)"></line>
+  <line x1="550" y1="290" x2="440" y2="202" stroke="#ECE8D8" stroke-width="1" marker-end="url(#arrow)"></line>
+
+  <path d="M185,290 C 60,200 130,60 300,40" fill="none" stroke="#D81E05" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowRed)"></path>
+  <path d="M615,290 C 740,200 670,60 500,40" fill="none" stroke="#D81E05" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowRed)"></path>
+  <text x="55" y="180" fill="#D81E05" font-family="Menlo, Consolas, monospace" font-size="9">escalation only</text>
+  <text x="645" y="180" fill="#D81E05" font-family="Menlo, Consolas, monospace" font-size="9">escalation only</text>
+
+  <line x1="280" y1="320" x2="520" y2="320" stroke="#7E7E7E" stroke-width="1" stroke-dasharray="2,4"></line>
+  <text x="400" y="360" text-anchor="middle" fill="#7E7E7E" font-family="Menlo, Consolas, monospace" font-size="10">&#215; no specialist-to-specialist edge</text>
+
+  <text x="400" y="418" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="17" font-weight="700">Dissent reaches the CEO word for word.</text>
+  <text x="400" y="442" text-anchor="middle" fill="#7E7E7E" font-family="Menlo, Consolas, monospace" font-size="10">CEO &#8594; COO &#8594; CTO + DESIGN &#8594; COO &#8594; CEO</text>
+</svg>

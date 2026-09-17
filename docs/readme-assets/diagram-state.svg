@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 420" width="800" height="420">
+  <rect x="0" y="0" width="800" height="420" fill="#050505"></rect>
+  <text x="115" y="16" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700">CEO</text>
+  <text x="305" y="16" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700">COO</text>
+  <text x="495" y="16" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700">CTO</text>
+  <text x="685" y="16" text-anchor="middle" fill="#ECE8D8" font-family="Helvetica, Arial, sans-serif" font-size="13" font-weight="700">DESIGN</text>
+
+  <rect x="40" y="34" width="150" height="50" fill="#C9A227"></rect>
+  <text x="115" y="55" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">1 IDENTITY</text>
+  <text x="115" y="70" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">fixed &#183; signed</text>
+  <rect x="40" y="92" width="150" height="50" fill="#3E9B4F"></rect>
+  <text x="115" y="113" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">2 MEMORY</text>
+  <text x="115" y="128" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">bounded &#183; manual</text>
+  <rect x="40" y="150" width="150" height="50" fill="#0B52A8"></rect>
+  <text x="115" y="171" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">3 TRANSCRIPTS</text>
+  <text x="115" y="186" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="8">append-only</text>
+  <rect x="40" y="208" width="150" height="38" fill="none" stroke="#7E7E7E"></rect>
+  <text x="115" y="231" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="9">own inbox</text>
+
+  <rect x="230" y="34" width="150" height="50" fill="#C9A227"></rect>
+  <text x="305" y="55" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">1 IDENTITY</text>
+  <text x="305" y="70" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">fixed &#183; signed</text>
+  <rect x="230" y="92" width="150" height="50" fill="#3E9B4F"></rect>
+  <text x="305" y="113" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">2 MEMORY</text>
+  <text x="305" y="128" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">bounded &#183; manual</text>
+  <rect x="230" y="150" width="150" height="50" fill="#0B52A8"></rect>
+  <text x="305" y="171" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">3 TRANSCRIPTS</text>
+  <text x="305" y="186" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="8">append-only</text>
+  <rect x="230" y="208" width="150" height="38" fill="none" stroke="#7E7E7E"></rect>
+  <text x="305" y="231" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="9">inbox + trace</text>
+
+  <rect x="420" y="34" width="150" height="50" fill="#C9A227"></rect>
+  <text x="495" y="55" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">1 IDENTITY</text>
+  <text x="495" y="70" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">fixed &#183; signed</text>
+  <rect x="420" y="92" width="150" height="50" fill="#3E9B4F"></rect>
+  <text x="495" y="113" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">2 MEMORY</text>
+  <text x="495" y="128" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">bounded &#183; manual</text>
+  <rect x="420" y="150" width="150" height="50" fill="#0B52A8"></rect>
+  <text x="495" y="171" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">3 TRANSCRIPTS</text>
+  <text x="495" y="186" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="8">append-only</text>
+  <rect x="420" y="208" width="150" height="38" fill="none" stroke="#7E7E7E"></rect>
+  <text x="495" y="231" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="9">own inbox</text>
+
+  <rect x="610" y="34" width="150" height="50" fill="#C9A227"></rect>
+  <text x="685" y="55" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">1 IDENTITY</text>
+  <text x="685" y="70" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">fixed &#183; signed</text>
+  <rect x="610" y="92" width="150" height="50" fill="#3E9B4F"></rect>
+  <text x="685" y="113" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="10">2 MEMORY</text>
+  <text x="685" y="128" text-anchor="middle" fill="#050505" font-family="Menlo, Consolas, monospace" font-size="8">bounded &#183; manual</text>
+  <rect x="610" y="150" width="150" height="50" fill="#0B52A8"></rect>
+  <text x="685" y="171" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">3 TRANSCRIPTS</text>
+  <text x="685" y="186" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="8">append-only</text>
+  <rect x="610" y="208" width="150" height="38" fill="none" stroke="#7E7E7E"></rect>
+  <text x="685" y="231" text-anchor="middle" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="9">own inbox</text>
+
+  <line x1="205" y1="8" x2="205" y2="254" stroke="#D81E05" stroke-width="1" stroke-dasharray="4,4"></line>
+  <line x1="395" y1="8" x2="395" y2="254" stroke="#D81E05" stroke-width="1" stroke-dasharray="4,4"></line>
+  <line x1="585" y1="8" x2="585" y2="254" stroke="#D81E05" stroke-width="1" stroke-dasharray="4,4"></line>
+
+  <text x="400" y="280" text-anchor="middle" fill="#D81E05" font-family="Menlo, Consolas, monospace" font-size="11">No role can read another role&#39;s layers 1&#8211;3.</text>
+
+  <rect x="40" y="308" width="720" height="42" fill="#0B52A8"></rect>
+  <text x="60" y="334" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="11" font-weight="700">4 RUN STATE</text>
+  <text x="700" y="334" text-anchor="end" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">typed messages, checkpointed every step</text>
+
+  <rect x="40" y="360" width="720" height="42" fill="#2A2D33"></rect>
+  <text x="60" y="386" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="11" font-weight="700">5 TRACES</text>
+  <text x="700" y="386" text-anchor="end" fill="#ECE8D8" font-family="Menlo, Consolas, monospace" font-size="10">every call and decision, never in a prompt</text>
+</svg>

@@ -1,6 +1,6 @@
-# water
-
-A council of role-agents on the subscription you already pay for.
+<p align="center">
+  <img src="docs/readme-assets/hero.png" alt="Water — a council of role-agents on the subscription you already pay for" width="880">
+</p>
 
 Water is a single Go binary that hosts four role-agents: **CEO**, **COO**, **CTO** and **Design**.
 Each role has its own private persona (identity, distilled experience, reasoning method, skills)
@@ -11,6 +11,34 @@ This all runs through a state graph that checkpoints after every step, so a stop
 resume. Every model call goes through the `claude` (Claude Code) or `codex` (OpenAI Codex) CLI
 you already have, signed in with your Claude or ChatGPT plan. Water doesn't use a metered API key
 and refuses to use one unless you explicitly opt in.
+
+<p align="center">
+<code>151 tests &middot; 21 packages &middot; passing</code>&nbsp; &nbsp;<code>0 metered calls</code>&nbsp; &nbsp;<code>v0.1.0-rc.1</code>
+</p>
+
+<details>
+<summary><strong>How the roles talk</strong> — the permission graph</summary>
+<br>
+
+A brief flows **CEO &rarr; COO &rarr; CTO + Design &rarr; COO &rarr; CEO**. Specialists never
+message each other directly; escalations and dissent bypass the COO and reach the CEO word for
+word.
+
+<img src="docs/readme-assets/diagram-permission-graph.svg" alt="Permission graph: the CEO frames and adjudicates, the COO assigns and verifies, the CTO and Design report back through the COO, and a dashed escalation-only path runs straight to the CEO" width="800">
+
+</details>
+
+<details>
+<summary><strong>Five kinds of state</strong> — how memory stays private</summary>
+<br>
+
+Each role's identity, memory and transcripts are private to it; no role can read another's. The
+only shared channel is the run's own message log, and the only thing every role can see is the
+trace.
+
+<img src="docs/readme-assets/diagram-state.svg" alt="Five kinds of state: identity, memory and transcripts are private per role; run state and traces are the only layers shared across the run" width="800">
+
+</details>
 
 ---
 
