@@ -12,6 +12,13 @@ var agentsFS embed.FS
 //go:embed themes
 var themesFS embed.FS
 
+//go:embed all:twins
+var twinsFS embed.FS
+
+// TwinsFS returns the embedded twins tree, rooted at the repository root
+// (open "twins/<id>/twin.yaml").
+func TwinsFS() embed.FS { return twinsFS }
+
 // AgentsFS returns the embedded persona tree. The returned FS is rooted at the
 // repository root; callers should fs.Sub(AgentsFS(), "agents").
 func AgentsFS() embed.FS { return agentsFS }

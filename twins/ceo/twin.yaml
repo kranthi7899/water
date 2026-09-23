@@ -1,0 +1,30 @@
+# The CEO twin. A connector function exists for this twin only if it is
+# listed here, at the level stated. The fake_* connectors are in-memory
+# stand-ins that exercise the full gate path until real connectors land.
+id: ceo
+name: CEO twin
+
+usage:
+  window: 5h
+  model_calls: 200
+  auto_model_calls: 40
+
+connectors:
+  - name: fake_calendar
+    functions:
+      - {name: list_events, level: R}
+      - {name: create_event, level: A, rate: {max: 10, per: 1h}}
+  - name: fake_mail
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+      - {name: draft_reply, level: D}
+      - {name: send_email, level: A, rate: {max: 20, per: 1h}}
+  - name: fake_docs
+    functions:
+      - {name: read_doc, level: R}
+
+auto_allowlist:
+  - fake_calendar.list_events
+  - fake_mail.list_messages
+  - fake_mail.draft_reply
+  - fake_docs.read_doc
