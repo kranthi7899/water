@@ -44,6 +44,7 @@ const (
 var FileTypes = map[string]string{
 	"soul.md":       "soul",
 	"experience.md": "experience",
+	"reasoning.md":  "reasoning",
 	"SKILL.md":      "skill",
 }
 

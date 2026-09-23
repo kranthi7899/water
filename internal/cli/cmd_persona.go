@@ -38,7 +38,7 @@ func (a *App) personaCmd() *cobra.Command {
 				return a.personaShow(dir, args[1], fileArg(args))
 			case "edit":
 				if len(args) < 3 {
-					return exitWith(ExitUsage, errors.New("usage: water persona edit <role> <soul.md|experience.md|skills/<slug>/SKILL.md>"))
+					return exitWith(ExitUsage, errors.New("usage: water persona edit <role> <soul.md|experience.md|reasoning.md|skills/<slug>/SKILL.md>"))
 				}
 				return a.personaEdit(dir, args[1], args[2])
 			case "sign":
@@ -135,7 +135,7 @@ func (a *App) personaEdit(dir, role, file string) error {
 		return exitWith(ExitUsage, errors.New("file must be inside the role directory"))
 	}
 	if identity.FileType(p) == "" {
-		return exitWith(ExitUsage, fmt.Errorf("%s is not a persona file (soul.md, experience.md, skills/*/SKILL.md)", file))
+		return exitWith(ExitUsage, fmt.Errorf("%s is not a persona file (soul.md, experience.md, reasoning.md, skills/*/SKILL.md)", file))
 	}
 	orig, err := os.ReadFile(p)
 	if err != nil {

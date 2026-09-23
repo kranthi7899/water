@@ -2,6 +2,7 @@ package persona
 
 import (
 	"io/fs"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -110,5 +111,61 @@ func TestDescriptionSelector(t *testing.T) {
 	}
 	if got := sel.Select("hello there", skills); len(got) != 0 {
 		t.Fatalf("unrelated task selected %v", got)
+	}
+}
+
+// Reasoning refers to "the Experience section above", so it must render after
+// Experience and before any skill; a role without reasoning.md still loads.
+func TestReasoningRendersAfterExperience(t *testing.T) {
+	fsys := fstest.MapFS{
+		"ceo/soul.md":       &fstest.MapFile{Data: []byte("the soul")},
+		"ceo/experience.md": &fstest.MapFile{Data: []byte("the lessons")},
+		"ceo/reasoning.md":  &fstest.MapFile{Data: []byte("the steps")},
+	}
+	p, err := Load(fsys, "ceo", "ceo", Identity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := p.Render([]Skill{{Name: "s", Body: "skill body"}})
+	e, r, s := strings.Index(out, "# Experience"), strings.Index(out, "# Reasoning\n\nthe steps"), strings.Index(out, "# Skill: s")
+	if e < 0 || r < 0 || s < 0 || !(e < r && r < s) {
+		t.Fatalf("section order wrong:\n%s", out)
+	}
+
+	delete(fsys, "ceo/reasoning.md")
+	p, err = Load(fsys, "ceo", "ceo", Identity{})
+	if err != nil {
+		t.Fatalf("missing reasoning.md must be tolerated: %v", err)
+	}
+	if !p.Reasoning.IsBlank() || strings.Contains(p.Render(nil), "# Reasoning") {
+		t.Fatalf("missing reasoning.md must render nothing: %q", p.Render(nil))
+	}
+}
+
+// Souls weight lessons "by how many independent cases support it"; Render
+// must surface that count (distinct source_ids, exact sentence match) and
+// never a source name.
+func TestExperienceShowsCorroborationCount(t *testing.T) {
+	fsys := fstest.MapFS{
+		"ceo/experience.md": &fstest.MapFile{Data: []byte("Preamble.\n\nLesson  one.\n\nLesson two.\n\nUnindexed lesson.\n")},
+		"ceo/.index.json": &fstest.MapFile{Data: []byte(`{"schema":1,"role":"ceo","entries":[
+			{"sentence":"lesson one.","source_id":"A","source":"Secret Corp 2001"},
+			{"sentence":"Lesson one.","source_id":"B","source":"Other Inc"},
+			{"sentence":"Lesson one.","source_id":"B","source":"Other Inc duplicate"},
+			{"sentence":"Lesson two.","source_id":"C","source":"Third Co"},
+			{"sentence":"Lesson","source_id":"D","source":"partial"}]}`)},
+	}
+	p, err := Load(fsys, "ceo", "ceo", Identity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := p.Render(nil)
+	for _, want := range []string{"Preamble.\n\n", "Lesson  one. (2 independent cases)", "Lesson two. (1 independent case)", "Unindexed lesson."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Unindexed lesson. (") || strings.Contains(out, "Corp") || strings.Contains(out, "Inc") {
+		t.Fatalf("unexpected annotation or source leak:\n%s", out)
 	}
 }

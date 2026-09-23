@@ -3,6 +3,7 @@ package persona
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"path"
 	"strings"
@@ -10,7 +11,8 @@ import (
 
 // Index is the hidden traceability map for experience.md: each sentence of
 // the uncited prose points at the verified source record it was distilled
-// from. Stored as agents/<slug>/.index.json, never rendered inline.
+// from. Stored as agents/<slug>/.index.json. Sources are never rendered
+// inline; only a per-lesson corroboration count reaches the prompt.
 type Index struct {
 	Schema  int          `json:"schema"`
 	Role    string       `json:"role"`
@@ -59,6 +61,39 @@ func (i *Index) Lookup(claim string) []IndexEntry {
 		}
 	}
 	return out
+}
+
+// Corroboration counts the distinct source records whose indexed sentence is
+// word-for-word the given lesson (after whitespace/case normalisation).
+func (i *Index) Corroboration(lesson string) int {
+	if i == nil {
+		return 0
+	}
+	l := normalise(lesson)
+	seen := map[string]bool{}
+	for _, e := range i.Entries {
+		if l != "" && normalise(e.Sentence) == l {
+			seen[e.SourceID] = true
+		}
+	}
+	return len(seen)
+}
+
+// annotate appends "(N independent cases)" to each experience paragraph the
+// index backs, so souls can weight lessons by corroboration. Only the count
+// is surfaced — never a source name — and unindexed paragraphs (the preamble)
+// are left as written.
+func (i *Index) annotate(prose string) string {
+	paras := strings.Split(prose, "\n\n")
+	for k, p := range paras {
+		switch n := i.Corroboration(p); {
+		case n == 1:
+			paras[k] = strings.TrimRight(p, " \n") + " (1 independent case)"
+		case n > 1:
+			paras[k] = fmt.Sprintf("%s (%d independent cases)", strings.TrimRight(p, " \n"), n)
+		}
+	}
+	return strings.Join(paras, "\n\n")
 }
 
 func normalise(s string) string {

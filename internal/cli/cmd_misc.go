@@ -82,7 +82,7 @@ func (a *App) dashboardCmd() *cobra.Command {
 			fileStatus := func(r *roles.Role) []identity.FileStatus {
 				var out []identity.FileStatus
 				fsys := a.source().FS()
-				for _, n := range []string{"soul.md", "experience.md"} {
+				for _, n := range []string{"soul.md", "experience.md", "reasoning.md"} {
 					b, err := fs.ReadFile(fsys, path.Join(r.Dir, n))
 					if err != nil {
 						continue

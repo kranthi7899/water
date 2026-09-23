@@ -15,6 +15,7 @@ type Persona struct {
 	Slug       string
 	Soul       Doc
 	Experience Doc
+	Reasoning  Doc
 	Skills     []Skill
 	Index      *Index
 }
@@ -26,8 +27,8 @@ type Identity struct {
 	RequireSig bool   // true for a real local agents dir once a keyring exists
 }
 
-// Load reads soul.md, experience.md, skills and the hidden index for roleDir.
-// Missing soul/experience files are tolerated (treated as blank) so a role can
+// Load reads soul.md, experience.md, reasoning.md, skills and the hidden index for roleDir.
+// Missing soul/experience/reasoning files are tolerated (treated as blank) so a role can
 // be added as a bare folder with only role.yaml. Every file found is verified
 // against id (role_id, content_hash, signature) and fails loudly on mismatch.
 func Load(fsys fs.FS, roleDir, slug string, id Identity) (*Persona, error) {
@@ -37,6 +38,9 @@ func Load(fsys fs.FS, roleDir, slug string, id Identity) (*Persona, error) {
 		return nil, err
 	}
 	if p.Experience, err = loadDoc(fsys, path.Join(roleDir, "experience.md"), id); err != nil {
+		return nil, err
+	}
+	if p.Reasoning, err = loadDoc(fsys, path.Join(roleDir, "reasoning.md"), id); err != nil {
 		return nil, err
 	}
 	if p.Skills, err = DiscoverSkills(fsys, roleDir); err != nil {
@@ -83,7 +87,12 @@ func (p *Persona) Render(selected []Skill) string {
 		sb.WriteString("# Soul\n\n" + s + "\n\n")
 	}
 	if e := p.Experience.Prose(); e != "" {
-		sb.WriteString("# Experience\n\n" + e + "\n\n")
+		sb.WriteString("# Experience\n\n" + p.Index.annotate(e) + "\n\n")
+	}
+	// Reasoning must follow Experience: its steps refer to "the Experience
+	// section above".
+	if r := p.Reasoning.Prose(); r != "" {
+		sb.WriteString("# Reasoning\n\n" + r + "\n\n")
 	}
 	for _, sk := range selected {
 		sb.WriteString("# Skill: " + sk.Name + "\n\n" + sk.Body + "\n\n")

@@ -16,7 +16,7 @@ import (
 // PersonaFiles lists the identity-bound files of a role directory on disk.
 func PersonaFiles(roleDir string) ([]string, error) {
 	var out []string
-	for _, n := range []string{"soul.md", "experience.md"} {
+	for _, n := range []string{"soul.md", "experience.md", "reasoning.md"} {
 		p := filepath.Join(roleDir, n)
 		if _, err := os.Stat(p); err == nil {
 			out = append(out, p)

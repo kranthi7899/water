@@ -259,6 +259,56 @@ Tried each everyday Claude Code usage against Water in a real terminal. Details 
 - This is deliberately **not** enabled by default: it requires both `voice.allow_metered: true` and `OPENAI_API_KEY`. It cannot use or leak Claude/Codex subscription credentials; no key is stored in Water configuration or handed to subprocesses.
 - Validation: in-process API test verifies role voice, style instruction, completed reply text only, returned-audio playback, and chunking; another test proves the provider fails closed without the explicit metered opt-in. Live microphone/STT remains unshipped by design.
 
+## Bounded harness review pass (2026-09-15)
+
+Status: implemented locally, tested, **not committed**. This pass came from scenario-based testing of the CLI harness before demo: prompt submission, approval UX, PDF/file access, cancellation, resume, and subprocess containment.
+
+- Fixed chat state bugs: command output remains visible after a transcript rebuild; a rate-limited or failed prompt is retained as pending so `/retry` and resume target the real failed message; paste now obeys the busy/input-paused state; resize and tiny-terminal layout recompute editor rows after width changes instead of leaving the composer in a misleading staging area.
+- Fixed trust propagation: when a role consumes an inbox message already marked `Untrusted`, Water marks that role as tainted before it can forward status or dissent, preserving the external-content boundary through COO relay.
+- Fixed cancellation checkpointing: the graph executor now waits for already-started sibling nodes before checkpointing a cancelled superstep, so completed work is not lost and rerun on `--resume`.
+- Hardened transcript loading: sessions under a bounded size read enough context to preserve summaries and oversized recent turns; larger transcripts keep the original tail-only no-deadlock behavior. Scanner overflow now fails loudly as incomplete context.
+- Hardened the tool/MCP path: approval disconnects expire pending prompts, `notifications/cancelled` cancels the matching in-flight MCP call, hidden `mcp-serve` uses command-context interrupt handling, writes are symlink-safe and atomic within the workspace, tool output is capped, and shell subprocesses run in a private process group.
+- Hardened subscription backend containment: Claude now refuses to run if `--tools ""` or `--strict-mcp-config` are unavailable, and a subprocess timeout wins even if the CLI emitted a partial success line before hanging.
+- Validation: `go test ./...` passes locally with the added regression tests. Current count is above the prior 109 tests; exact count not recalculated in this pass.
+- Demo readiness: rebuilt `bin/water`, installed it atomically to `/Users/kranthikoneti/.local/bin/water` and `/Users/kranthikoneti/go/bin/water`, switched `backend.preferred` to `codex-subscription` for the demo, and verified one real subscription round trip: `water run ceo "Reply exactly: WATER-SMOKE"` returned `WATER-SMOKE` with `calls 1`, `metered 0`, trace `20260915-194654-0a92b4`.
+
+## Reasoning layer — CEO pilot (2026-09-15)
+
+Status: implemented locally, tested, **not committed**. Spec: `docs/reasoning-layer-ceo-pilot-prompt.md`.
+
+- `reasoning.md` is a fourth identity-bound persona doc: `Persona.Reasoning`, loaded like soul/experience (missing = blank), rendered as `# Reasoning` after `# Experience` and before skills (its steps refer to "the Experience section above"). `identity.FileTypes`, `PersonaFiles`, `persona edit`, and the dashboard file-status list all include it.
+- `agents/ceo/reasoning.md` written (seven steps + two closing rules) and stamped with `water persona sign --no-signature`. coo/cto/design have no reasoning.md yet.
+- `Assemble()` identity line now states method application ("You reason like a CEO — not playing a character…"). This line is shared, so all four roles get the new wording; only the CEO has reasoning content.
+- Gotcha: `agents/` is `go:embed`-ed, so rebuild **after** stamping. A binary built before stamping fails role loading with a content_hash mismatch.
+- Validation: `go test ./...` passes, including the new `TestReasoningRendersAfterExperience` (order + missing-file tolerance). Live turn `20260915-211802-bfe414` (codex-subscription, 1 call, 0 metered): the call record shows the new identity line and Soul → Experience → Reasoning order. The reply named the bare situation, gave a CEO reading, cited the crisis-trust and people-decision lessons by content (no company named), bounded three options, and stated the call, tradeoff, and reversal condition. Step 6 (stated reason vs deeper driver) was **not** visibly addressed.
+
+## Reasoning layer — COO, CTO, Design rollout (2026-09-15)
+
+Status: implemented locally, **not committed**. Spec: `docs/reasoning-layer-remaining-roles-prompt.md`.
+
+- Wrote `agents/{coo,cto,design}/reasoning.md` using the spec's bodies and the `role_id`s from each `role.yaml`, stamped with `water persona sign --no-signature` (3 files touched), rebuilt afterwards; `persona verify` and `water status` load all 4 roles. No code changes.
+- Live turns (codex-subscription, 1 call each, 0 metered): COO `20260915-212535-c4b837`, CTO `20260915-212535-abcd5f`, Design `20260915-212535-07de54`. Each call record shows Experience → Reasoning → Skill order.
+- Observed: all three state the bare situation, give a role-specific reading, run an explicit Experience check that cites lessons by content (no real company named), bound the options, and close with a role-shaped step 7. COO separated verified from unconfirmed; CTO gave a feasibility range with its method and a change-my-mind condition; Design split a checked standard (WCAG contrast, 2.1:1, which is correct for #7FB3FF on white) from craft judgment and stated its coverage. **Step 6 (stated reason vs deeper driver) is missing in all three**, the same as the CEO pilot, so the gap is systematic.
+- Cosmetic: the shared identity line reads "You reason like a Design" for the design role (`role.Name` is "Design").
+
+## Persona audit fixes (2026-09-15)
+
+Status: implemented locally, tested, **not committed**.
+
+1. **Corroboration weighting is now followable (option a).** `Persona.Render` appends "(N independent cases)" to every experience paragraph. N is the number of distinct `source_id`s whose `.index.json` sentence matches the paragraph word for word (whitespace/case normalised). Only the count is rendered, never a source name; unindexed paragraphs such as the preamble get no count. `soul.md` files are unchanged because their instruction is now true. Real counts: CEO `3 3 3 3 2 2 1 1 1 1 1 1`; COO, CTO and Design are all 1s. Test: `TestExperienceShowsCorroborationCount`.
+2. **COO L1/L2 reframed** to the COO's position: flag the deputy-as-cover pattern upward and report what is observed vs. unconfirmed; name early solution imposition in the report, forward implementers' objections verbatim, then carry out the direction. The research claims are unchanged. The `.index.json` sentences were updated word for word (the two lessons still resolve to HC2004 and NUTT1999), and `coo/experience.md` was re-stamped.
+3. **Coverage gaps recorded, not filled:** `docs/known-gaps.md` (Design: accessibility; COO: sequencing/resourcing/unblocking).
+
+Validation: `persona sign` touched only `coo/experience.md`; the binary was rebuilt after stamping; `persona verify` passes for 4 roles; `go test ./...` passes. Aside: 5 `TRAIT-*` entries in `design/.index.json` match no experience paragraph, so they get no count.
+
+## Rollout-test fixes: Driver check + direct-turn framing (2026-09-15)
+
+Status: implemented locally, tested, **not committed**.
+
+1. **Step 6 is now a required labeled line** in all four `reasoning.md` files ("State a Driver check line: … Do not skip this line"). The CEO keeps its "People (and this reasoning) can be wrong about their own why" sentence. Re-stamped all 4 files, then rebuilt.
+2. **Standalone turns no longer address the COO.** `specialistNode` was not the source: `water run`/chat go through `RunSingle` → `RunTurn` and never touch the graph nodes. The "report your findings… to the COO" routing comes from the CTO and Design `soul.md` files, which describe the graph. `RunTurn`'s task now states this is a direct exchange with the user, with no other role taking part, and that the reply is addressed to the user. Souls and graph nodes are unchanged. Test: `TestDirectTurnDoesNotRouteToCOO`.
+- Validation: `go test ./...` passes. Live turns (codex-subscription, 1 call each, 0 metered): CEO `20260915-213233-324cb4`, COO `…-45a6d0`, CTO `…-0ec0a3`, Design `…-016488`. Driver check line present in 4/4 replies; "To COO:" in 0/4. All four Driver checks concluded "this is the real driver", so watch whether the line turns into a rubber stamp.
+
 ## Free per-role OS voice (2026-09-16)
 
 Status: committed on `feat/build-site`. Decision note: `docs/decisions.md` → "Expressive per-role voice" follow-up.
