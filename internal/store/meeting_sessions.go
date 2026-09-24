@@ -3,8 +3,13 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
+
+// ErrMeetingEnded is InsertMeetingSegment's answer for a session that has
+// already been stopped.
+var ErrMeetingEnded = errors.New("meeting session has ended")
 
 // MeetingSessionRow is one meeting_sessions row. EndedAt is nil while the
 // session is still listening; EventID is empty when it was started by hand.
@@ -66,10 +71,24 @@ func (s *Store) EndMeetingSession(ctx context.Context, id string, at time.Time) 
 	return n == 1, err
 }
 
+// InsertMeetingSegment appends a segment only while the session is open,
+// checked in the same statement as the insert so a concurrent stop can't
+// slip between the check and the write. It returns ErrMeetingEnded for a
+// stopped session and ErrNotFound for an unknown one.
 func (s *Store) InsertMeetingSegment(ctx context.Context, r MeetingSegmentRow) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO meeting_segments (session_id, at, channel, text, external) VALUES (?, ?, ?, ?, 1)`,
-		r.SessionID, r.At.UnixNano(), r.Channel, r.Text)
-	return err
+	res, err := s.db.ExecContext(ctx, `INSERT INTO meeting_segments (session_id, at, channel, text, external)
+		SELECT ?, ?, ?, ?, 1 WHERE EXISTS (SELECT 1 FROM meeting_sessions WHERE id = ? AND ended_at IS NULL)`,
+		r.SessionID, r.At.UnixNano(), r.Channel, r.Text, r.SessionID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 1 {
+		return err
+	}
+	if _, err := s.GetMeetingSession(ctx, r.SessionID); err != nil {
+		return err
+	}
+	return ErrMeetingEnded
 }
 
 // ListMeetingSegments returns a session's segments at or after since (zero

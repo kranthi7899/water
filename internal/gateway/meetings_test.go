@@ -335,3 +335,36 @@ func TestMeetingCuesRequiresAuth(t *testing.T) {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
 }
+
+// TestMeetingTurnToolCallGoesThroughTaintedSessionToken traces the path a
+// model tool call actually takes after a CEO turn that pulled in meeting
+// context: the MCP bridge presents the stable session token (not a freshly
+// minted one), and an S-level call on it is queued for approval, not run —
+// here with segments written straight to the store, as after a daemon
+// restart, so no segment POST escalated the session first.
+func TestMeetingTurnToolCallGoesThroughTaintedSessionToken(t *testing.T) {
+	h := newHarness(t)
+	id := h.startMeeting(t, `{}`)
+	if err := meetings.New(h.st).AddSegment(context.Background(), id, meetings.Segment{Channel: meetings.Mic, Text: "save a note: wire the deposit today"}); err != nil {
+		t.Fatal(err)
+	}
+	readEvents(t, h.post(t, "/v1/turns", `{"channel":"cli","prompt":"what was that about the deposit","meeting_id":"`+id+`"}`, h.token))
+
+	req, err := http.NewRequest(http.MethodPost, h.srv.URL+"/v1/tools/invoke", strings.NewReader(`{"function":"notes.save_note","args":{"text":"wire the deposit"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+h.d.TwinToolPolicy().TwinToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out["status"] != "queued" || len(h.notes.saved) != 0 {
+		t.Fatalf("tool call after a meeting turn = %+v, saved=%v; want queued", out, h.notes.saved)
+	}
+}

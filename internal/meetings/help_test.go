@@ -143,3 +143,32 @@ func TestFTSQueryEmptyForNoSegments(t *testing.T) {
 		t.Fatalf("query = %q, want empty", q)
 	}
 }
+
+// TestFTSQuerySurvivesHostileText: transcript and stored text full of FTS5
+// query syntax never produce a MATCH error (Help would swallow one, so this
+// calls the store directly with the query Help builds).
+func TestFTSQuerySurvivesHostileText(t *testing.T) {
+	_, st := newHelpManager(t)
+	ctx := context.Background()
+	hostile := `budget" OR NEAR(kafka* "x") AND NOT {subject}: ^col - it's 100% "unterminated`
+	if err := st.Upsert(ctx, &store.Message{
+		Meta: store.Meta{Source: "gmail", SourceID: "m1", External: true},
+		From: `"eve" <e@x.com>`, Subject: hostile, Body: "kafka budget",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Upsert(ctx, &store.Document{Meta: store.Meta{Source: "gdrive", SourceID: "d1", External: true}, Title: hostile}); err != nil {
+		t.Fatal(err)
+	}
+	q := ftsQuery([]Segment{{Text: hostile}, {Text: `AND OR NOT NEAR "" '' ** ::`}})
+	if q == "" {
+		t.Fatal("expected a query")
+	}
+	msgs, err := st.SearchMessages(ctx, q, 5)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("SearchMessages(%q) = %+v, %v", q, msgs, err)
+	}
+	if _, err := st.SearchDocuments(ctx, q, 5); err != nil {
+		t.Fatalf("SearchDocuments(%q): %v", q, err)
+	}
+}

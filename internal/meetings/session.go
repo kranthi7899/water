@@ -30,7 +30,7 @@ const MaxSegmentText = 8 << 10
 
 var (
 	ErrNotFound   = store.ErrNotFound
-	ErrEnded      = errors.New("meeting session has ended")
+	ErrEnded      = store.ErrMeetingEnded
 	ErrBadSegment = errors.New("invalid segment")
 )
 

@@ -198,3 +198,47 @@ func TestRecapUnknownSessionIsNotFound(t *testing.T) {
 		t.Fatal("expected an error for an unknown session")
 	}
 }
+
+// TestRecapGuessLabelDoesNotDependOnTheModel: the project match is labeled
+// a guess, with its confidence, by code in the returned and stored recap
+// text, so a phrasing that states it as settled fact (or drops it) can't
+// reach a reader of Meeting.Summary unlabeled.
+func TestRecapGuessLabelDoesNotDependOnTheModel(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: System, Text: "the Kafka budget is over by twenty percent"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	fb.Reply = func(backend.Request) string { return "Decisions: none.\nProject: budget_request." }
+	cls := fakeClassifier{c: decisions.Classification{NeedsDecision: true, TypeID: "budget_request", Confidence: 0.55}}
+	res, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := store.Get[store.Meeting, *store.Meeting](ctx, st, "meetings", s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"Text": res.Text, "Summary": rec.Summary} {
+		if !strings.Contains(text, "budget_request (a guess, confidence 0.55, unconfirmed)") {
+			t.Fatalf("%s = %q, want the code-rendered guess label", name, text)
+		}
+	}
+
+	// A fallback verdict (the classifier couldn't read its own reply) is not
+	// a guess at all: it is reported unavailable, not as "generic".
+	fb.Reply = func(backend.Request) string { return "Decisions: none." }
+	cls = fakeClassifier{c: decisions.Classification{NeedsDecision: true, TypeID: "generic", Fallback: true}}
+	res, err = m.Recap(ctx, s.ID, cls, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ProjectGuess.Available || !strings.Contains(res.Text, "Project match: unavailable") {
+		t.Fatalf("fallback verdict: guess = %+v, text = %q; want unavailable", res.ProjectGuess, res.Text)
+	}
+}

@@ -223,3 +223,36 @@ func TestPrefetchNoopWithoutStore(t *testing.T) {
 		t.Fatalf("prefetch ran with no Store configured: mail=%v docs=%v", r.mail.callArgs(), r.docs.callArgs())
 	}
 }
+
+// TestPrefetchSkipsCancelledEvents: an event cancelled after it was synced
+// (still in the store with a start time in the window) is not prefetched.
+func TestPrefetchSkipsCancelledEvents(t *testing.T) {
+	r := newPFRig(t)
+	now := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
+	start := now.Add(5 * time.Minute)
+	ev := &store.Event{Meta: store.Meta{Source: "gcal", SourceID: "evt-x"}, Title: "Budget review", StartAt: start, EndAt: start.Add(time.Hour), Attendees: []string{"priya@acme.com"}, Status: "cancelled"}
+	if err := r.st.Upsert(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	watersync.New(pfConfig(r, now)).RunOnceEvents(context.Background())
+	if len(r.mail.callArgs()) != 0 || len(r.docs.callArgs()) != 0 {
+		t.Fatalf("cancelled event prefetched: mail=%v docs=%v", r.mail.callArgs(), r.docs.callArgs())
+	}
+}
+
+// TestPrefetchDocsQueryIsPlainKeywords: an event title is written by
+// whoever sent the invite, so it is reduced to plain words before it
+// becomes a Drive search, never passed through as raw Drive query syntax.
+func TestPrefetchDocsQueryIsPlainKeywords(t *testing.T) {
+	r := newPFRig(t)
+	now := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
+	r.seedEvent(t, "evt-1", now.Add(5*time.Minute), nil, "sharedWithMe = true or name contains 'payroll'")
+	watersync.New(pfConfig(r, now)).RunOnceEvents(context.Background())
+	calls := r.docs.callArgs()
+	if len(calls) != 1 {
+		t.Fatalf("docs prefetch calls = %d, want 1", len(calls))
+	}
+	if q, _ := calls[0]["query"].(string); q != "sharedWithMe true or name contains payroll" {
+		t.Fatalf("docs query = %q, want the title's plain words only", q)
+	}
+}

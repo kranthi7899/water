@@ -60,8 +60,8 @@ type RecapSignals struct {
 
 // ProjectGuess is the recap's project/decision-type match. It is always
 // presented as a guess with its confidence, never filed as fact; Available
-// is false when no classifier was wired, in which case the recap says the
-// match is unavailable rather than guessing anyway.
+// is false when no classifier was wired or its verdict was a fallback, in
+// which case the recap says the match is unavailable rather than guessing.
 type ProjectGuess struct {
 	Available  bool
 	TypeID     string
@@ -137,7 +137,20 @@ func guessProject(ctx context.Context, classifier decisions.Classifier, sessionI
 	if err != nil {
 		return ProjectGuess{}, fmt.Errorf("meetings: recap project guess: %w", err)
 	}
+	if c.Fallback {
+		// The classifier couldn't read its own reply: that is no guess.
+		return ProjectGuess{}, nil
+	}
 	return ProjectGuess{Available: true, TypeID: c.TypeID, Confidence: c.Confidence}, nil
+}
+
+// String is the guess's one label, used wherever it is shown: always
+// "a guess" with its confidence, never a bare type id.
+func (g ProjectGuess) String() string {
+	if !g.Available {
+		return "Project match: unavailable"
+	}
+	return fmt.Sprintf("Project match: %s (a guess, confidence %.2f, unconfirmed)", g.TypeID, g.Confidence)
 }
 
 // transcriptText renders segs (oldest first, as Segments/SegmentsSince
@@ -243,7 +256,9 @@ func (m *Manager) Recap(ctx context.Context, sessionID string, classifier decisi
 	if err != nil {
 		return RecapResult{}, fmt.Errorf("meetings: recap: %w", err)
 	}
-	text := strings.TrimSpace(resp.Text)
+	// The guess label is appended by code, not left to the phrasing: the
+	// stored summary carries it whatever the model wrote.
+	text := strings.TrimSpace(resp.Text) + "\n\n" + guess.String()
 
 	meeting := store.Meeting{
 		Meta:          store.Meta{Source: "meetings", SourceID: sess.ID, External: true},

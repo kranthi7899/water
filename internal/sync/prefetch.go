@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"water/internal/gate"
 	"water/internal/store"
@@ -33,11 +34,17 @@ func defaultPrefetchMailArgs(ev store.Event) map[string]any {
 	return map[string]any{"query": strings.Join(parts, " OR ")}
 }
 
+// defaultPrefetchDocsArgs searches Drive by the event title's plain words.
+// The title is written by whoever sent the invite, so quotes, operators and
+// other punctuation are dropped: gdrive.search_files passes anything that
+// looks like Drive query syntax through raw, and without quotes or
+// comparison operators no such clause can be valid.
 func defaultPrefetchDocsArgs(ev store.Event) map[string]any {
-	if strings.TrimSpace(ev.Title) == "" {
+	words := strings.FieldsFunc(ev.Title, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	if len(words) == 0 {
 		return nil
 	}
-	return map[string]any{"query": ev.Title}
+	return map[string]any{"query": strings.Join(words, " ")}
 }
 
 // prefetchState is the events-tick-local bookkeeping maybePrefetch needs: it
@@ -84,6 +91,9 @@ func (r *Refresher) maybePrefetch(ctx context.Context) {
 		return
 	}
 	for _, ev := range evs {
+		if strings.EqualFold(ev.Status, "cancelled") {
+			continue
+		}
 		r.prefetchEvent(ctx, ev)
 	}
 }
