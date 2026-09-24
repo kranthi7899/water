@@ -1289,7 +1289,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - `spec_test.go`: every `QuickTool` is `QuickEligible` and unique;
     - `brief_test.go` additions for fail-closed taint in `CachedBrief`.
   - Flag: none.
-- [ ] **R-9 CEO read intents, shared words, response strings** (`twins/ceo/intents/_shared.yaml` plus the 12 read files; `responses:` in `twins/ceo/style.yaml`).
+- [x] **R-9 CEO read intents, shared words, response strings** (`twins/ceo/intents/_shared.yaml` plus the 12 read files; `responses:` in `twins/ceo/style.yaml`).
   - Tests (`internal/nervous/intents/embedded_test.go`):
     - `TestEmbeddedCEOIntentsLoad` against `water.TwinsFS()` and the real manifest;
     - `TestIntentFileTests`;
