@@ -21,8 +21,18 @@ import (
 // executing (Claim is a separate, single-use step), so this endpoint is
 // where that execution happens: it is the one place a "yes" from the CEO
 // turns directly into the gate running the action, exactly once.
+//
+// reply is free text matched deterministically (approvals.Match); Answer
+// echoes how it was read: "yes", "no" or "ambiguous". Only yes approves, and
+// a no or ambiguous answer is a final denial — there is no "ask again"
+// state — so a voice client should confirm the transcript before posting it
+// rather than post raw speech. Any Decide error that leaves an envelope to
+// report (not pending, expired, another decider won the race) is answered
+// 200 with that current envelope and Error set; a store or audit failure is
+// a 500.
 type DecisionResult struct {
 	Envelope approvals.Envelope `json:"envelope"`
+	Answer   string             `json:"answer,omitempty"`
 	Executed bool               `json:"executed"`
 	Output   json.RawMessage    `json:"output,omitempty"`
 	Error    string             `json:"error,omitempty"`
@@ -33,9 +43,22 @@ type DecisionResult struct {
 }
 
 // handleTurn streams one turn as NDJSON: ack, delta*, sentence*,
-// approval_required*, then done or error. channel selects cli | voice |
-// text-bar delivery. The turn's origin is always P0 (the CEO's immediate
-// request); taint is computed from what the assembled context pulled in.
+// approval_required*, then done or error. The turn's origin is always P0
+// (the CEO's immediate request); taint is computed from what the assembled
+// context pulled in.
+//
+// channel is one of "cli", "voice" or "text-bar" (case-insensitive; empty
+// means cli, for older callers). Anything else is a 400 before the stream
+// starts. Only voice gets sentence events and the brief-spoken-reply prompt.
+//
+// approval_required is best-effort and covers only approvals queued by this
+// turn's own model tool calls while its model call is running (one model
+// turn runs at a time; a turn waiting for its slot is not announced another
+// turn's approvals). It carries approval_id, action, risk and payload_hash,
+// enough to decide it. Approvals from anywhere else — POST
+// /v1/decisions/{id}/email, the agent-mail watcher, a call that lands after
+// the stream closed — appear only in GET /v1/approvals, so a client should
+// refresh that list on done rather than rely on this event alone.
 func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Channel string `json:"channel"`
@@ -56,6 +79,11 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	ch, ok := parseChannel(body.Channel)
+	if !ok {
+		http.Error(w, "unknown channel (want cli|voice|text-bar)", http.StatusBadRequest)
+		return
+	}
 	clearOnly := body.Clear && strings.TrimSpace(body.Prompt) == ""
 	if !body.Clear && strings.TrimSpace(body.Prompt) == "" {
 		http.Error(w, "empty prompt", http.StatusBadRequest)
@@ -74,13 +102,6 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		_ = enc.Encode(runtime.Event{Kind: runtime.EventDone})
 		return
 	}
-	ch := runtime.Channel(body.Channel)
-	switch ch {
-	case runtime.ChannelCLI, runtime.ChannelVoice, runtime.ChannelTextBar:
-	default:
-		ch = runtime.ChannelCLI
-	}
-
 	taskID := newID("task")
 	ctx, cancel := context.WithCancel(r.Context())
 	d.registerTask(taskID, cancel)
@@ -108,7 +129,9 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	// tool call this and every later turn makes is tainted together (Part A2
 	// spec: "every tool call in that turn is tainted" — escalated, since the
 	// warm session's MCP bridge child serves many turns with one token; see
-	// Daemon.escalateTaint).
+	// Daemon.escalateTaint). runtime.RunTurn escalates again from the summary
+	// it actually hands the model, which covers anything a sync stored in
+	// between.
 	_, tainted := runtime.StateSummary(ctx, d.baseEnv())
 
 	// A meeting_id extends the prompt with that session's recent transcript
@@ -125,9 +148,22 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d.escalateTaint(tainted)
-	env := d.turnEnv()
+	env := d.turnEnv(taskID)
 
 	runtime.RunTurn(ctx, env, runtime.Turn{Channel: ch, Prompt: prompt}, sink.emit)
+}
+
+// parseChannel maps a request's channel to a runtime.Channel: empty is cli
+// (older callers), matching is case-insensitive, anything else is refused.
+func parseChannel(s string) (runtime.Channel, bool) {
+	switch ch := runtime.Channel(strings.ToLower(strings.TrimSpace(s))); ch {
+	case "":
+		return runtime.ChannelCLI, true
+	case runtime.ChannelCLI, runtime.ChannelVoice, runtime.ChannelTextBar:
+		return ch, true
+	default:
+		return "", false
+	}
 }
 
 func (d *Daemon) handleListApprovals(w http.ResponseWriter, r *http.Request) {
@@ -161,13 +197,21 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload hash does not match the current envelope; re-fetch and re-confirm", http.StatusConflict)
 		return
 	}
-	e, err := d.cfg.Approvals.Decide(r.Context(), id, approvals.Match(body.Reply))
+	answer := approvals.Match(body.Reply)
+	e, err := d.cfg.Approvals.Decide(r.Context(), id, answer)
 	if err != nil {
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: e, Error: err.Error()})
+		if e.ID == "" {
+			// A store or audit failure: there is no envelope state to report.
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Not pending any more, expired, or another decider won the race:
+		// this answer was not applied, and the envelope shows what did.
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: e, Answer: answer.String(), Error: err.Error()})
 		return
 	}
 	if e.Status != approvals.Approved {
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: e})
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: e, Answer: answer.String()})
 		return
 	}
 	// Approved: run it now, exactly once. Origin comes from the envelope
@@ -202,11 +246,11 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		// Output set means the action ran and only indexing its result
 		// failed; either that or an unknown outcome must never read as
 		// "not executed", which would invite a second, duplicate request.
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: res.Output != nil, Output: res.Output,
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Answer: answer.String(), Executed: res.Output != nil, Output: res.Output,
 			Error: ierr.Error(), OutcomeUnknown: errors.Is(ierr, gapi.ErrSendOutcomeUnknown)})
 		return
 	}
-	writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: true, Output: res.Output})
+	writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Answer: answer.String(), Executed: true, Output: res.Output})
 }
 
 // approvedExecTimeout bounds one approved action's execution, which runs

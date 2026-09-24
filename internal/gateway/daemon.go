@@ -59,9 +59,9 @@ type Config struct {
 	SocketPath string
 }
 
-// turnAuth is what a per-turn tool-proxy token grants: the origin and taint
-// of the turn that minted it, so a model-initiated call is authorized exactly
-// as if the gate were checking the live turn.
+// turnAuth is what a tool-proxy token grants: an origin and a taint. In
+// production the only such token is the daemon's stable session token (see
+// stableSessionToken), whose taint only ever escalates.
 type turnAuth struct {
 	Origin  gate.Origin
 	Taint   gate.Taint
@@ -77,13 +77,23 @@ type Daemon struct {
 	tasks        map[string]context.CancelFunc
 	turnTok      map[string]turnAuth
 	sessionToken string // the one long-lived tool-proxy token; see stableSessionToken
-	// sinks are the open turn streams (by task id) that a queued tool call
-	// is reported to as approval_required; see notifyApprovalRequired.
+	// sinks are the open turn streams, by task id.
 	sinks map[string]*turnSink
+	// activeTask is the task id of the turn that currently holds modelSlot
+	// (its model call is running), or "". A queued tool call is announced
+	// as approval_required on that turn's stream only; see
+	// notifyApprovalRequired.
+	activeTask string
+	// modelSlot is a one-slot semaphore: one model turn at a time, so a
+	// tool call the model makes belongs to exactly one open stream. The
+	// warm session serializes its turns anyway; taking this slot first just
+	// makes the daemon know which turn that is.
+	modelSlot chan struct{}
 }
 
 func New(cfg Config) *Daemon {
-	return &Daemon{cfg: cfg, meetings: meetings.New(cfg.Store), tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{}, sinks: map[string]*turnSink{}}
+	return &Daemon{cfg: cfg, meetings: meetings.New(cfg.Store), tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{},
+		sinks: map[string]*turnSink{}, modelSlot: make(chan struct{}, 1)}
 }
 
 // turnSink is one open POST /v1/turns stream. Writes from the turn itself
@@ -125,23 +135,48 @@ func (d *Daemon) unregisterSink(id string) {
 	d.mu.Unlock()
 }
 
+// beginModel is the runtime.Env.BeginModel hook for task id: it waits for
+// the model slot (or ctx), marks id as the turn whose model call is running,
+// and returns the func that undoes both.
+func (d *Daemon) beginModel(id string) func(ctx context.Context) (func(), error) {
+	return func(ctx context.Context) (func(), error) {
+		select {
+		case d.modelSlot <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		d.mu.Lock()
+		d.activeTask = id
+		d.mu.Unlock()
+		return func() {
+			d.mu.Lock()
+			if d.activeTask == id {
+				d.activeTask = ""
+			}
+			d.mu.Unlock()
+			<-d.modelSlot
+		}, nil
+	}
+}
+
 // notifyApprovalRequired reports a tool call the model made that was queued
-// for approval to every open turn stream. Every turn shares the one session
-// tool token (see stableSessionToken), so a call cannot be tied to a single
-// turn by its token; in practice the warm session serializes turns, so there
-// is one open stream, and the daemon serves one principal either way. A call
-// that lands after its turn's stream closed is still queued, just not
-// announced inline (the brief and `water approve` still list it).
+// for approval, as approval_required, on the stream of the turn whose model
+// call is running (activeTask). Every turn shares the one session tool token
+// (see stableSessionToken), so the token cannot say which turn a call came
+// from; the model slot can, since only the active turn's model is running.
+// Other open streams (turns still waiting for the slot) get nothing. A call
+// that lands when no turn is active, or after its stream closed, is still
+// queued, just not announced inline: GET /v1/approvals, the brief and
+// `water approve` list it.
 func (d *Daemon) notifyApprovalRequired(env approvals.Envelope) {
 	d.mu.Lock()
-	sinks := make([]*turnSink, 0, len(d.sinks))
-	for _, s := range d.sinks {
-		sinks = append(sinks, s)
-	}
+	s := d.sinks[d.activeTask]
 	d.mu.Unlock()
-	for _, s := range sinks {
-		s.emit(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: env.ID, Text: env.Action})
+	if s == nil {
+		return
 	}
+	s.emit(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: env.ID, Text: env.Action,
+		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash})
 }
 
 func newID(prefix string) string {
@@ -165,8 +200,9 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))
 	mux.Handle("POST /v1/meetings/{id}/stop", d.auth(d.handleMeetingStop))
 	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
-	// /v1/tools/invoke is authenticated separately (a per-turn token, not a
-	// client token): it is called by the MCP bridge subprocess, not a client.
+	// /v1/tools/invoke is authenticated separately (the session tool-proxy
+	// token, not a client token): it is called by the MCP bridge subprocess,
+	// not a client.
 	mux.HandleFunc("POST /v1/tools/invoke", d.handleToolInvoke)
 	return mux
 }
@@ -324,21 +360,17 @@ func meetingError(w http.ResponseWriter, err error) {
 	}
 }
 
-// mintTurnToken issues a short-lived token scoped to one turn's origin and
-// taint, for the MCP bridge to present at /v1/tools/invoke. Expired tokens
-// are swept lazily on lookup.
+// mintTurnToken issues a token with an explicit origin, taint and lifetime.
+// Production never calls it — every turn uses the one stable session token
+// (stableSessionToken) — it exists only so tests can present scoped or
+// expired tokens at /v1/tools/invoke. Expired tokens are swept lazily on
+// lookup.
 func (d *Daemon) mintTurnToken(origin gate.Origin, taint gate.Taint, ttl time.Duration) string {
 	tok := newID("tt")
 	d.mu.Lock()
 	d.turnTok[tok] = turnAuth{Origin: origin, Taint: taint, Expires: time.Now().Add(ttl)}
 	d.mu.Unlock()
 	return tok
-}
-
-func (d *Daemon) releaseTurnToken(tok string) {
-	d.mu.Lock()
-	delete(d.turnTok, tok)
-	d.mu.Unlock()
 }
 
 func (d *Daemon) lookupTurnToken(tok string) (turnAuth, bool) {
@@ -415,9 +447,10 @@ func (d *Daemon) twinFunctions() []tools.TwinFunction {
 	return out
 }
 
-// TwinToolPolicy builds the tools.Policy for one turn: every manifest
-// function, routed back to this daemon's own socket with a fresh, turn-scoped
-// token.
+// TwinToolPolicy builds the tools.Policy the model's tool calls go through:
+// every manifest function, routed back to this daemon's own socket with the
+// daemon's single stable session token (see stableSessionToken), whose taint
+// is session-sticky (see escalateTaint).
 func (d *Daemon) TwinToolPolicy() *tools.Policy {
 	return &tools.Policy{
 		Role:       "ceo",
@@ -428,10 +461,13 @@ func (d *Daemon) TwinToolPolicy() *tools.Policy {
 }
 
 // handleToolInvoke is the model-tool bridge's only entry point: a
-// "connector.function" call, authorized exactly as the turn that minted the
-// bearer token was. An A-level call (or a tainted S-level one) is queued for
-// approval rather than executed, per the spec: the model never runs an
-// outward action inline.
+// "connector.function" call, authorized at the session token's origin (P0)
+// and current taint. That taint is escalated for the daemon's lifetime once
+// any turn, meeting segment or tool result brings in untrusted content, and
+// /clear does not reset it, so once a session is tainted an S-level call
+// answers "queued" rather than running inline. An A-level call (or a tainted
+// S-level one) is queued for approval rather than executed, per the spec:
+// the model never runs an outward action inline.
 func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	tok, ok := bearerToken(r)
 	if !ok {
@@ -549,10 +585,13 @@ func (d *Daemon) baseEnv() runtime.Env {
 	return env
 }
 
-// turnEnv builds the runtime.Env for one turn, with the twin's tool policy
-// (the stable session proxy token — see stableSessionToken).
-func (d *Daemon) turnEnv() runtime.Env {
+// turnEnv builds the runtime.Env for turn taskID, with the twin's tool
+// policy (the stable session proxy token — see stableSessionToken) and the
+// model-slot hook that ties the model's queued tool calls to this turn's
+// stream (see notifyApprovalRequired).
+func (d *Daemon) turnEnv(taskID string) runtime.Env {
 	env := d.baseEnv()
 	env.Tools = d.TwinToolPolicy()
+	env.BeginModel = d.beginModel(taskID)
 	return env
 }

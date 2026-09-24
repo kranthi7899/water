@@ -413,7 +413,7 @@ final class MeetingDaemon {
                     return s
                 } catch WaterClientError.http(status: 401, body: _) {
                     guard let cli = tokens.cliFallbackToken(), cli != tok else { throw WaterClientError.http(status: 401, body: "invalid token") }
-                    note = "The daemon doesn't know this app's token yet (it loads tokens at startup) — using the CLI token. Restart `water daemon` to fix."
+                    note = "The daemon rejected this app's token (an older daemon loads tokens only at startup) — using the CLI token. Restart or update `water daemon` to fix."
                     let s = try client.startMeeting(token: cli)
                     token = cli
                     return s

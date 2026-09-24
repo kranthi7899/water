@@ -106,6 +106,16 @@ final class CannedServer: @unchecked Sendable {
         #expect(req.hasSuffix(#"{"channel":"voice","clear":false,"prompt":"what's on today?"}"#))
     }
 
+    @Test func approvalRequiredCarriesWhatADecisionNeeds() throws {
+        let line = #"{"kind":"approval_required","text":"gmail.send_message","approval_id":"env_2","action":"gmail.send_message","risk":"high","payload_hash":"sha256:ab"}"#
+        let e = try #require(TurnEvent.decode(line: Data(line.utf8)))
+        #expect(e == TurnEvent(kind: .approvalRequired, text: "gmail.send_message", approvalID: "env_2",
+                               action: "gmail.send_message", risk: "high", payloadHash: "sha256:ab"))
+        // Older daemons send only approval_id and the action in text.
+        let old = try #require(TurnEvent.decode(line: Data(#"{"kind":"approval_required","approval_id":"env_3","text":"x.y"}"#.utf8)))
+        #expect(old.approvalID == "env_3" && old.payloadHash == nil && old.action == nil)
+    }
+
     @Test func unauthorizedSurfacesStatusAndBody() throws {
         let server = try CannedServer(pieces: ["HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 14\r\n\r\ninvalid token\n"])
         #expect(throws: WaterClientError.http(status: 401, body: "invalid token\n")) {

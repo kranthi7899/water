@@ -238,7 +238,9 @@ func (q *Queue) Decide(ctx context.Context, id string, a Answer) (Envelope, erro
 		return Envelope{}, err
 	}
 	if !ok {
-		return Envelope{}, fmt.Errorf("approvals: %s changed while deciding", id)
+		// As on the deny path: this answer was not applied, and the current
+		// envelope comes back with the error so the caller can show what won.
+		return q.getAfter(ctx, id, fmt.Errorf("approvals: %s changed while deciding; this answer was not applied", id))
 	}
 	if _, err := q.log.Append(audit.Record{Kind: audit.KindApproval, Function: e.Action, EnvelopeID: id, Origin: e.Origin, Allowed: true, Reason: "answered yes", ArgsHash: e.PayloadHash}); err != nil {
 		// An approval that is not on the record must not stand.

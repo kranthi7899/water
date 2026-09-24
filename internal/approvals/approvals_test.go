@@ -265,3 +265,40 @@ func TestDecideNoLosingARaceIsAnErrorNotADenial(t *testing.T) {
 		t.Fatalf("status = %s, want approved", got.Status)
 	}
 }
+
+// TestYesThatLosesTheRaceReturnsTheCurrentEnvelope: a yes whose
+// compare-and-swap lost (another decider answered no first) returns the
+// envelope as it now stands, with the error — never a zero Envelope a
+// client cannot read a status from.
+func TestYesThatLosesTheRaceReturnsTheCurrentEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	q := NewQueue(st, log)
+	ctx := context.Background()
+	e, err := q.Propose(ctx, Envelope{Action: "fake_mail.send_email", Payload: map[string]any{"to": []any{"a@x.com"}, "subject": "s", "body": "b"}, Origin: "p0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.beforeTransition = func() {
+		q.beforeTransition = nil
+		if _, err := q.Decide(ctx, e.ID, No); err != nil {
+			t.Fatalf("racing no: %v", err)
+		}
+	}
+	got, err := q.Decide(ctx, e.ID, Yes)
+	if err == nil {
+		t.Fatal("a yes that lost the race to a no returned no error")
+	}
+	if got.ID != e.ID || got.Status != Denied {
+		t.Fatalf("envelope = {id:%q status:%q}, want {%s denied}", got.ID, got.Status, e.ID)
+	}
+}

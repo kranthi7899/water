@@ -38,13 +38,13 @@ final class TurnRunner {
                 do {
                     try client.streamTurn(channel: channel, prompt: prompt, token: tok, cancel: token, onEvent: deliver)
                 } catch WaterClientError.http(status: 401, body: _) {
-                    // The daemon reads clients.json only at startup, so a
-                    // token minted after it started is unknown until it
-                    // restarts. Fall back to the CLI's own token (what
-                    // `water ask` uses) rather than failing outright.
+                    // Current daemons re-read clients.json on an unknown
+                    // token, so this only fires against an older daemon that
+                    // loaded it once at startup. Fall back to the CLI's own
+                    // token (what `water ask` uses) rather than failing.
                     guard let cli = tokens.cliFallbackToken(), cli != tok else { throw WaterClientError.http(status: 401, body: "invalid token") }
                     DispatchQueue.main.async {
-                        onNote("The daemon doesn't know this app's token yet (it loads tokens at startup) — using the CLI token. Restart `water daemon` to fix.")
+                        onNote("The daemon rejected this app's token (an older daemon loads tokens only at startup) — using the CLI token. Restart or update `water daemon` to fix.")
                     }
                     try client.streamTurn(channel: channel, prompt: prompt, token: cli, cancel: token, onEvent: deliver)
                 }

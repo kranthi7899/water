@@ -10,7 +10,13 @@ public enum Channel: String {
 }
 
 /// One NDJSON event from POST /v1/turns, mirroring runtime.Event:
-/// `{"kind": "...", "text": "...", "approval_id": "...", "error": "..."}`.
+/// `{"kind": "...", "text": "...", "approval_id": "...", "action": "...",
+/// "risk": "...", "payload_hash": "...", "error": "..."}`.
+///
+/// `approval_required` carries `action`, `risk` and `payload_hash` (enough to
+/// decide it via POST /v1/approvals/{id}/decision) and is best-effort: it
+/// covers only approvals this turn's own model queued while it was running.
+/// Refresh GET /v1/approvals on `done` for everything else.
 public struct TurnEvent: Decodable, Equatable {
     public enum Kind: Equatable {
         case ack, delta, sentence, approvalRequired, done, error
@@ -32,18 +38,27 @@ public struct TurnEvent: Decodable, Equatable {
     public var kind: Kind
     public var text: String?
     public var approvalID: String?
+    public var action: String?
+    public var risk: String?
+    public var payloadHash: String?
     public var error: String?
 
-    public init(kind: Kind, text: String? = nil, approvalID: String? = nil, error: String? = nil) {
+    public init(kind: Kind, text: String? = nil, approvalID: String? = nil,
+                action: String? = nil, risk: String? = nil, payloadHash: String? = nil,
+                error: String? = nil) {
         self.kind = kind
         self.text = text
         self.approvalID = approvalID
+        self.action = action
+        self.risk = risk
+        self.payloadHash = payloadHash
         self.error = error
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, text, error
+        case kind, text, error, action, risk
         case approvalID = "approval_id"
+        case payloadHash = "payload_hash"
     }
 
     public init(from decoder: Decoder) throws {
@@ -51,6 +66,9 @@ public struct TurnEvent: Decodable, Equatable {
         kind = Kind(try c.decode(String.self, forKey: .kind))
         text = try c.decodeIfPresent(String.self, forKey: .text)
         approvalID = try c.decodeIfPresent(String.self, forKey: .approvalID)
+        action = try c.decodeIfPresent(String.self, forKey: .action)
+        risk = try c.decodeIfPresent(String.self, forKey: .risk)
+        payloadHash = try c.decodeIfPresent(String.self, forKey: .payloadHash)
         error = try c.decodeIfPresent(String.self, forKey: .error)
     }
 

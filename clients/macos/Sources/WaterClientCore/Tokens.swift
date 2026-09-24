@@ -103,10 +103,11 @@ public enum ClientsFile {
 /// 3. else mints one by running `water daemon token new <clientName>`.
 /// Whatever it finds in 2 or 3 is saved to the keychain for next time.
 ///
-/// Note: the daemon loads clients.json once at startup, so a freshly minted
-/// token is rejected (401) until the daemon restarts. `cliFallbackToken`
-/// covers that window with the CLI's own token — exactly what `water ask`
-/// uses (internal/cli/daemonclient.go reads the "cli" entry the same way).
+/// A running daemon re-reads clients.json when it sees an unknown token, so
+/// a freshly minted token works at once. Daemons built before that change
+/// loaded the file only at startup and reject (401) a new token until they
+/// restart; `cliFallbackToken` covers only that case, with the CLI's own
+/// token (internal/cli/daemonclient.go reads the "cli" entry the same way).
 public final class TokenProvider {
     public let store: TokenStoring
     public let clientsPath: String

@@ -56,16 +56,25 @@ const (
 )
 
 // Event is one step of a turn.
+//
+// An approval_required event carries everything a client needs to show and
+// decide the queued call without a second request: ApprovalID, Action (also
+// repeated in Text for older clients), Risk and PayloadHash, which POST
+// /v1/approvals/{id}/decision requires. It is best-effort; see the gateway's
+// handleTurn doc comment for exactly which approvals are announced inline.
 type Event struct {
-	Kind       EventKind `json:"kind"`
-	Text       string    `json:"text,omitempty"`
-	ApprovalID string    `json:"approval_id,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	Kind        EventKind `json:"kind"`
+	Text        string    `json:"text,omitempty"`
+	ApprovalID  string    `json:"approval_id,omitempty"`
+	Action      string    `json:"action,omitempty"`
+	Risk        string    `json:"risk,omitempty"`
+	PayloadHash string    `json:"payload_hash,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 
 // Env is everything one turn needs. The daemon builds one Env per twin and
-// reuses it across turns; Tools is set fresh per turn (it carries a per-turn
-// token for the model's tool calls) by the caller.
+// reuses it across turns; Tools, BeginModel and OnTaint are wired per daemon
+// by the caller (see internal/gateway's turnEnv).
 type Env struct {
 	Manifest  *twins.Manifest
 	Store     *store.Store
@@ -81,9 +90,18 @@ type Env struct {
 	// tier turn.
 	Warm *backend.WarmSession
 	// Tools, when set, is handed to the backend request so the model can call
-	// the twin's connector functions through the gate (Env.Tools is prepared
-	// per turn by the gateway, which mints the per-turn proxy token).
+	// the twin's connector functions through the gate. The gateway points it
+	// at the daemon's one stable session proxy token, not a per-turn one: its
+	// taint is session-sticky (escalated for the daemon's lifetime once any
+	// turn, meeting segment or tool result brings in untrusted content).
 	Tools *tools.Policy
+	// BeginModel, when set, is called after the fast paths and before the
+	// turn's state is read and the model is called; the returned end func is
+	// called when the turn finishes. The daemon uses it to run one model turn
+	// at a time and to know which open turn stream a queued tool call belongs
+	// to. An error (the turn was cancelled while waiting) ends the turn with
+	// an error event.
+	BeginModel func(ctx context.Context) (end func(), err error)
 	// Decisions, when set, is run to produce the morning brief's ranked
 	// open-cards signal. Nil (no decision registry wired) leaves that signal
 	// absent rather than erroring.
@@ -91,12 +109,13 @@ type Env struct {
 	// Timeout bounds one model call.
 	Timeout time.Duration
 	Now     func() time.Time
-	// OnTaint, when set, is called with true whenever a fast path itself
-	// pulls in External content while answering without a model call (today
-	// only the morning brief does) — the same escalation a normal turn's
-	// tainted context gets from handleTurn, so a cached brief built from
-	// external mail or events still marks the session tainted for the tool
-	// calls that follow it. The daemon wires this to escalateTaint.
+	// OnTaint, when set, is called with true whenever the turn pulls in
+	// External content: RunTurn calls it when the state summary it hands
+	// the model is tainted (before the model sees it), and a fast path calls
+	// it when it answers from external content without a model call (today
+	// only the morning brief does), so a cached brief built from external
+	// mail or events still marks the session tainted for the tool calls that
+	// follow it. The daemon wires this to escalateTaint.
 	OnTaint func(tainted bool)
 }
 
@@ -133,7 +152,21 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 	// turn to turn and the warm session keeps its process and conversation.
 	// Live state (today's events, the pending count) changes between turns,
 	// so it travels with each turn's message instead.
-	summary, _ := StateSummary(ctx, env)
+	if env.BeginModel != nil {
+		end, err := env.BeginModel(ctx)
+		if err != nil {
+			emit(Event{Kind: EventError, Error: err.Error()})
+			return
+		}
+		defer end()
+	}
+	// The summary built here is exactly what the model sees, so its taint is
+	// applied here too, before the request exists: a caller's own earlier
+	// StateSummary may predate a sync that has since stored external content.
+	summary, tainted := StateSummary(ctx, env)
+	if tainted && env.OnTaint != nil {
+		env.OnTaint(true)
+	}
 	req := backend.Request{
 		System:  RoleSystem(env),
 		Prompt:  TurnPrompt(env, summary, turn.Prompt),

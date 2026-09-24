@@ -8,6 +8,7 @@ import (
 	"water/internal/approvals"
 	"water/internal/decisions"
 	"water/internal/gate"
+	"water/internal/twins"
 )
 
 // handleListDecisions runs the classification-trigger orchestration over
@@ -25,7 +26,13 @@ func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, decisions.Rank(cards))
+	ranked := decisions.Rank(cards)
+	if ranked == nil {
+		// No cards is always `[]` on the wire, never `null`: a typed client
+		// decoding an array (Swift's JSONDecoder) rejects null.
+		ranked = []*decisions.Card{}
+	}
+	writeJSON(w, http.StatusOK, ranked)
 }
 
 // handleEmailDecisionReport renders one open decision card as a
@@ -37,6 +44,12 @@ func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
 // for any other A-level model call; nothing here executes anything by
 // itself, and the normal approval flow still governs whether the mail
 // actually goes out.
+//
+// The approval is proposed only when the manifest grants gmail.send_message
+// (present, not level B) and the connector is registered — otherwise the
+// CEO would be asked to approve something the gate can never run (403 and
+// 404 respectively). The queued approval is returned in the response only;
+// it is not announced on any open turn stream (see handleTurn).
 func (d *Daemon) handleEmailDecisionReport(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
@@ -50,6 +63,10 @@ func (d *Daemon) handleEmailDecisionReport(w http.ResponseWriter, r *http.Reques
 	}
 	if len(body.To) == 0 {
 		http.Error(w, "to is required", http.StatusBadRequest)
+		return
+	}
+	if f, ok := d.cfg.Manifest.Function("gmail.send_message"); !ok || f.Level == twins.B {
+		http.Error(w, "gmail.send_message is not granted by the manifest", http.StatusForbidden)
 		return
 	}
 	if _, _, ok := d.cfg.Registry.Lookup("gmail.send_message"); !ok {
@@ -98,6 +115,5 @@ func (d *Daemon) handleEmailDecisionReport(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 		return
 	}
-	d.notifyApprovalRequired(env)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "approval_id": env.ID})
 }
