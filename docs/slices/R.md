@@ -1250,7 +1250,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - `DefaultStyle()` passes validation; a missing file falls back to `DefaultStyle()`;
     - `PromptBlock` is stable and contains the tone and banned phrases.
   - Flag: none.
-- [ ] **R-6 Intent registry loader** (`internal/nervous/intents/{registry.go,shared.go,spec.go,planned.go,learned.go}`).
+- [x] **R-6 Intent registry loader** (`internal/nervous/intents/{registry.go,shared.go,spec.go,planned.go,learned.go}`).
   - Implements the §5 schema, the extended `FunctionSpec` with `Learnable` and `QuickEligible`, read and write kinds, `checkAction` with the `plannedActions` inactive mechanism, `Candidates`/`Shadow`, `Hash`, overlay parsing with skip-and-report, and the reserved names.
   - Tests (`registry_test.go`, MapFS, mirroring `decisions_test.go`):
     - `TestLoadRegistryWellFormed`;
@@ -1567,6 +1567,7 @@ These run on every task, automated where possible:
 21. **The brief cache miss needs a model call.** *Default:* the quick tiers serve only the cached brief. A miss escalates with `brief.today`, and the main path computes it with the existing compute-once guard and fail-closed taint.
 22. **Unread count and time zones.** *Default:* as in the earlier plan. Answer truthfully that unread state isn't synced. Resolve dates in `env.Now().Location()`, where a bare weekday includes today.
 23. **The model-drafted intent file is model output.** *Default:* `origin` and `provenance` are filled by code. `ValidateLearned` plus explicit owner approval is the guard. Drafts go to `pending/` and are never loaded until promoted.
+24. **`gmail.draft_message` is granted at level D, not A, in the real `twin.yaml` (discovered building R-6).** The concurrent write-function session landed `twin.yaml` with `gcal.create_event: A`, `gcal.move_event: A`, `gmail.send_message: A` — matching the plan's assumption — but `gmail.draft_message: D`. `checkAction` (§5.4) implements the plan's own rule literally: a write intent's action found in the manifest at any level other than A is a hard load error, not "inactive." As built, `mail.draft_reply`'s action (`gmail.draft_message`) would fail the *whole* registry load the moment R-20 writes that intent file against the real manifest, rather than sitting inactive like the other three planned actions did before being granted. *Default:* R-20 must resolve this explicitly before writing `mail.draft_reply` — most likely by extending `checkAction` to also accept level D for a write intent (D already means "nothing leaves," so a D-level proposal plausibly never needs an approval envelope and could execute immediately once the shared validator resolves it, unlike the other three A-level actions) rather than forcing every proposer through the approval queue regardless of the manifest's own risk classification. Not resolved in R-6, since it is a design call that belongs to R-20 (the task that actually builds the write intents and their approval-path integration), not the registry loader.
 
 ### Critical files for implementation
 - `/Users/kranthikoneti/water/internal/runtime/runtime.go` (`RunTurn` becomes `ModelTurn`; `DeliverText`, `StyleBlock`, prefetched summary) and `/Users/kranthikoneti/water/internal/runtime/fastpath.go` (deleted; its tests become the regression table)
