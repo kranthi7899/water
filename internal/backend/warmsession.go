@@ -48,10 +48,21 @@ type WarmSessionConfig struct {
 type WarmSession struct {
 	cfg WarmSessionConfig
 
-	mu           sync.Mutex // one turn in flight; also guards everything below
+	// sem is a one-slot semaphore: one turn (or Clear/Close) in flight, and
+	// it guards everything below. It is a channel rather than a sync.Mutex
+	// so a caller waiting behind a hung turn can give up with its context.
+	sem chan struct{}
+
+	// turnMu guards only turnCancel, the in-flight turn's cancel func, so
+	// Clear and Close can interrupt a hung turn without first taking sem.
+	turnMu     sync.Mutex
+	turnCancel context.CancelFunc
+	closed     bool // set by Close under sem; later turns refuse
+
 	cmd          *exec.Cmd
 	stdin        io.WriteCloser
 	lines        chan string
+	done         chan struct{} // closed on kill, so the stdout reader never blocks on lines
 	werr         chan error
 	live         bool
 	turns        int
@@ -73,7 +84,35 @@ func toolsKey(p *tools.Policy) string {
 	return p.TwinSocket + "|" + p.TwinToken
 }
 
-func NewWarmSession(cfg WarmSessionConfig) *WarmSession { return &WarmSession{cfg: cfg} }
+func NewWarmSession(cfg WarmSessionConfig) *WarmSession {
+	return &WarmSession{cfg: cfg, sem: make(chan struct{}, 1)}
+}
+
+// defaultWarmTimeout bounds a warm turn whose Request carries no Timeout,
+// matching the cold path's runScrubbedStream default.
+const defaultWarmTimeout = 5 * time.Minute
+
+// acquire takes the session, or gives up when ctx ends first.
+func (w *WarmSession) acquire(ctx context.Context) error {
+	select {
+	case w.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (w *WarmSession) release() { <-w.sem }
+
+// interruptTurn cancels the in-flight turn, if any; that turn then kills its
+// process and releases the session promptly.
+func (w *WarmSession) interruptTurn() {
+	w.turnMu.Lock()
+	if w.turnCancel != nil {
+		w.turnCancel()
+	}
+	w.turnMu.Unlock()
+}
 
 func (w *WarmSession) bin() string {
 	if w.cfg.Bin != "" {
@@ -90,30 +129,48 @@ func (w *WarmSession) maxTurns() int {
 }
 
 // Clear ends the current process, if any; the next RunTurn cold-starts a
-// fresh one. Used for the /clear command.
+// fresh one. Used for the /clear command. An in-flight turn is interrupted
+// (it fails with a cancellation error) rather than waited for, so /clear
+// also recovers a hung session.
 func (w *WarmSession) Clear() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.interruptTurn()
+	_ = w.acquire(context.Background())
+	defer w.release()
 	w.killLocked()
 }
 
-// Close ends the session for good (daemon shutdown).
+// Close ends the session for good (daemon shutdown): it interrupts any
+// in-flight turn, kills the process group, and makes later turns refuse
+// rather than start a new process.
 func (w *WarmSession) Close() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	w.interruptTurn()
+	_ = w.acquire(context.Background())
+	defer w.release()
+	w.closed = true
 	w.killLocked()
 }
 
+// killLocked tears the current process down completely: it unblocks the
+// stdout reader, kills the process group (a no-op if it already exited, but
+// still reaching any surviving children), reaps it if that has not happened
+// yet, and removes its tool policy files. Every teardown path goes through
+// here, so none can leak a process, a goroutine or a file holding the
+// session's proxy token.
 func (w *WarmSession) killLocked() {
+	if w.done != nil {
+		close(w.done)
+	}
 	if w.cmd != nil && w.cmd.Process != nil {
 		_ = w.cmd.Cancel()
+	}
+	if w.werr != nil {
 		<-w.werr
 	}
 	if w.toolsCleanup != nil {
 		w.toolsCleanup()
 		w.toolsCleanup = nil
 	}
-	w.cmd, w.stdin, w.lines, w.werr, w.live, w.toolsKey = nil, nil, nil, nil, false, ""
+	w.cmd, w.stdin, w.lines, w.done, w.werr, w.live, w.toolsKey = nil, nil, nil, nil, nil, false, ""
 }
 
 func (w *WarmSession) scratch() string {
@@ -152,36 +209,10 @@ func (w *WarmSession) start(ctx context.Context, req Request) error {
 		return fmt.Errorf("warm session: %w", err)
 	}
 
-	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
-	if fs["--include-partial-messages"] {
-		args = append(args, "--include-partial-messages")
-	}
-	switch {
-	case fs["--system-prompt"]:
-		args = append(args, "--system-prompt", req.System)
-	case fs["--append-system-prompt"]:
-		args = append(args, "--append-system-prompt", req.System)
-	default:
+	args, err := buildWarmArgs(fs, req, mcpCfg)
+	if err != nil {
 		toolsCleanup()
-		return errors.New("claude CLI lacks --system-prompt/--append-system-prompt")
-	}
-	if !fs["--tools"] || !fs["--strict-mcp-config"] {
-		toolsCleanup()
-		return errors.New("claude CLI lacks load-bearing --tools/--strict-mcp-config flags")
-	}
-	args = append(args, "--tools", "", "--strict-mcp-config")
-	if mcpCfg != "" {
-		if !fs["--mcp-config"] {
-			toolsCleanup()
-			return errors.New("claude CLI lacks --mcp-config; tools unavailable")
-		}
-		args = append(args, "--mcp-config", mcpCfg)
-		if fs["--allowedTools"] || fs["--allowed-tools"] {
-			args = append(args, "--allowedTools", strings.Join(tools.AllowedToolFlags(req.Tools), ","))
-		}
-	}
-	if req.Model != "" && fs["--model"] {
-		args = append(args, "--model", req.Model)
+		return err
 	}
 	// The process outlives any single turn's context, so it is built with a
 	// background context; containProcessGroup's Cancel is invoked manually by
@@ -210,34 +241,106 @@ func (w *WarmSession) start(ctx context.Context, req Request) error {
 	w.toolsCleanup = toolsCleanup
 	w.toolsKey = toolsKey(req.Tools)
 	lines := make(chan string, 64)
+	done := make(chan struct{})
 	go func() {
+		defer close(lines)
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 64*1024), 8<<20)
 		for sc.Scan() {
-			lines <- sc.Text()
+			select {
+			case lines <- sc.Text():
+			case <-done:
+				return
+			}
 		}
-		close(lines)
 	}()
 	werr := make(chan error, 1)
 	go func() { werr <- cmd.Wait() }()
 
-	w.cmd, w.stdin, w.lines, w.werr = cmd, stdin, lines, werr
+	w.cmd, w.stdin, w.lines, w.done, w.werr = cmd, stdin, lines, done, werr
 	w.live, w.turns, w.system, w.model = true, 0, req.System, req.Model
 	return nil
 }
 
+// buildWarmArgs is the warm process's pure argument builder (the analogue of
+// ClaudeSubscription.BuildArgs), exposed so a guard test can assert its
+// isolation flags without spawning anything.
+func buildWarmArgs(fs flagSet, req Request, mcpCfg string) ([]string, error) {
+	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
+	if fs["--include-partial-messages"] {
+		args = append(args, "--include-partial-messages")
+	}
+	switch {
+	case fs["--system-prompt"]:
+		args = append(args, "--system-prompt", req.System)
+	case fs["--append-system-prompt"]:
+		args = append(args, "--append-system-prompt", req.System)
+	default:
+		return nil, errors.New("claude CLI lacks --system-prompt/--append-system-prompt")
+	}
+	if !fs["--tools"] || !fs["--strict-mcp-config"] {
+		return nil, errors.New("claude CLI lacks load-bearing --tools/--strict-mcp-config flags")
+	}
+	args = append(args, "--tools", "", "--strict-mcp-config")
+	args = append(args, hardeningArgs(fs)...)
+	if mcpCfg != "" {
+		if !fs["--mcp-config"] {
+			return nil, errors.New("claude CLI lacks --mcp-config; tools unavailable")
+		}
+		args = append(args, "--mcp-config", mcpCfg)
+		if fs["--allowedTools"] || fs["--allowed-tools"] {
+			args = append(args, "--allowedTools", strings.Join(tools.AllowedToolFlags(req.Tools), ","))
+		}
+	}
+	if req.Model != "" && fs["--model"] {
+		args = append(args, "--model", req.Model)
+	}
+	return args, nil
+}
+
+// busyForTest reports whether a turn currently holds the session.
+func (w *WarmSession) busyForTest() bool { return len(w.sem) == 1 }
+
 // RunTurn sends one user turn and streams the reply, reusing the live process
-// when possible.
+// when possible. It honors req.Timeout (defaultWarmTimeout when zero) and
+// ctx both while waiting for the session and while the turn runs. A turn
+// that ends early for any reason — cancelled, timed out, write failed, or
+// the process died — kills the process, because the rest of that turn's
+// output would otherwise be read as the next turn's reply, and the model
+// would keep working (and calling tools) on a turn nobody is waiting for.
 func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(string)) (Response, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	if err := w.acquire(ctx); err != nil {
+		return Response{}, err
+	}
+	defer w.release()
+	if w.closed {
+		return Response{}, errors.New("warm session: closed")
+	}
+
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = defaultWarmTimeout
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	w.turnMu.Lock()
+	w.turnCancel = cancel
+	w.turnMu.Unlock()
+	defer func() {
+		w.turnMu.Lock()
+		w.turnCancel = nil
+		w.turnMu.Unlock()
+	}()
 
 	needRestart := !w.live || w.system != req.System || (req.Model != "" && w.model != req.Model) ||
 		w.turns >= w.maxTurns() || w.toolsKey != toolsKey(req.Tools)
 	if needRestart {
-		if w.live {
-			w.killLocked()
-		}
+		// Unconditional: a dead process can still hold policy files and an
+		// unreaped handle, and killLocked is a no-op when nothing is there.
+		w.killLocked()
+		// start runs on ctx, not the turn's timeout: its --help probe has its
+		// own bound, and a start that failed only because a short turn
+		// timeout expired would wrongly fall back to a cold call.
 		if err := w.start(ctx, req); err != nil {
 			// Warm start failed: fall back to a single non-warm streamed call
 			// rather than surfacing a warm-session-specific error.
@@ -253,7 +356,7 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 	}
 	start := time.Now()
 	if _, err := w.stdin.Write(append(b, '\n')); err != nil {
-		w.live = false
+		w.killLocked()
 		return Response{}, fmt.Errorf("warm session: write turn: %w", err)
 	}
 
@@ -262,12 +365,12 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 		select {
 		case line, ok := <-w.lines:
 			if !ok {
-				// The process is gone (stdout closed): drain its exit status
-				// so a later kill of this dead handle never blocks on werr,
-				// then clear the dead resources so the next call starts
-				// clean rather than trying to kill an already-reaped process.
+				// The process is gone (stdout closed): collect its exit
+				// status, then tear down the rest (policy files, any
+				// surviving children) so the next call starts clean.
 				werr := <-w.werr
-				w.cmd, w.stdin, w.lines, w.werr, w.live = nil, nil, nil, nil, false
+				w.werr = nil
+				w.killLocked()
 				return Response{}, fmt.Errorf("warm session ended mid-turn: %w", werr)
 			}
 			raw.WriteString(line)
@@ -301,8 +404,15 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 				}
 				return resp, nil
 			}
-		case <-ctx.Done():
-			return Response{}, ctx.Err()
+		case <-tctx.Done():
+			w.killLocked()
+			if ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
+				return Response{}, fmt.Errorf("%w: warm claude turn killed after %s", ErrCallTimeout, timeout)
+			}
+			if ctx.Err() != nil {
+				return Response{}, ctx.Err()
+			}
+			return Response{}, fmt.Errorf("warm session: turn interrupted: %w", context.Canceled)
 		}
 	}
 }

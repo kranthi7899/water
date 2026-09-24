@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -42,6 +43,16 @@ func (a *App) runDaemon(ctx context.Context) error {
 	}
 	a.configureBackends(cfg)
 
+	// The single-instance lock comes first, so a second daemon fails on it
+	// with a clear message rather than on the audit log's writer lock.
+	paths := gateway.Paths{Home: config.Home()}
+	l, unlock, err := gateway.Listen(paths)
+	if err != nil {
+		return exitWith(ExitError, fmt.Errorf("another water daemon may already be running: %w", err))
+	}
+	defer unlock()
+	defer l.Close()
+
 	deps, err := buildTwinDeps()
 	if err != nil {
 		return exitWith(ExitError, err)
@@ -55,14 +66,6 @@ func (a *App) runDaemon(ctx context.Context) error {
 	if w := meteredLeakWarning(sel); w != "" {
 		fmt.Fprintln(os.Stderr, "warning:", w)
 	}
-
-	paths := gateway.Paths{Home: config.Home()}
-	l, unlock, err := gateway.Listen(paths)
-	if err != nil {
-		return exitWith(ExitError, fmt.Errorf("another water daemon may already be running: %w", err))
-	}
-	defer unlock()
-	defer l.Close()
 
 	clients, err := gateway.LoadClients(paths.ClientsPath())
 	if err != nil {
@@ -92,7 +95,14 @@ func (a *App) runDaemon(ctx context.Context) error {
 		Decisions: trigger, Clients: clients, SocketPath: paths.SocketPath(),
 	})
 
-	srv := &http.Server{Handler: d.Mux()}
+	// Every request context derives from baseCtx, which shutdown cancels
+	// first: http.Server.Shutdown alone never cancels in-flight handlers, so
+	// a streaming turn would otherwise outlive the 5s shutdown bound, keep
+	// the warm session busy, and leave its claude process group (its own
+	// pgid) orphaned if launchd then SIGKILLs the daemon.
+	baseCtx, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	srv := &http.Server{Handler: d.Mux(), BaseContext: func(net.Listener) context.Context { return baseCtx }}
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -100,9 +110,12 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// and cache the morning brief from the background sync loop — the same
 	// ComputeAndCacheBrief the on-demand fast path calls, so the two share
 	// the compute-once guard for the same day.
+	// No Warm: the brief has its own system prompt and no tools, so it runs
+	// on the cold backend path (doComputeBrief enforces this too) and never
+	// restarts the chat's warm process.
 	briefEnv := runtime.Env{
 		Manifest: deps.manifest, Store: deps.store, Approvals: deps.approvals,
-		RoleMD: deps.roleMD, Backend: sel.Backend, Warm: warm,
+		RoleMD: deps.roleMD, Backend: sel.Backend,
 	}
 	// A nil *decisions.Trigger boxed straight into the DecisionSource
 	// interface would be a non-nil interface over a nil pointer; only set
@@ -122,7 +135,11 @@ func (a *App) runDaemon(ctx context.Context) error {
 		EventsInterval: cfg.Sync.Interval(), MailInterval: cfg.Sync.MailInterval(),
 		Logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) },
 		Brief: func(ctx context.Context) error {
-			_, err := runtime.ComputeAndCacheBrief(ctx, briefEnv)
+			// Bounded even though each model call is: the background
+			// precompute must never hold the refresher loop indefinitely.
+			bctx, cancel := context.WithTimeout(ctx, briefPrecomputeTimeout)
+			defer cancel()
+			_, err := runtime.ComputeAndCacheBrief(bctx, briefEnv)
 			return err
 		},
 		BriefReadyAfter: cfg.Brief.ReadyAfter,
@@ -133,9 +150,22 @@ func (a *App) runDaemon(ctx context.Context) error {
 	go func() { errCh <- srv.Serve(l) }()
 	select {
 	case <-sigCtx.Done():
+		// Cancel in-flight turns and requests first (a warm turn then kills
+		// its process and releases the session), then drain. An approved
+		// action's execution is detached from its request and keeps its own
+		// bound; if it outlasts the drain, Close drops the connections and
+		// the deferred warm.Close/deps.Close still run in order.
+		cancelBase()
+		if warm != nil {
+			warm.Close()
+		}
 		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		return srv.Shutdown(shCtx)
+		if err := srv.Shutdown(shCtx); err != nil {
+			_ = srv.Close()
+			return err
+		}
+		return nil
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
 			return err
@@ -143,6 +173,9 @@ func (a *App) runDaemon(ctx context.Context) error {
 		return nil
 	}
 }
+
+// briefPrecomputeTimeout bounds one background morning-brief compute.
+const briefPrecomputeTimeout = 3 * time.Minute
 
 func (a *App) daemonTokenCmd() *cobra.Command {
 	c := &cobra.Command{Use: "token", Short: "Manage daemon client bearer tokens"}

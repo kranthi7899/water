@@ -95,7 +95,8 @@ func TestChatTurnStreamsAndReportsErrors(t *testing.T) {
 }
 
 func TestChatCommandQuitAndClear(t *testing.T) {
-	startTestDaemon(t, backend.NewFake("fake"))
+	fb := backend.NewFake("fake")
+	startTestDaemon(t, fb)
 	client, err := newDaemonClient()
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +107,12 @@ func TestChatCommandQuitAndClear(t *testing.T) {
 	}
 	if code := app.chatCommand(context.Background(), client, "/clear"); code != chatHandled {
 		t.Fatalf("/clear: code = %v, want chatHandled", code)
+	}
+	if fb.Calls() != 0 {
+		t.Fatalf("/clear made %d model calls, want 0", fb.Calls())
+	}
+	if err := clearSession(context.Background(), client); err != nil {
+		t.Fatalf("clearSession: %v", err)
 	}
 	if code := app.chatCommand(context.Background(), client, "/quit"); code != chatQuit {
 		t.Fatalf("/quit: code = %v, want chatQuit", code)

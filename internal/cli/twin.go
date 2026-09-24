@@ -56,6 +56,30 @@ func buildCEORegistry() (*connectors.Registry, error) {
 	return connectors.NewRegistry(gcal.New(), gmail.New(), gdrive.New())
 }
 
+// loadTwinManifest loads and validates the CEO twin's manifest, decision
+// registry and connectors without opening the store or the audit log. It is
+// what read-only commands (`water status`, `water doctor`) use: the audit
+// log has one exclusive writer — the running daemon — and taking its lock
+// from a read-only command would both fail while the daemon runs and, in
+// the moment it held the lock, make a (re)starting daemon fail.
+func loadTwinManifest(fsys fs.FS) (*twins.Manifest, error) {
+	m, err := twins.Load(fsys, "ceo")
+	if err != nil {
+		return nil, fmt.Errorf("twin manifest: %w", err)
+	}
+	if _, err := decisions.LoadRegistry(fsys, m); err != nil {
+		return nil, fmt.Errorf("decision registry: %w", err)
+	}
+	reg, err := buildCEORegistry()
+	if err != nil {
+		return nil, err
+	}
+	if err := gate.ValidateManifest(m, reg); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // buildTwinDeps opens the store and the anchored, hash-chained audit log at
 // their default ~/.water locations and wires the gate over them. Callers must
 // Close() the result.

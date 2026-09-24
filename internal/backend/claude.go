@@ -134,6 +134,22 @@ type claudeResult struct {
 // --tools "" keeps the CLI's own tools off so Water's policy is the only path.
 var LoadBearingFlags = []string{"--strict-mcp-config", "--tools"}
 
+// hardeningArgs are the isolation flags every claude invocation — cold
+// (BuildArgs) or warm (buildWarmArgs) — adds whenever the installed CLI
+// offers them: no transcript persisted to the CLI's own session store (a
+// twin conversation carries mail and calendar content, which belongs only in
+// Water's store), and no slash-command/skill expansion of a prompt.
+func hardeningArgs(fs flagSet) []string {
+	var out []string
+	if fs["--no-session-persistence"] {
+		out = append(out, "--no-session-persistence")
+	}
+	if fs["--disable-slash-commands"] {
+		out = append(out, "--disable-slash-commands")
+	}
+	return out
+}
+
 // BuildArgs is the pure argument builder, exposed so a guard test can assert
 // the load-bearing flags without spawning anything.
 func (c *ClaudeSubscription) BuildArgs(fs flagSet, req Request, mcpCfg string) ([]string, error) {
@@ -155,12 +171,7 @@ func (c *ClaudeSubscription) BuildArgs(fs flagSet, req Request, mcpCfg string) (
 		return nil, fmt.Errorf("claude CLI lacks load-bearing --tools flag; cannot guarantee tool isolation")
 	}
 	args = append(args, "--tools", "")
-	if fs["--no-session-persistence"] {
-		args = append(args, "--no-session-persistence")
-	}
-	if fs["--disable-slash-commands"] {
-		args = append(args, "--disable-slash-commands")
-	}
+	args = append(args, hardeningArgs(fs)...)
 	// No MCP servers except Water's own: persona agents must not see the
 	// user's connectors.
 	if !fs["--strict-mcp-config"] {

@@ -106,28 +106,6 @@ type Gate struct {
 	cfg   Config
 	mu    sync.Mutex
 	rates map[string][]time.Time
-	// pruned is when each store-backed key's expired rate_hits rows were
-	// last deleted. Guarded by mu.
-	pruned map[string]time.Time
-}
-
-// pruneEvery throttles store-backed rate_hits pruning per key.
-const pruneEvery = time.Hour
-
-// pruneStoreLocked deletes key's rate_hits rows that have left its window
-// (at or before since, the same boundary the count uses), at most once per
-// pruneEvery. Each key is always counted over one window (a function's own
-// RateCap, or the manifest's usage window for model keys), so this never
-// drops a hit the window still counts. Callers hold g.mu.
-func (g *Gate) pruneStoreLocked(ctx context.Context, key string, since, now time.Time) {
-	if last, ok := g.pruned[key]; ok && now.Sub(last) < pruneEvery {
-		return
-	}
-	if g.pruned == nil {
-		g.pruned = map[string]time.Time{}
-	}
-	g.pruned[key] = now
-	_ = g.cfg.Store.PruneKeyHitsBefore(ctx, key, since)
 }
 
 // compatible reports whether a manifest may grant level to a function whose
@@ -146,20 +124,32 @@ func New(cfg Config) (*Gate, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	for _, id := range cfg.Manifest.FunctionIDs() {
-		f, _ := cfg.Manifest.Function(id)
-		_, spec, ok := cfg.Registry.Lookup(id)
+	if err := ValidateManifest(cfg.Manifest, cfg.Registry); err != nil {
+		return nil, err
+	}
+	return &Gate{cfg: cfg, rates: map[string][]time.Time{}}, nil
+}
+
+// ValidateManifest checks, with no store, audit log or vault, that every
+// function the manifest grants is provided by a connector at a compatible
+// level — the same check New applies — so read-only callers (`water
+// status`, `water doctor`) can validate a twin without opening the audit
+// log's exclusive writer lock that a running daemon holds.
+func ValidateManifest(m *twins.Manifest, reg *connectors.Registry) error {
+	for _, id := range m.FunctionIDs() {
+		f, _ := m.Function(id)
+		_, spec, ok := reg.Lookup(id)
 		if !ok {
 			if f.Level == twins.B {
 				continue
 			}
-			return nil, fmt.Errorf("gate: manifest lists %s but no connector provides it", id)
+			return fmt.Errorf("gate: manifest lists %s but no connector provides it", id)
 		}
 		if !compatible(spec.Level, f.Level) {
-			return nil, fmt.Errorf("gate: manifest grants %s level %s but its connector declares %s", id, f.Level, spec.Level)
+			return fmt.Errorf("gate: manifest grants %s level %s but its connector declares %s", id, f.Level, spec.Level)
 		}
 	}
-	return &Gate{cfg: cfg, rates: map[string][]time.Time{}}, nil
+	return nil
 }
 
 func (g *Gate) record(r audit.Record) error {
@@ -357,7 +347,6 @@ func (g *Gate) take(key string, max int, per time.Duration) bool {
 // so this is enough to make the check-then-insert atomic in practice.
 func (g *Gate) takeStoreLocked(key string, max int, per time.Duration, now time.Time) bool {
 	ctx := context.Background()
-	g.pruneStoreLocked(ctx, key, now.Add(-per), now)
 	n, err := g.cfg.Store.CountHitsSince(ctx, key, now.Add(-per))
 	if err != nil || n >= max {
 		return false
@@ -420,8 +409,6 @@ func (g *Gate) takeModel(auto bool, u twins.Usage, window time.Duration) string 
 func (g *Gate) takeModelStoreLocked(auto bool, u twins.Usage, window time.Duration, now time.Time) string {
 	ctx := context.Background()
 	since := now.Add(-window)
-	g.pruneStoreLocked(ctx, "model", since, now)
-	g.pruneStoreLocked(ctx, "model:auto", since, now)
 	if auto {
 		n, err := g.cfg.Store.CountHitsSince(ctx, "model:auto", since)
 		if err != nil {

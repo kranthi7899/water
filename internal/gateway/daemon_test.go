@@ -38,6 +38,9 @@ connectors:
   - name: notes
     functions:
       - {name: save_note, level: S}
+  - name: slow
+    functions:
+      - {name: act, level: A}
 auto_allowlist: [fake_mail.list_messages, fake_mail.draft_reply]
 `
 
@@ -64,6 +67,41 @@ func (n *notes) Invoke(_ context.Context, p permit.Permit) (json.RawMessage, err
 }
 func (*notes) Normalize(string, json.RawMessage) ([]store.Record, error) { return nil, nil }
 
+// slowAct is an A-level connector whose Invoke blocks until released (or
+// its context ends), recording which happened, so a test can prove an
+// approved execution is not cut short by the requesting client going away.
+type slowAct struct {
+	entered  chan struct{}
+	release  chan struct{}
+	finished chan error // the ctx error seen when Invoke returned (nil = ran to completion)
+}
+
+func newSlowAct() *slowAct {
+	return &slowAct{entered: make(chan struct{}, 1), release: make(chan struct{}), finished: make(chan error, 1)}
+}
+
+func (*slowAct) Name() string                 { return "slow" }
+func (*slowAct) Credential() (string, string) { return "", "" }
+func (*slowAct) Functions() []connectors.Function {
+	return []connectors.Function{{Name: "act", Level: twins.A, Risk: connectors.RiskHigh,
+		Schema: connectors.Schema{Properties: map[string]connectors.Property{"what": {Type: "string"}}}}}
+}
+func (s *slowAct) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, error) {
+	if _, err := p.Open(); err != nil {
+		return nil, err
+	}
+	s.entered <- struct{}{}
+	select {
+	case <-s.release:
+		s.finished <- nil
+		return json.RawMessage(`{"done":true}`), nil
+	case <-ctx.Done():
+		s.finished <- ctx.Err()
+		return nil, ctx.Err()
+	}
+}
+func (*slowAct) Normalize(string, json.RawMessage) ([]store.Record, error) { return nil, nil }
+
 type harness struct {
 	d     *Daemon
 	srv   *httptest.Server
@@ -74,6 +112,8 @@ type harness struct {
 	fake  *backend.Fake
 	mail  *fake.Mail
 	notes *notes
+	slow  *slowAct
+	vault *vault.MemoryVault
 	dir   string
 }
 
@@ -94,7 +134,8 @@ func newHarness(t *testing.T) *harness {
 
 	mail := fake.NewMail(fake.Message{ID: "m1", From: "dana@acme.com", To: []string{"ceo@water.dev"}, Subject: "Hi", Body: "hello"})
 	nt := &notes{}
-	reg, err := connectors.NewRegistry(mail, nt)
+	sa := newSlowAct()
+	reg, err := connectors.NewRegistry(mail, nt, sa)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +163,7 @@ func newHarness(t *testing.T) *harness {
 	d := New(Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb, Clients: clients, SocketPath: "unused-in-http-tests.sock"})
 	srv := httptest.NewServer(d.Mux())
 	t.Cleanup(srv.Close)
-	return &harness{d: d, srv: srv, token: tok, st: st, log: log, q: q, fake: fb, mail: mail, notes: nt, dir: dir}
+	return &harness{d: d, srv: srv, token: tok, st: st, log: log, q: q, fake: fb, mail: mail, notes: nt, slow: sa, vault: v, dir: dir}
 }
 
 func (h *harness) post(t *testing.T, path, body, token string) *http.Response {

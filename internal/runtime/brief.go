@@ -68,14 +68,19 @@ type briefSignals struct {
 	// the rendered signal block then simply omits the section, rather than
 	// forcing an empty one into the prompt.
 	OpenCards []*decisions.Card
+	// CardsUnavailable is set when the decision source failed: open cards
+	// are an optional signal, so the brief says so instead of failing.
+	CardsUnavailable bool
 }
 
 // computeBriefSignals reads today's events, mail since yesterday, and the
 // pending-approval count, and reports whether any of it is External — the
 // same taint rule StateSummary uses. It is cheap (local store reads only, no
-// model call) and safe to call on every request, cache hit or not, so the
-// fast path can always report accurate taint even when it serves an
-// already-cached brief.
+// model call, no gate fetch) and safe to call on every request, cache hit or
+// not. The open-cards signal is deliberately not here: it runs the decision
+// trigger (classification, gate fetches and a phrasing model call per card),
+// so doComputeBrief adds it once per day's compute via openCardSignals, and
+// the taint it contributes is recorded with the cached brief.
 func computeBriefSignals(ctx context.Context, env Env) (briefSignals, bool, error) {
 	var sig briefSignals
 	var tainted bool
@@ -115,18 +120,42 @@ func computeBriefSignals(ctx context.Context, env Env) (briefSignals, bool, erro
 		}
 		sig.PendingApprovals = len(pend)
 	}
-
-	if env.Decisions != nil {
-		cards, err := env.Decisions.Run(ctx, now)
-		if err != nil {
-			return sig, tainted, fmt.Errorf("brief: decision cards: %w", err)
-		}
-		sig.OpenCards = decisions.Rank(cards)
-		for _, c := range sig.OpenCards {
-			tainted = tainted || c.Untrusted
-		}
-	}
 	return sig, tainted, nil
+}
+
+// openCardSignals runs the decision source (when one is wired) and returns
+// its cards ranked, plus whether any card is Untrusted. It is only called
+// when a brief is actually computed, never on a cached-brief ask.
+func openCardSignals(ctx context.Context, env Env, now time.Time) ([]*decisions.Card, bool, error) {
+	if env.Decisions == nil {
+		return nil, false, nil
+	}
+	cards, err := env.Decisions.Run(ctx, now)
+	if err != nil {
+		return nil, false, fmt.Errorf("brief: decision cards: %w", err)
+	}
+	ranked := decisions.Rank(cards)
+	tainted := false
+	for _, c := range ranked {
+		tainted = tainted || c.Untrusted
+	}
+	return ranked, tainted, nil
+}
+
+// briefTaintKey names the per-day record of whether a cached brief was
+// built from untrusted content. It lives in the store's generic key/value
+// cursor table next to the brief it describes.
+func briefTaintKey(day string) string { return "brief_taint:" + day }
+
+// cachedBriefTainted reports the recorded taint of day's cached brief. A
+// missing or unreadable record (a brief cached before this record existed,
+// or a failed write) counts as tainted: the conservative direction.
+func cachedBriefTainted(ctx context.Context, env Env, day string) bool {
+	v, ok, err := env.Store.GetCursor(ctx, briefTaintKey(day))
+	if err != nil || !ok {
+		return true
+	}
+	return v != "0"
 }
 
 // renderBriefSignals turns the computed signals into the model's whole
@@ -154,6 +183,10 @@ func renderBriefSignals(s briefSignals) string {
 	}
 
 	fmt.Fprintf(&b, "\nPending approvals: %d\n", s.PendingApprovals)
+
+	if s.CardsUnavailable {
+		b.WriteString("\nOpen decision cards: unavailable right now.\n")
+	}
 
 	if len(s.OpenCards) > 0 {
 		fmt.Fprintf(&b, "\nOpen decision cards (%d), most important first:\n", len(s.OpenCards))
@@ -222,16 +255,26 @@ func ComputeAndCacheBrief(ctx context.Context, env Env) (string, error) {
 	return w.text, w.err
 }
 
-// doComputeBrief is the actual, uncached computation: signals, one model
-// call over the same stream/Warm/Backend path a normal turn uses, then a
-// cache write. Only ComputeAndCacheBrief's compute-once guard calls this.
+// doComputeBrief is the actual, uncached computation: signals (including
+// the open-cards signal, run once here), one model call on the non-warm
+// backend path, then a cache write together with the brief's taint. Only
+// ComputeAndCacheBrief's compute-once guard calls this.
 func doComputeBrief(ctx context.Context, env Env, day string) (string, error) {
 	if env.Manifest == nil {
 		return "", errors.New("runtime: brief needs a manifest")
 	}
-	sig, _, err := computeBriefSignals(ctx, env)
+	sig, tainted, err := computeBriefSignals(ctx, env)
 	if err != nil {
 		return "", err
+	}
+	cards, cardsTainted, cerr := openCardSignals(ctx, env, env.now())
+	if cerr != nil {
+		// Optional signal: the brief still goes out, and says the cards
+		// could not be read rather than pretending there are none.
+		sig.CardsUnavailable = true
+	} else {
+		sig.OpenCards = cards
+		tainted = tainted || cardsTainted
 	}
 	req := backend.Request{
 		System:  briefSystemPrompt,
@@ -240,11 +283,22 @@ func doComputeBrief(ctx context.Context, env Env, day string) (string, error) {
 		Model:   env.Manifest.ModelFor(twins.TierFast),
 		Timeout: env.timeout(),
 	}
-	resp, err := stream(ctx, env, req, func(string) {})
+	// Never the warm session: the brief's system prompt and (absent) tools
+	// differ from the chat's, so running it there would kill the chat's
+	// process and its conversation, and the next chat turn would kill the
+	// brief's in turn.
+	resp, err := streamCold(ctx, env, req, func(string) {})
 	if err != nil {
 		return "", fmt.Errorf("brief: %w", err)
 	}
 	text := strings.TrimSpace(resp.Text)
+	// The taint record goes first, so a cached brief never exists without
+	// one (a failed write leaves it missing, which reads as tainted).
+	taintVal := "0"
+	if tainted {
+		taintVal = "1"
+	}
+	_ = env.Store.SetCursor(ctx, briefTaintKey(day), taintVal)
 	if err := env.Store.SetBrief(ctx, day, text); err != nil {
 		return "", fmt.Errorf("brief: caching: %w", err)
 	}

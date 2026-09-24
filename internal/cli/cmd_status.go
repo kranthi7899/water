@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"water"
 	"water/internal/backend"
 	"water/internal/config"
 )
@@ -24,11 +25,12 @@ func (a *App) statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			deps, err := buildTwinDeps()
+			// Read-only: never the audit log's writer lock, which the
+			// running daemon holds (see loadTwinManifest).
+			m, err := loadTwinManifest(water.TwinsFS())
 			if err != nil {
 				return err
 			}
-			defer deps.Close()
 
 			selected, reason := cfg.Backend.Preferred, "configured (not probed)"
 			if !noProbe {
@@ -41,14 +43,14 @@ func (a *App) statusCmd() *cobra.Command {
 
 			if a.jsonMode() {
 				return json.NewEncoder(os.Stdout).Encode(map[string]any{
-					"twin": deps.manifest.ID, "functions": deps.manifest.FunctionIDs(),
+					"twin": m.ID, "functions": m.FunctionIDs(),
 					"backend": selected, "backend_reason": reason,
 					"config": cfg.FilePath, "config_exists": cfg.FileExists,
 					"leaked_keys": backend.LeakedKeys(), "budget": backend.LoadRateLimit(config.Home()),
 				})
 			}
-			fmt.Printf("%s %s (%s)\n", styleDim.Render("twin    "), styleBold.Render(deps.manifest.ID), deps.manifest.Name)
-			fmt.Printf("%s %s\n", styleDim.Render("functions"), strings.Join(deps.manifest.FunctionIDs(), ", "))
+			fmt.Printf("%s %s (%s)\n", styleDim.Render("twin    "), styleBold.Render(m.ID), m.Name)
+			fmt.Printf("%s %s\n", styleDim.Render("functions"), strings.Join(m.FunctionIDs(), ", "))
 			fmt.Printf("%s %s %s\n", styleDim.Render("backend "), styleAccent.Render(selected), styleDim.Render(reason))
 			fmt.Printf("%s %s\n", styleDim.Render("budget  "), backend.LoadRateLimit(config.Home()).Summary())
 			fmt.Printf("%s %s\n", styleDim.Render("config  "), cfg.FilePath)

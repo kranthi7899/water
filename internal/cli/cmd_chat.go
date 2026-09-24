@@ -87,7 +87,7 @@ func (a *App) chatCommand(ctx context.Context, client *daemonClient, line string
 	case "/quit", "/exit":
 		return chatQuit
 	case "/clear":
-		if err := client.Turn(ctx, "cli", "", true, func(runtime.Event) {}); err != nil {
+		if err := clearSession(ctx, client); err != nil {
 			fmt.Fprintln(os.Stderr, "clear failed:", err)
 		} else {
 			fmt.Println("context cleared.")
@@ -95,6 +95,22 @@ func (a *App) chatCommand(ctx context.Context, client *daemonClient, line string
 		return chatHandled
 	}
 	return chatContinue
+}
+
+// clearSession asks the daemon to reset the warm session (an empty prompt
+// with clear set runs no model turn), reporting an error event as a failure
+// rather than claiming the context was cleared.
+func clearSession(ctx context.Context, client *daemonClient) error {
+	var clearErr error
+	err := client.Turn(ctx, "cli", "", true, func(e runtime.Event) {
+		if e.Kind == runtime.EventError {
+			clearErr = errors.New(e.Error)
+		}
+	})
+	if err != nil {
+		return err
+	}
+	return clearErr
 }
 
 func (a *App) chatTurn(ctx context.Context, client *daemonClient, prompt string, speak bool, speaker voice.Provider) error {

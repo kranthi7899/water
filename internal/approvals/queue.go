@@ -320,6 +320,29 @@ func (q *Queue) Claim(ctx context.Context, id, action, payloadHash string) (Enve
 	return e, nil
 }
 
+// Abandon ends an Approved envelope that could not be executed (the gate
+// refused it before claiming it) as Denied, with reason on the record, so
+// it reaches a clear final state instead of sitting Approved with nothing
+// left that will ever run it. It is a no-op error if the envelope is no
+// longer Approved.
+func (q *Queue) Abandon(ctx context.Context, id, reason string) (Envelope, error) {
+	e, err := q.Get(ctx, id)
+	if err != nil {
+		return Envelope{}, err
+	}
+	ok, err := q.st.TransitionApproval(ctx, id, string(Approved), string(Denied), reason, q.Now().UTC())
+	if err != nil {
+		return Envelope{}, err
+	}
+	if !ok {
+		return e, fmt.Errorf("%w: %s is %s", ErrNotApproved, id, e.Status)
+	}
+	if _, err := q.log.Append(audit.Record{Kind: audit.KindDenial, Function: e.Action, EnvelopeID: id, Origin: e.Origin, Reason: reason, ArgsHash: e.PayloadHash}); err != nil {
+		return Envelope{}, err
+	}
+	return q.Get(ctx, id)
+}
+
 func (q *Queue) getAfter(ctx context.Context, id string, cause error) (Envelope, error) {
 	e, err := q.Get(ctx, id)
 	if err != nil {

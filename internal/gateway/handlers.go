@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"water/internal/approvals"
@@ -41,8 +42,23 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	clearOnly := body.Clear && strings.TrimSpace(body.Prompt) == ""
+	if !body.Clear && strings.TrimSpace(body.Prompt) == "" {
+		http.Error(w, "empty prompt", http.StatusBadRequest)
+		return
+	}
 	if body.Clear && d.cfg.Warm != nil {
 		d.cfg.Warm.Clear()
+	}
+	if clearOnly {
+		// /clear alone: reset and end the stream. Running a model turn here
+		// would cold-start a process just to send it a blank message.
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		_ = enc.Encode(runtime.Event{Kind: runtime.EventAck})
+		_ = enc.Encode(runtime.Event{Kind: runtime.EventDone})
+		return
 	}
 	ch := runtime.Channel(body.Channel)
 	switch ch {
@@ -61,6 +77,17 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	enc := json.NewEncoder(w)
+	// The sink serializes this turn's own events with approval_required
+	// events a concurrent tool-invoke handler reports for it, and stops all
+	// writes once done/error is out (and before this handler returns).
+	sink := &turnSink{write: func(e runtime.Event) {
+		_ = enc.Encode(e)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}}
+	d.registerSink(taskID, sink)
+	defer func() { d.unregisterSink(taskID); sink.close() }()
 
 	// Taint is computed from the state the context assembler pulls in, before
 	// the turn runs, and escalates the twin's one tool-proxy token so every
@@ -68,16 +95,11 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	// spec: "every tool call in that turn is tainted" — escalated, since the
 	// warm session's MCP bridge child serves many turns with one token; see
 	// Daemon.escalateTaint).
-	_, tainted := runtime.AssembleSystem(ctx, d.baseEnv())
+	_, tainted := runtime.StateSummary(ctx, d.baseEnv())
 	d.escalateTaint(tainted)
 	env := d.turnEnv()
 
-	runtime.RunTurn(ctx, env, runtime.Turn{Channel: ch, Prompt: body.Prompt}, func(e runtime.Event) {
-		_ = enc.Encode(e)
-		if flusher != nil {
-			flusher.Flush()
-		}
-	})
+	runtime.RunTurn(ctx, env, runtime.Turn{Channel: ch, Prompt: body.Prompt}, sink.emit)
 }
 
 func (d *Daemon) handleListApprovals(w http.ResponseWriter, r *http.Request) {
@@ -125,10 +147,26 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 	// derive from external content (an S envelope is queued only because it
 	// was tainted), so it is presented as Tainted; the gate claims any
 	// presented envelope against its action and payload hash regardless.
-	res, ierr := d.cfg.Gate.Invoke(r.Context(), gate.Call{
+	//
+	// The execution is detached from the request: once the gate claims the
+	// envelope it is single-use, so a client that disconnects (Ctrl-C, its
+	// own timeout) must not cancel the connector call partway through. It
+	// still has its own bound.
+	execCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), approvedExecTimeout)
+	defer cancel()
+	res, ierr := d.cfg.Gate.Invoke(execCtx, gate.Call{
 		Function: e.Action, Args: e.Payload, Origin: gate.Origin(e.Origin), Taint: gate.Tainted, EnvelopeID: e.ID,
 	})
-	latest, gerr := d.cfg.Approvals.Get(r.Context(), id)
+	if ierr != nil {
+		// Refused before the claim (rate cap, missing credential, audit
+		// failure): the envelope is still Approved, and nothing else ever
+		// executes an Approved envelope, so the yes would silently sit there
+		// until it expired. End it as denied, with the reason, on the record.
+		if cur, gerr := d.cfg.Approvals.Get(execCtx, id); gerr == nil && cur.Status == approvals.Approved {
+			_, _ = d.cfg.Approvals.Abandon(execCtx, id, "execution refused: "+ierr.Error())
+		}
+	}
+	latest, gerr := d.cfg.Approvals.Get(execCtx, id)
 	if gerr != nil {
 		latest = e
 	}
@@ -138,6 +176,10 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: true, Output: res.Output})
 }
+
+// approvedExecTimeout bounds one approved action's execution, which runs
+// detached from the deciding request's context.
+const approvedExecTimeout = 2 * time.Minute
 
 // handleState answers a compact snapshot: today's events and pending
 // approvals, the same data the fast paths and system prompt use.

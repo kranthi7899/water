@@ -68,10 +68,71 @@ type Daemon struct {
 	tasks        map[string]context.CancelFunc
 	turnTok      map[string]turnAuth
 	sessionToken string // the one long-lived tool-proxy token; see stableSessionToken
+	// sinks are the open turn streams (by task id) that a queued tool call
+	// is reported to as approval_required; see notifyApprovalRequired.
+	sinks map[string]*turnSink
 }
 
 func New(cfg Config) *Daemon {
-	return &Daemon{cfg: cfg, tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{}}
+	return &Daemon{cfg: cfg, tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{}, sinks: map[string]*turnSink{}}
+}
+
+// turnSink is one open POST /v1/turns stream. Writes from the turn itself
+// and from a concurrent tool-invoke handler are serialized, and nothing is
+// written once the stream's final done/error event has gone out.
+type turnSink struct {
+	mu     sync.Mutex
+	closed bool
+	write  func(runtime.Event)
+}
+
+func (s *turnSink) emit(e runtime.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.write(e)
+	if e.Kind == runtime.EventDone || e.Kind == runtime.EventError {
+		s.closed = true
+	}
+}
+
+func (s *turnSink) close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+}
+
+func (d *Daemon) registerSink(id string, s *turnSink) {
+	d.mu.Lock()
+	d.sinks[id] = s
+	d.mu.Unlock()
+}
+
+func (d *Daemon) unregisterSink(id string) {
+	d.mu.Lock()
+	delete(d.sinks, id)
+	d.mu.Unlock()
+}
+
+// notifyApprovalRequired reports a tool call the model made that was queued
+// for approval to every open turn stream. Every turn shares the one session
+// tool token (see stableSessionToken), so a call cannot be tied to a single
+// turn by its token; in practice the warm session serializes turns, so there
+// is one open stream, and the daemon serves one principal either way. A call
+// that lands after its turn's stream closed is still queued, just not
+// announced inline (the brief and `water approve` still list it).
+func (d *Daemon) notifyApprovalRequired(env approvals.Envelope) {
+	d.mu.Lock()
+	sinks := make([]*turnSink, 0, len(d.sinks))
+	for _, s := range d.sinks {
+		sinks = append(sinks, s)
+	}
+	d.mu.Unlock()
+	for _, s := range sinks {
+		s.emit(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: env.ID, Text: env.Action})
+	}
 }
 
 func newID(prefix string) string {
@@ -194,6 +255,15 @@ func (d *Daemon) lookupTurnToken(tok string) (turnAuth, bool) {
 func (d *Daemon) stableSessionToken() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.ensureSessionTokenLocked()
+}
+
+// ensureSessionTokenLocked mints the session token (Clean) if it does not
+// exist yet. Both stableSessionToken and escalateTaint go through it, so a
+// taint escalation that happens before any turn has built its tool policy —
+// the first turn after a daemon start escalates before turnEnv runs — is
+// applied to the token rather than silently dropped.
+func (d *Daemon) ensureSessionTokenLocked() string {
 	if d.sessionToken == "" {
 		d.sessionToken = newID("tt")
 		d.turnTok[d.sessionToken] = turnAuth{Origin: gate.P0, Taint: gate.Clean, Expires: time.Now().Add(365 * 24 * time.Hour)}
@@ -213,9 +283,10 @@ func (d *Daemon) escalateTaint(tainted bool) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if ta, ok := d.turnTok[d.sessionToken]; ok {
+	tok := d.ensureSessionTokenLocked()
+	if ta, ok := d.turnTok[tok]; ok {
 		ta.Taint = gate.Tainted
-		d.turnTok[d.sessionToken] = ta
+		d.turnTok[tok] = ta
 	}
 }
 
@@ -286,6 +357,7 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 			return
 		}
+		d.notifyApprovalRequired(env)
 		writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "approval_id": env.ID})
 		return
 	}

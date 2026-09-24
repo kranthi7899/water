@@ -161,7 +161,7 @@ func TestBriefSignalsRankOpenCardsAndOmitTheSectionWhenEmpty(t *testing.T) {
 	high := &decisions.Card{ID: "card-high", TypeID: "budget_request", Severity: 3, Lead: "High severity item", Readiness: decisions.MissingInfo}
 	env.Decisions = fakeDecisionSource{cards: []*decisions.Card{low, high}}
 
-	sig, _, err = computeBriefSignals(ctx, env)
+	sig.OpenCards, _, err = openCardSignals(ctx, env, env.now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestBriefSignalsPropagateUntrustedCards(t *testing.T) {
 	env, ctx := testEnv(t)
 	env.Decisions = fakeDecisionSource{cards: []*decisions.Card{{ID: "card-1", TypeID: "generic", Untrusted: true}}}
 
-	_, tainted, err := computeBriefSignals(ctx, env)
+	_, tainted, err := openCardSignals(ctx, env, env.now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,15 +192,25 @@ func TestBriefSignalsPropagateUntrustedCards(t *testing.T) {
 	}
 }
 
-// TestBriefSignalsSurfaceDecisionSourceErrors confirms a failing Decisions
-// source fails signal computation loudly rather than silently omitting the
-// section.
-func TestBriefSignalsSurfaceDecisionSourceErrors(t *testing.T) {
+// TestBriefSaysWhenDecisionCardsAreUnavailable confirms a failing Decisions
+// source is surfaced, not hidden: openCardSignals returns its error, and the
+// brief built without the cards says they were unavailable rather than
+// silently omitting the section as if there were none.
+func TestBriefSaysWhenDecisionCardsAreUnavailable(t *testing.T) {
 	env, ctx := testEnv(t)
 	env.Decisions = fakeDecisionSource{err: errBoom}
+	if _, _, err := openCardSignals(ctx, env, env.now()); err == nil {
+		t.Fatal("expected openCardSignals to surface the Decisions source's error")
+	}
 
-	if _, _, err := computeBriefSignals(ctx, env); err == nil {
-		t.Fatal("expected computeBriefSignals to surface the Decisions source's error")
+	fk := backend.NewFake("fake")
+	env.Backend = fk
+	if _, err := ComputeAndCacheBrief(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	reqs := fk.Requests()
+	if len(reqs) != 1 || !strings.Contains(reqs[0].Prompt, "Open decision cards: unavailable") {
+		t.Fatalf("brief signal block should note the cards were unavailable: %+v", reqs)
 	}
 }
 

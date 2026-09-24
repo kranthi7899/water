@@ -162,7 +162,11 @@ func (c *CodexSubscription) Run(ctx context.Context, req Request) (Response, err
 		prompt += "\n\n" + strings.Join(inlined, "\n\n")
 	}
 	if strings.TrimSpace(req.System) != "" {
-		prompt = "<system>\n" + req.System + "\n</system>\n\n" + req.Prompt
+		// Prefix the already-assembled prompt (req.Prompt plus any inlined
+		// text attachments), never req.Prompt alone: rebuilding from
+		// req.Prompt would silently drop the attachments while
+		// AttachmentsDelivered still reported them as consumed.
+		prompt = "<system>\n" + req.System + "\n</system>\n\n" + prompt
 	}
 	args = append(args, "--", prompt)
 

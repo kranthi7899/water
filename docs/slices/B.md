@@ -73,11 +73,14 @@ third-party packages and makes no metered calls. It builds without Xcode.
 - **The daemon reads `clients.json` only at startup** (`gateway.LoadClients`
   in `runDaemon`). A token minted by `water daemon token new` gets a 401
   until the daemon restarts. That's why the app falls back to the `cli` token.
-- **`approval_required` is never emitted.** The constant exists in
-  `runtime`, but nothing emits it. A model tool call that needs approval
-  only returns `queued` to the model through MCP. The panel renders the
-  event in orange if one ever arrives, but today approvals surface only
-  through `water approve`. Voice approvals are still Slice B work.
+- **`approval_required` was never emitted** (fixed in the whole-system
+  review). A model tool call that the daemon queues for approval is now
+  reported on the open `POST /v1/turns` stream as `approval_required`
+  (`approval_id`, and the action in `text`), before `done`. Every turn shares
+  one session tool token, so the event goes to every open turn stream; in
+  practice the warm session serializes turns, so there is one. A call that
+  lands after its turn's stream closed is still queued, just not announced
+  inline. Voice approvals are still Slice B work.
 - `sentence` events come only on the `voice` channel. Fast-path answers get
   them too (`deliverText`).
 

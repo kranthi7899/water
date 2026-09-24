@@ -16,8 +16,15 @@ import (
 // contain a trigger word inside a different kind of sentence (e.g. "help me
 // schedule a meeting with the calendar team" is a request to create an
 // event, not a question about today's calendar, and must fall through).
+// A wrong fast-path answer silently drops the CEO's real request, so
+// fastPathEligible rules out anything that asks for an action, names a time
+// the fast path cannot answer for, or is long enough to be more than a
+// status question, before any trigger is looked at.
 func FastPath(ctx context.Context, env Env, prompt string) (string, bool) {
 	p := norm(prompt)
+	if !fastPathEligible(p) {
+		return "", false
+	}
 	if day, ok := matchSchedule(p); ok {
 		return scheduleAnswer(ctx, env, day), true
 	}
@@ -45,6 +52,48 @@ func norm(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
+// maxFastPathWords bounds a fast-path prompt: the status questions it
+// answers are short, and anything longer is likely asking for more.
+const maxFastPathWords = 10
+
+// fastPathActionWords mark a request to do something (to an event, a
+// message, an approval or the brief), which only the model can handle.
+var fastPathActionWords = map[string]bool{
+	"reschedule": true, "cancel": true, "move": true, "book": true, "draft": true, "reply": true,
+	"send": true, "write": true, "rewrite": true, "summarize": true, "summarise": true, "approve": true,
+	"deny": true, "reject": true, "decline": true, "forward": true, "delete": true, "remove": true,
+	"create": true, "add": true, "invite": true, "prepare": true, "email": true, "update": true,
+	"change": true, "edit": true, "accept": true, "push": true, "shift": true,
+}
+
+// fastPathOtherTimes mark a time scope the fast path cannot answer for (it
+// knows only today and tomorrow).
+var fastPathOtherTimes = map[string]bool{
+	"yesterday": true, "week": true, "weekend": true, "month": true, "year": true, "next": true, "last": true,
+	"monday": true, "tuesday": true, "wednesday": true, "thursday": true, "friday": true, "saturday": true, "sunday": true,
+	"january": true, "february": true, "march": true, "april": true, "june": true, "july": true, "august": true,
+	"september": true, "october": true, "november": true, "december": true,
+}
+
+// fastPathEligible is the gate in front of every trigger match (see
+// FastPath): short, no action verb, no other time scope, no digits.
+func fastPathEligible(p string) bool {
+	words := strings.Fields(p)
+	if len(words) == 0 || len(words) > maxFastPathWords {
+		return false
+	}
+	for _, w := range words {
+		w = strings.Trim(w, "'\"()")
+		if fastPathActionWords[w] || fastPathOtherTimes[w] {
+			return false
+		}
+		if strings.ContainsAny(w, "0123456789") {
+			return false
+		}
+	}
+	return true
+}
+
 func containsAny(p string, phrases ...string) bool {
 	for _, ph := range phrases {
 		if strings.Contains(p, ph) {
@@ -56,8 +105,9 @@ func containsAny(p string, phrases ...string) bool {
 
 // matchSchedule recognises a question about today's or tomorrow's calendar.
 // It requires an explicit possessive/question phrase ("my calendar", "any
-// meetings", ...), not just a bare keyword, so a request to CREATE an event
-// or meeting never matches.
+// meetings", ...), not just a bare keyword; requests to create, move or
+// cancel an event, and questions about any other day, were already ruled
+// out by fastPathEligible.
 func matchSchedule(p string) (day string, ok bool) {
 	triggers := []string{
 		"my schedule", "my calendar", "my agenda", "my meetings",
@@ -123,17 +173,23 @@ func scheduleAnswer(ctx context.Context, env Env, day string) string {
 // the model": it returns today's cached morning brief if one exists, and
 // otherwise computes it once (ComputeAndCacheBrief's compute-once guard
 // covers a background precompute racing an on-demand ask like this one) and
-// caches it. Taint is checked fresh every call, cache hit or not, so an
-// already-cached brief that was built from external content still escalates
-// the session the same way any other tainted turn does.
+// caches it. Taint is checked every call, cache hit or not: the local
+// signals are re-read, and the taint recorded with the cached brief (which
+// covers its open cards) is added in. It fails closed — if the signals
+// cannot be read, or the brief's recorded taint is unknown, the session is
+// escalated, since the brief may carry external content either way.
 func briefAnswer(ctx context.Context, env Env) string {
 	if env.Store == nil {
 		return "I don't have a store attached yet."
 	}
-	if _, tainted, err := computeBriefSignals(ctx, env); err == nil && env.OnTaint != nil {
-		env.OnTaint(tainted)
-	}
 	text, err := ComputeAndCacheBrief(ctx, env)
+	if env.OnTaint != nil {
+		_, tainted, serr := computeBriefSignals(ctx, env)
+		if err == nil {
+			tainted = tainted || cachedBriefTainted(ctx, env, startOfDay(env.now()).Format("2006-01-02"))
+		}
+		env.OnTaint(tainted || serr != nil)
+	}
 	if err != nil {
 		return "I couldn't put together the morning brief just now."
 	}

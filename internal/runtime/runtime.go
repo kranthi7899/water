@@ -129,10 +129,14 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 		return
 	}
 
-	sys, _ := AssembleSystem(ctx, env)
+	// The system prompt is the role alone, so it stays byte-identical from
+	// turn to turn and the warm session keeps its process and conversation.
+	// Live state (today's events, the pending count) changes between turns,
+	// so it travels with each turn's message instead.
+	summary, _ := StateSummary(ctx, env)
 	req := backend.Request{
-		System:  sys,
-		Prompt:  turn.Prompt,
+		System:  RoleSystem(env),
+		Prompt:  TurnPrompt(env, summary, turn.Prompt),
 		Model:   env.Manifest.ModelFor(twins.TierFast),
 		Timeout: env.timeout(),
 		Tools:   env.Tools,
@@ -162,6 +166,14 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 		}
 	}
 	emit(Event{Kind: EventDone, Text: resp.Text})
+}
+
+// streamCold is stream without the warm session, for calls whose system
+// prompt or tools differ from the chat's (the morning brief): running them
+// on the warm session would restart the chat's process.
+func streamCold(ctx context.Context, env Env, req backend.Request, onDelta func(string)) (backend.Response, error) {
+	env.Warm = nil
+	return stream(ctx, env, req, onDelta)
 }
 
 // stream picks the warm session when available, else the backend's own
@@ -195,20 +207,20 @@ func deliverText(ch Channel, text string, emit func(Event)) {
 	}
 }
 
-// AssembleSystem builds the system prompt: role.md, then a compact state
-// summary from the store. It reports whether anything it pulled in is
-// external/untrusted, so the caller can taint any tool calls the turn makes.
-func AssembleSystem(ctx context.Context, env Env) (system string, tainted bool) {
-	var b strings.Builder
+// RoleSystem is the twin's system prompt: role.md (or a placeholder until it
+// exists), and nothing that changes between turns.
+func RoleSystem(env Env) string {
 	if strings.TrimSpace(env.RoleMD) != "" {
-		b.WriteString(env.RoleMD)
-	} else {
-		b.WriteString(placeholderRole)
+		return env.RoleMD
 	}
-	summary, tainted := StateSummary(ctx, env)
-	b.WriteString("\n\n## Current state\n")
-	b.WriteString(summary)
-	return b.String(), tainted
+	return placeholderRole
+}
+
+// TurnPrompt is one turn's user message: the current state (see
+// StateSummary, whose taint the caller applies to the session before the
+// turn runs) followed by the CEO's request.
+func TurnPrompt(env Env, summary, prompt string) string {
+	return "## Current state (as of " + env.now().Local().Format("15:04") + ")\n" + summary + "\n\n## CEO\n" + prompt
 }
 
 // StateSummary renders today's events and the pending-approval count, the
