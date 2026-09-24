@@ -78,6 +78,13 @@ type Env struct {
 	// Timeout bounds one model call.
 	Timeout time.Duration
 	Now     func() time.Time
+	// OnTaint, when set, is called with true whenever a fast path itself
+	// pulls in External content while answering without a model call (today
+	// only the morning brief does) — the same escalation a normal turn's
+	// tainted context gets from handleTurn, so a cached brief built from
+	// external mail or events still marks the session tainted for the tool
+	// calls that follow it. The daemon wires this to escalateTaint.
+	OnTaint func(tainted bool)
 }
 
 func (e Env) now() time.Time {

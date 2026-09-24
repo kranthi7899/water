@@ -27,16 +27,33 @@ type Config struct {
 	API     APIConfig     `yaml:"api"`
 	Onboard OnboardConfig `yaml:"onboard"`
 	Sync    SyncConfig    `yaml:"sync"`
+	Brief   BriefConfig   `yaml:"brief"`
 }
 
 // SyncConfig configures the daemon's background Google refresh
-// (internal/sync).
+// (internal/sync): calendar and mail refresh on independent intervals, mail
+// far more often since it is cheap to poll and staleness matters more.
 type SyncConfig struct {
-	IntervalMinutes int `yaml:"interval_minutes"`
+	IntervalMinutes     int `yaml:"interval_minutes"`
+	MailIntervalSeconds int `yaml:"mail_interval_seconds"`
 }
 
-// Interval is IntervalMinutes as a time.Duration.
+// Interval is IntervalMinutes as a time.Duration (the calendar cadence).
 func (c SyncConfig) Interval() time.Duration { return time.Duration(c.IntervalMinutes) * time.Minute }
+
+// MailInterval is MailIntervalSeconds as a time.Duration.
+func (c SyncConfig) MailInterval() time.Duration {
+	return time.Duration(c.MailIntervalSeconds) * time.Second
+}
+
+// BriefConfig configures the morning brief's background precompute
+// (internal/runtime/brief.go via internal/sync's events tick).
+type BriefConfig struct {
+	// ReadyAfter is "HH:MM" local time; the precompute only fires once local
+	// time is past this, so it doesn't try before the CEO's day realistically
+	// starts.
+	ReadyAfter string `yaml:"ready_after"`
+}
 
 // OnboardConfig records the last verified round trip.
 type OnboardConfig struct {
@@ -100,17 +117,19 @@ func Keys() []string {
 
 func defaults() map[string]string {
 	return map[string]string{
-		"schema":                strconv.Itoa(CurrentSchema),
-		"backend.preferred":     "auto",
-		"backend.allow_metered": "false",
-		"voice.provider":        "os",
-		"voice.allow_metered":   "false",
-		"voice.model":           "gpt-4o-mini-tts",
-		"voice.ceo_voice":       "",
-		"api.key":               "",
-		"api.model":             "",
-		"onboard.verified_at":   "",
-		"sync.interval_minutes": "10",
+		"schema":                     strconv.Itoa(CurrentSchema),
+		"backend.preferred":          "auto",
+		"backend.allow_metered":      "false",
+		"voice.provider":             "os",
+		"voice.allow_metered":        "false",
+		"voice.model":                "gpt-4o-mini-tts",
+		"voice.ceo_voice":            "",
+		"api.key":                    "",
+		"api.model":                  "",
+		"onboard.verified_at":        "",
+		"sync.interval_minutes":      "10",
+		"sync.mail_interval_seconds": "60",
+		"brief.ready_after":          "07:00",
 	}
 }
 
@@ -224,6 +243,8 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.API.Model = flat["api.model"]
 	r.Onboard.VerifiedAt = flat["onboard.verified_at"]
 	r.Sync.IntervalMinutes = atoi("sync.interval_minutes")
+	r.Sync.MailIntervalSeconds = atoi("sync.mail_interval_seconds")
+	r.Brief.ReadyAfter = flat["brief.ready_after"]
 	if err != nil {
 		return err
 	}
@@ -233,17 +254,19 @@ func (r *Resolved) apply(flat map[string]string) error {
 // Flat returns the resolved values as dotted keys (for `water config`).
 func (r *Resolved) Flat() map[string]string {
 	return map[string]string{
-		"schema":                strconv.Itoa(r.Schema),
-		"backend.preferred":     r.Backend.Preferred,
-		"backend.allow_metered": strconv.FormatBool(r.Backend.AllowMetered),
-		"voice.provider":        r.Voice.Provider,
-		"voice.allow_metered":   strconv.FormatBool(r.Voice.AllowMetered),
-		"voice.model":           r.Voice.Model,
-		"voice.ceo_voice":       r.Voice.CEOVoice,
-		"api.key":               mask(r.API.Key),
-		"api.model":             r.API.Model,
-		"onboard.verified_at":   r.Onboard.VerifiedAt,
-		"sync.interval_minutes": strconv.Itoa(r.Sync.IntervalMinutes),
+		"schema":                     strconv.Itoa(r.Schema),
+		"backend.preferred":          r.Backend.Preferred,
+		"backend.allow_metered":      strconv.FormatBool(r.Backend.AllowMetered),
+		"voice.provider":             r.Voice.Provider,
+		"voice.allow_metered":        strconv.FormatBool(r.Voice.AllowMetered),
+		"voice.model":                r.Voice.Model,
+		"voice.ceo_voice":            r.Voice.CEOVoice,
+		"api.key":                    mask(r.API.Key),
+		"api.model":                  r.API.Model,
+		"onboard.verified_at":        r.Onboard.VerifiedAt,
+		"sync.interval_minutes":      strconv.Itoa(r.Sync.IntervalMinutes),
+		"sync.mail_interval_seconds": strconv.Itoa(r.Sync.MailIntervalSeconds),
+		"brief.ready_after":          r.Brief.ReadyAfter,
 	}
 }
 

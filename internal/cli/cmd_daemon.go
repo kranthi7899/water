@@ -17,6 +17,7 @@ import (
 	"water/internal/config"
 	"water/internal/connectors/google/gapi"
 	"water/internal/gateway"
+	"water/internal/runtime"
 	watersync "water/internal/sync"
 )
 
@@ -89,13 +90,30 @@ func (a *App) runDaemon(ctx context.Context) error {
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// briefEnv is a plain (non-per-turn) runtime.Env, just enough to compute
+	// and cache the morning brief from the background sync loop — the same
+	// ComputeAndCacheBrief the on-demand fast path calls, so the two share
+	// the compute-once guard for the same day.
+	briefEnv := runtime.Env{
+		Manifest: deps.manifest, Store: deps.store, Approvals: deps.approvals,
+		RoleMD: deps.roleMD, Backend: sel.Backend, Warm: warm,
+	}
+
 	// The background Google refresh (internal/sync): P2, gate-mediated, skips
 	// quietly if nothing is connected, and stops with the rest of the daemon
-	// because it shares sigCtx.
+	// because it shares sigCtx. Mail and calendar refresh on independent
+	// intervals; the (slower) calendar tick also drives the morning brief's
+	// background precompute once it's past brief.ready_after.
 	refresher := watersync.New(watersync.Config{
-		Gate: deps.gate, Vault: deps.vault, Service: gapi.Service, Account: gapi.DefaultAccount,
-		Interval: cfg.Sync.Interval(),
-		Logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) },
+		Gate: deps.gate, Vault: deps.vault, Store: deps.store,
+		Service: gapi.Service, Account: gapi.DefaultAccount,
+		EventsInterval: cfg.Sync.Interval(), MailInterval: cfg.Sync.MailInterval(),
+		Logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) },
+		Brief: func(ctx context.Context) error {
+			_, err := runtime.ComputeAndCacheBrief(ctx, briefEnv)
+			return err
+		},
+		BriefReadyAfter: cfg.Brief.ReadyAfter,
 	})
 	go refresher.Run(sigCtx)
 

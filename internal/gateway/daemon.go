@@ -351,6 +351,9 @@ func (d *Daemon) baseEnv() runtime.Env {
 		RoleMD:    d.cfg.RoleMD,
 		Backend:   d.cfg.Backend,
 		Warm:      d.cfg.Warm,
+		// A fast path that pulls in external content (the morning brief)
+		// escalates the session the same way a tainted model turn does.
+		OnTaint: d.escalateTaint,
 	}
 }
 

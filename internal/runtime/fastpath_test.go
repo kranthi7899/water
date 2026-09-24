@@ -8,7 +8,9 @@ import (
 
 	"water/internal/approvals"
 	"water/internal/audit"
+	"water/internal/backend"
 	"water/internal/store"
+	"water/internal/twins"
 )
 
 func testEnv(t *testing.T) (Env, context.Context) {
@@ -27,7 +29,11 @@ func testEnv(t *testing.T) (Env, context.Context) {
 	q := approvals.NewQueue(st, log)
 	now := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
 	q.Now = func() time.Time { return now }
-	return Env{Store: st, Approvals: q, Now: func() time.Time { return now }}, context.Background()
+	m := &twins.Manifest{ID: "t"}
+	return Env{
+		Store: st, Approvals: q, Now: func() time.Time { return now },
+		Manifest: m, Backend: backend.NewFake("fake"),
+	}, context.Background()
 }
 
 func TestFastPathMatchesAndNearMisses(t *testing.T) {
@@ -85,11 +91,14 @@ func TestFastPathApprovalsEmptyQueue(t *testing.T) {
 	}
 }
 
-func TestFastPathBriefNotReady(t *testing.T) {
+func TestFastPathBriefComputesAndCaches(t *testing.T) {
 	env, ctx := testEnv(t)
 	text, ok := FastPath(ctx, env, "is my brief ready")
-	if !ok || text != "Your morning brief isn't ready yet." {
-		t.Fatalf("text=%q ok=%v", text, ok)
+	if !ok || text == "" {
+		t.Fatalf("text=%q ok=%v, want a computed brief", text, ok)
+	}
+	if cached, ok, err := env.Store.GetBrief(ctx, "2026-09-23"); err != nil || !ok || cached != text {
+		t.Fatalf("brief was not cached: cached=%q ok=%v err=%v, want %q", cached, ok, err, text)
 	}
 }
 

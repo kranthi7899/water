@@ -25,7 +25,7 @@ func FastPath(ctx context.Context, env Env, prompt string) (string, bool) {
 		return approvalsAnswer(ctx, env), true
 	}
 	if matchBrief(p) {
-		return "Your morning brief isn't ready yet.", true
+		return briefAnswer(ctx, env), true
 	}
 	return "", false
 }
@@ -117,6 +117,27 @@ func scheduleAnswer(ctx context.Context, env Env, day string) string {
 		fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// briefAnswer is the one deliberate exception to "the fast path never calls
+// the model": it returns today's cached morning brief if one exists, and
+// otherwise computes it once (ComputeAndCacheBrief's compute-once guard
+// covers a background precompute racing an on-demand ask like this one) and
+// caches it. Taint is checked fresh every call, cache hit or not, so an
+// already-cached brief that was built from external content still escalates
+// the session the same way any other tainted turn does.
+func briefAnswer(ctx context.Context, env Env) string {
+	if env.Store == nil {
+		return "I don't have a store attached yet."
+	}
+	if _, tainted, err := computeBriefSignals(ctx, env); err == nil && env.OnTaint != nil {
+		env.OnTaint(tainted)
+	}
+	text, err := ComputeAndCacheBrief(ctx, env)
+	if err != nil {
+		return "I couldn't put together the morning brief just now."
+	}
+	return text
 }
 
 func approvalsAnswer(ctx context.Context, env Env) string {

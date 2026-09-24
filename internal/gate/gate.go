@@ -211,7 +211,13 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 		ierr = errors.New("connector returned without redeeming its permit")
 	}
 	if ierr != nil {
-		ierr = errors.New(redact(ierr.Error(), cred))
+		// Scrub any credential text but keep the original error reachable
+		// via Unwrap, so a connector's typed sentinel (gmail.ErrHistoryTooOld,
+		// gcal.ErrSyncTokenExpired, ...) still matches errors.Is once this
+		// error is itself wrapped below. scrubbedError.Error() only ever
+		// returns the redacted text, never the original's, so the credential
+		// never resurfaces through Unwrap's chain.
+		ierr = &scrubbedError{msg: redact(ierr.Error(), cred), err: ierr}
 		if aerr := rec(audit.KindExecute, false, "failed: "+ierr.Error()); aerr != nil {
 			return Result{}, errors.Join(ierr, aerr)
 		}
@@ -423,6 +429,17 @@ func (g *Gate) live(key string, now time.Time, per time.Duration) []time.Time {
 	g.rates[key] = hits
 	return hits
 }
+
+// scrubbedError carries a credential-redacted message for display and
+// auditing while preserving the original connector error's identity for
+// errors.Is/errors.As, via Unwrap.
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
 
 func redact(s string, cred vault.Secret) string {
 	if cred.IsZero() {
