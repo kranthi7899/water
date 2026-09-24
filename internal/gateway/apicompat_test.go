@@ -93,7 +93,8 @@ func TestApprovalRequiredGoesOnlyToTheExecutingTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PayloadHash != env.PayloadHash || got.Action != "fake_mail.send_email" || got.Risk != env.Risk || got.Text != got.Action {
+	if got.PayloadHash != env.PayloadHash || got.Action != "fake_mail.send_email" || got.Risk != env.Risk || got.Text != got.Action ||
+		got.ReadBack != approvals.ReadBack(env) {
 		t.Fatalf("approval_required = %+v, want action/risk/payload_hash of %+v", *got, env)
 	}
 	for _, e := range second {
@@ -298,5 +299,78 @@ func TestDecisionLostRaceReportsTheCurrentEnvelope(t *testing.T) {
 	out := post("yes")
 	if out.Error == "" || out.Envelope.ID != env.ID || out.Envelope.Status != "denied" || out.Executed {
 		t.Fatalf("second decision = %+v, want the denied envelope with an error", out)
+	}
+}
+
+// TestApprovalsWireShape pins the approvals API a client builds against:
+// snake_case keys on GET /v1/approvals, GET /v1/approvals/{id} and the
+// decision result's envelope (the same payload_hash key the decide body
+// takes), and a read_back that is exactly approvals.ReadBack, so no client
+// or model has to compose what the CEO hears.
+func TestApprovalsWireShape(t *testing.T) {
+	h := newHarness(t)
+	env, err := h.q.Propose(context.Background(), approvals.Envelope{Action: "fake_mail.send_email",
+		Payload: map[string]any{"to": []any{"a@x.com"}, "subject": "s", "body": "b"}, Origin: "p0", Risk: "high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := []string{"id", "action", "recipient", "payload", "evidence_refs", "risk", "origin", "expires_at",
+		"payload_hash", "status", "reason", "created_at", "read_back", "summary"}
+	check := func(where string, obj map[string]any) {
+		t.Helper()
+		for _, k := range wantKeys {
+			if _, ok := obj[k]; !ok {
+				t.Fatalf("%s: missing key %q in %v", where, k, obj)
+			}
+		}
+		for _, k := range []string{"ID", "PayloadHash", "Envelope"} {
+			if _, ok := obj[k]; ok {
+				t.Fatalf("%s: PascalCase key %q in %v", where, k, obj)
+			}
+		}
+		if obj["id"] != env.ID || obj["payload_hash"] != env.PayloadHash {
+			t.Fatalf("%s: id/payload_hash = %v/%v", where, obj["id"], obj["payload_hash"])
+		}
+		if obj["read_back"] != approvals.ReadBack(env) {
+			t.Fatalf("%s: read_back = %q, want %q", where, obj["read_back"], approvals.ReadBack(env))
+		}
+		if obj["summary"] != approvals.Summary(env) {
+			t.Fatalf("%s: summary = %q", where, obj["summary"])
+		}
+	}
+	decode := func(resp *http.Response, v any) {
+		t.Helper()
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var list []map[string]any
+	decode(h.get(t, "/v1/approvals", h.token), &list)
+	if len(list) != 1 {
+		t.Fatalf("list = %v", list)
+	}
+	check("list", list[0])
+
+	var one map[string]any
+	decode(h.get(t, "/v1/approvals/"+env.ID, h.token), &one)
+	check("get", one)
+
+	if resp := h.get(t, "/v1/approvals/env_missing", h.token); resp.StatusCode != http.StatusNotFound {
+		resp.Body.Close()
+		t.Fatalf("unknown id: status %d, want 404", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+
+	var res map[string]any
+	decode(h.post(t, "/v1/approvals/"+env.ID+"/decision", `{"payload_hash":"`+env.PayloadHash+`","reply":"no"}`, h.token), &res)
+	got, _ := res["envelope"].(map[string]any)
+	if got == nil || got["status"] != "denied" || got["id"] != env.ID || got["read_back"] != approvals.ReadBack(env) {
+		t.Fatalf("decision envelope = %v", res["envelope"])
 	}
 }

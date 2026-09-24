@@ -32,7 +32,10 @@ import (
 
 // notes is a test connector for the levels the fakes do not cover: S (the
 // twin's own state) and a destructive function the manifest blocks.
-type notes struct{ saved []string }
+type notes struct {
+	saved    []string
+	onInvoke func() // optional: runs after the note is saved
+}
 
 func (*notes) Name() string                 { return "notes" }
 func (*notes) Credential() (string, string) { return "", "" }
@@ -50,6 +53,9 @@ func (n *notes) Invoke(_ context.Context, p permit.Permit) (json.RawMessage, err
 	}
 	if call.Function == "save_note" {
 		n.saved = append(n.saved, call.Args["text"].(string))
+	}
+	if n.onInvoke != nil {
+		n.onInvoke()
 	}
 	return json.RawMessage(`{}`), nil
 }
@@ -526,5 +532,66 @@ func TestPresentedEnvelopeIsAlwaysClaimed(t *testing.T) {
 	}
 	if _, err := h.g.Invoke(ctx, gate.Call{Function: "notes.save_note", Args: note, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID}); err == nil {
 		t.Fatal("a used envelope was accepted a second time")
+	}
+}
+
+// failingAnchor wraps the store's anchor and fails every save once armed.
+type failingAnchor struct {
+	*store.Store
+	armed bool
+}
+
+func (a *failingAnchor) SaveAuditAnchor(ctx context.Context, seq int64, hash string) error {
+	if a.armed {
+		return errors.New("database is locked (SQLITE_BUSY)")
+	}
+	return a.Store.SaveAuditAnchor(ctx, seq, hash)
+}
+
+// TestExecuteAuditFailureKeepsTheOutput: the connector call succeeded, then
+// the execute audit record failed. The action ran, so Invoke must return its
+// output (with an error the caller can match), never an empty Result that
+// reads as "never ran" and invites a duplicate.
+func TestExecuteAuditFailureKeepsTheOutput(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	anchor := &failingAnchor{Store: st}
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"), audit.WithAnchor(anchor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	nt := &notes{onInvoke: func() { anchor.armed = true }}
+	reg, err := connectors.NewRegistry(fake.NewCalendar(), fake.NewMail(), fake.NewDocs(), nt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := twins.Parse([]byte(testManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := gate.New(gate.Config{Manifest: m, Registry: reg, Approvals: approvals.NewQueue(st, log), Audit: log, Vault: vault.NewMemory(), Store: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := g.Invoke(context.Background(), gate.Call{Function: "notes.save_note", Args: map[string]any{"text": "hi"}, Origin: gate.P0, Taint: gate.Clean})
+	if err == nil {
+		t.Fatal("audit failure was not reported")
+	}
+	if !errors.Is(err, gate.ErrExecutedAuditFailed) {
+		t.Fatalf("error %v does not match ErrExecutedAuditFailed", err)
+	}
+	if errors.Is(err, gate.ErrDenied) {
+		t.Fatalf("an executed action reads as denied: %v", err)
+	}
+	if res.Output == nil {
+		t.Fatal("the executed action's output was dropped")
+	}
+	if len(nt.saved) != 1 {
+		t.Fatalf("saved %d notes, want 1", len(nt.saved))
 	}
 }

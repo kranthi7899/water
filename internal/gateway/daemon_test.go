@@ -48,7 +48,10 @@ auto_allowlist: [fake_mail.list_messages, fake_mail.draft_reply]
 // notes is a minimal S-level connector, so tests can exercise the
 // tainted-S-escalates-to-approval path (the fake_* connectors have no S
 // function).
-type notes struct{ saved []string }
+type notes struct {
+	saved    []string
+	onInvoke func() // optional: runs after the note is saved
+}
 
 func (*notes) Name() string                 { return "notes" }
 func (*notes) Credential() (string, string) { return "", "" }
@@ -64,6 +67,9 @@ func (n *notes) Invoke(_ context.Context, p permit.Permit) (json.RawMessage, err
 		return nil, err
 	}
 	n.saved = append(n.saved, call.Args["text"].(string))
+	if n.onInvoke != nil {
+		n.onInvoke()
+	}
 	return json.RawMessage(`{}`), nil
 }
 func (*notes) Normalize(string, json.RawMessage) ([]store.Record, error) { return nil, nil }
@@ -80,6 +86,7 @@ type slowAct struct {
 	mu            sync.Mutex
 	fail, normErr error
 	invokes       int
+	onInvoke      func() // optional: runs once the action has succeeded
 }
 
 func (s *slowAct) set(fail, normErr error) {
@@ -110,10 +117,14 @@ func (s *slowAct) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage,
 	}
 	s.mu.Lock()
 	s.invokes++
-	fail, normErr := s.fail, s.normErr
+	fail, normErr, onInvoke := s.fail, s.normErr, s.onInvoke
 	s.mu.Unlock()
 	if fail != nil {
 		return nil, fail
+	}
+	if onInvoke != nil {
+		onInvoke()
+		return json.RawMessage(`{"done":true}`), nil
 	}
 	if normErr != nil {
 		return json.RawMessage(`{"done":true}`), nil

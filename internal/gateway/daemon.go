@@ -176,7 +176,7 @@ func (d *Daemon) notifyApprovalRequired(env approvals.Envelope) {
 		return
 	}
 	s.emit(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: env.ID, Text: env.Action,
-		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash})
+		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash, ReadBack: approvals.ReadBack(env)})
 }
 
 func newID(prefix string) string {
@@ -191,6 +191,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.HandleFunc("GET /v1/health", d.handleHealth) // unauthenticated: a liveness probe only
 	mux.Handle("POST /v1/turns", d.auth(d.handleTurn))
 	mux.Handle("GET /v1/approvals", d.auth(d.handleListApprovals))
+	mux.Handle("GET /v1/approvals/{id}", d.auth(d.handleGetApproval))
 	mux.Handle("POST /v1/approvals/{id}/decision", d.auth(d.handleDecideApproval))
 	mux.Handle("GET /v1/state", d.auth(d.handleState))
 	mux.Handle("GET /v1/decisions", d.auth(d.handleListDecisions))
@@ -468,6 +469,10 @@ func (d *Daemon) TwinToolPolicy() *tools.Policy {
 // answers "queued" rather than running inline. An A-level call (or a tainted
 // S-level one) is queued for approval rather than executed, per the spec:
 // the model never runs an outward action inline.
+//
+// status is "ok" (output), "queued" (approval_id), "denied" (reason; nothing
+// ran) or "executed_with_error" (output and error: the action ran and only
+// its audit record or result indexing failed).
 func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	tok, ok := bearerToken(r)
 	if !ok {
@@ -505,7 +510,8 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, err := d.cfg.Gate.Invoke(r.Context(), gate.Call{Function: body.Function, Args: body.Args, Origin: ta.Origin, Taint: ta.Taint})
-	if err != nil {
+	if err != nil && res.Output == nil {
+		// Nothing ran: refused, or the connector call itself failed.
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 		return
 	}
@@ -513,6 +519,14 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	// event, a shared doc): every later call this session makes must be
 	// treated as tainted too, per escalateTaint's doc comment.
 	d.escalateTaint(res.Untrusted)
+	if err != nil {
+		// The action ran (a draft was created, a note saved) and only
+		// something after it failed: its audit record, or indexing its
+		// result. It must never read as "denied", which would invite the
+		// model to try it again.
+		writeJSON(w, http.StatusOK, map[string]any{"status": "executed_with_error", "output": res.Output, "error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
 }
 

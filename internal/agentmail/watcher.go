@@ -53,6 +53,13 @@ const (
 	DefaultMaxSignals = 20
 	defaultMailQuery  = "newer_than:1d"
 	stagedKeyPrefix   = "agentmail:staged:"
+
+	// StagedForwardTTL is how long a background-staged forward waits for the
+	// CEO's answer. Nobody is watching when it is staged (it lands at 02:00
+	// as easily as at noon), so the 15-minute interactive approvals.DefaultTTL
+	// would expire it unseen; this outlives a weekend. Claim still refuses it
+	// once it expires.
+	StagedForwardTTL = 72 * time.Hour
 )
 
 // Config configures a Watcher. Gate, Store, Vault, Approvals and Classifier
@@ -78,6 +85,10 @@ type Config struct {
 	SignalKey  string
 	MaxSignals int
 
+	// ForwardTTL is how long a staged forward envelope lives; zero means
+	// StagedForwardTTL.
+	ForwardTTL time.Duration
+
 	Now  func() time.Time
 	Logf func(format string, args ...any)
 }
@@ -94,6 +105,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxSignals <= 0 {
 		c.MaxSignals = DefaultMaxSignals
+	}
+	if c.ForwardTTL <= 0 {
+		c.ForwardTTL = StagedForwardTTL
 	}
 	if c.Now == nil {
 		c.Now = time.Now
@@ -248,10 +262,10 @@ func (w *Watcher) stageForward(ctx context.Context, m rawMessage) {
 		w.cfg.Logf("agentmail: a message with no id looks meant for the CEO; not staged")
 		return
 	}
-	if _, ok, err := w.cfg.Store.GetCursor(ctx, staged); err != nil || ok {
-		if err != nil {
-			w.cfg.Logf("agentmail: checking whether %q was staged: %v", m.ID, err)
-		}
+	if prev, ok, err := w.cfg.Store.GetCursor(ctx, staged); err != nil {
+		w.cfg.Logf("agentmail: checking whether %q was staged: %v", m.ID, err)
+		return
+	} else if ok && !w.lapsed(ctx, prev) {
 		return
 	}
 	body := fmt.Sprintf("Forwarded from the agent's own mailbox (addressed to it, not you) --\n\nFrom: %s\nSubject: %s\n\n%s",
@@ -259,6 +273,7 @@ func (w *Watcher) stageForward(ctx context.Context, m rawMessage) {
 	payload := map[string]any{"to": []string{w.cfg.ForwardTo}, "subject": "Fwd: " + m.Subject, "body": body}
 	env, err := w.cfg.Approvals.Propose(ctx, approvals.Envelope{
 		Action: "gmail.send_message", Recipient: w.cfg.ForwardTo, Payload: payload, Origin: string(gate.P1), Risk: "high",
+		ExpiresAt: w.cfg.Now().UTC().Add(w.cfg.ForwardTTL),
 	})
 	if err != nil {
 		w.cfg.Logf("agentmail: staging forward for %q: %v", m.ID, err)
@@ -268,4 +283,29 @@ func (w *Watcher) stageForward(ctx context.Context, m rawMessage) {
 		w.cfg.Logf("agentmail: recording staged forward for %q: %v", m.ID, err)
 	}
 	w.cfg.Logf("agentmail: staged forward %s for approval (%s)", env.ID, m.ID)
+}
+
+// lapsed reports whether the forward envelope a staged marker points at
+// expired unanswered (or is gone), so seeing its message again may stage it
+// afresh. Any other state (still waiting, approved, sent, or answered no)
+// keeps the marker: a no is final, and a live envelope must never get a
+// twin that invites sending the message twice. An unreadable envelope keeps
+// the marker too, erring toward not staging twice.
+func (w *Watcher) lapsed(ctx context.Context, envID string) bool {
+	env, err := w.cfg.Approvals.Get(ctx, envID)
+	if errors.Is(err, approvals.ErrNotFound) {
+		return true
+	}
+	if err != nil {
+		w.cfg.Logf("agentmail: reading staged forward %s: %v", envID, err)
+		return false
+	}
+	switch env.Status {
+	case approvals.Expired:
+		return true
+	case approvals.Pending, approvals.Approved:
+		// Past its expiry but not yet swept: it can never execute now.
+		return !w.cfg.Now().UTC().Before(env.ExpiresAt)
+	}
+	return false
 }

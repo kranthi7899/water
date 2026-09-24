@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"water/internal/agentmail"
 	"water/internal/approvals"
@@ -381,5 +382,62 @@ func TestWatcherTickNeverStagesTheSameMessageTwice(t *testing.T) {
 	}
 	if len(pending) != 1 {
 		t.Fatalf("pending forwards = %d, want 1", len(pending))
+	}
+}
+
+// A forward staged while nobody is watching must outlive the 15-minute
+// interactive approval TTL, and one that did expire unanswered is staged
+// afresh when its message is seen again, rather than lost for good behind
+// the staged marker. One the CEO declined is never staged again.
+func TestStagedForwardOutlivesTheInteractiveTTLAndIsRestagedAfterExpiry(t *testing.T) {
+	r := newRig(t)
+	r.connect(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 24, 2, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	r.q.Now = clock
+	r.mbox.output = rawOutput(t, "", map[string]any{"id": "m9", "from": "dana@acme.com", "subject": "Urgent", "body": "b"})
+	w := agentmail.NewWatcher(agentmail.Config{
+		Gate: r.g, Store: r.st, Vault: r.v, Approvals: r.q, Classifier: &fakeClassifier{verdict: decisions.Classification{NeedsDecision: true}},
+		Function: agentmail.ConnectorName + ".list_messages", ForwardTo: "ceo@real.example.com", Logf: r.logf, Now: clock,
+	})
+
+	w.Tick(ctx)
+	now = now.Add(approvals.DefaultTTL + time.Hour)
+	pending, err := r.q.Pending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending forwards %d after %s, want 1 (still waiting for the CEO)", len(pending), approvals.DefaultTTL+time.Hour)
+	}
+	first := pending[0].ID
+
+	// Seen again while still pending: not staged twice.
+	w.Tick(ctx)
+	if pending, _ = r.q.Pending(ctx); len(pending) != 1 {
+		t.Fatalf("pending forwards %d, want 1", len(pending))
+	}
+
+	// It expired unanswered; the message is seen again (a full resync).
+	now = now.Add(agentmail.StagedForwardTTL)
+	if pending, _ = r.q.Pending(ctx); len(pending) != 0 {
+		t.Fatalf("pending forwards %d after the staged TTL, want 0", len(pending))
+	}
+	w.Tick(ctx)
+	if pending, err = r.q.Pending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID == first {
+		t.Fatalf("pending after re-sighting = %+v, want one fresh forward", pending)
+	}
+
+	// Answered no: final, never re-staged.
+	if _, err := r.q.Decide(ctx, pending[0].ID, approvals.No); err != nil {
+		t.Fatal(err)
+	}
+	w.Tick(ctx)
+	if pending, _ = r.q.Pending(ctx); len(pending) != 0 {
+		t.Fatalf("a forward the CEO declined was staged again: %+v", pending)
 	}
 }

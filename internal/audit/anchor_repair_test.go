@@ -124,6 +124,116 @@ func TestRepairDropsOnlyATornFinalLine(t *testing.T) {
 	}
 }
 
+// anchoredLog writes n anchored entries and returns the path, the anchor and
+// the file's bytes.
+func anchoredLog(t *testing.T, n int) (string, *memAnchor, []byte) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	anchor := &memAnchor{}
+	l, err := Open(path, WithAnchor(anchor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		if _, err := l.Append(Record{Kind: KindCall, Function: "f", Allowed: true, Reason: "original"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l.Close()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path, anchor, b
+}
+
+func assertUnchanged(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("repair changed the log:\n got %q\nwant %q", got, want)
+	}
+	if m, _ := filepath.Glob(path + ".repair-dropped-*"); len(m) != 0 {
+		t.Fatalf("repair dropped a line it refused: %v", m)
+	}
+}
+
+// An edited (complete, valid JSON) final entry is tamper evidence, not a
+// torn write: Repair must refuse and leave the file byte-for-byte as it was.
+func TestRepairRefusesAnEditedFinalEntry(t *testing.T) {
+	path, anchor, _ := anchoredLog(t, 3)
+	b, _ := os.ReadFile(path)
+	if strings.Count(string(b), `"reason":"original"`) != 3 {
+		t.Fatalf("unexpected log shape: %s", b)
+	}
+	// Edit only the last line.
+	i := strings.LastIndex(string(b), `"reason":"original"`)
+	edited := []byte(string(b[:i]) + `"reason":"edited"` + string(b[i+len(`"reason":"original"`):]))
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Repair(path, WithAnchor(anchor)); err == nil {
+		t.Fatal("repair accepted an edited final entry")
+	}
+	assertUnchanged(t, path, edited)
+	if err := Repair(path); err == nil {
+		t.Fatal("repair without an anchor accepted an edited final entry")
+	}
+	assertUnchanged(t, path, edited)
+}
+
+// A garbled final line the anchor already covers was a complete entry once:
+// dropping it would leave the log behind its anchor and the evidence gone.
+func TestRepairRefusesToDropAnAnchoredLine(t *testing.T) {
+	path, anchor, _ := anchoredLog(t, 3)
+	lines, err := readLines(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines[2] = lines[2][:len(lines[2])/2] // looks torn, but seq 3 is anchored
+	if err := truncateToLines(path, lines); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	if err := Repair(path, WithAnchor(anchor)); err == nil {
+		t.Fatal("repair dropped an anchored line")
+	}
+	assertUnchanged(t, path, before)
+}
+
+// A real torn write under an anchor still repairs, and keeps the dropped
+// bytes next to the log.
+func TestRepairWithAnAnchorDropsATornLineAndKeepsIt(t *testing.T) {
+	path, anchor, _ := anchoredLog(t, 2)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	torn := `{"seq":3,"kind":"call","prev_hash":"x"`
+	f.WriteString(torn)
+	f.Close()
+	if err := Repair(path, WithAnchor(anchor)); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if n, err := Verify(path); err != nil || n != 3 || anchor.seq != 3 {
+		t.Fatalf("post-repair verify=%d %v anchor=%+v", n, err, anchor)
+	}
+	m, _ := filepath.Glob(path + ".repair-dropped-*")
+	if len(m) != 1 {
+		t.Fatalf("dropped-line files = %v, want 1", m)
+	}
+	b, _ := os.ReadFile(m[0])
+	if strings.TrimSpace(string(b)) != torn {
+		t.Fatalf("kept %q, want %q", b, torn)
+	}
+	if st, _ := os.Stat(m[0]); st.Mode().Perm() != 0o600 {
+		t.Fatalf("dropped-line file mode %v", st.Mode().Perm())
+	}
+}
+
 func TestRepairRefusesAnEarlierBreak(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	l, err := Open(path)

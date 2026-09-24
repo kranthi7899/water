@@ -31,15 +31,37 @@ import (
 // 200 with that current envelope and Error set; a store or audit failure is
 // a 500.
 type DecisionResult struct {
-	Envelope approvals.Envelope `json:"envelope"`
-	Answer   string             `json:"answer,omitempty"`
-	Executed bool               `json:"executed"`
-	Output   json.RawMessage    `json:"output,omitempty"`
-	Error    string             `json:"error,omitempty"`
+	Envelope ApprovalView    `json:"envelope"`
+	Answer   string          `json:"answer,omitempty"`
+	Executed bool            `json:"executed"`
+	Output   json.RawMessage `json:"output,omitempty"`
+	Error    string          `json:"error,omitempty"`
 	// OutcomeUnknown means the action may have happened (e.g. a send whose
 	// response was lost): check before asking for it again, never assume
 	// it failed.
 	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
+}
+
+// ApprovalView is an approval envelope as the daemon API returns it (GET
+// /v1/approvals, GET /v1/approvals/{id}, and DecisionResult.envelope): the
+// envelope's own snake_case fields (id, action, recipient, payload,
+// evidence_refs, risk, origin, expires_at, payload_hash, status, reason,
+// created_at) plus two code-built strings. read_back is approvals.ReadBack:
+// the exact text to speak or show before a yes/no, built from the same
+// payload payload_hash binds, so no client and no model ever composes it.
+// summary is the shorter list form. To decide, POST
+// /v1/approvals/{id}/decision with {"payload_hash": ..., "reply": ...}.
+type ApprovalView struct {
+	approvals.Envelope
+	ReadBack string `json:"read_back"`
+	Summary  string `json:"summary"`
+}
+
+func viewOf(e approvals.Envelope) ApprovalView {
+	if e.ID == "" {
+		return ApprovalView{Envelope: e}
+	}
+	return ApprovalView{Envelope: e, ReadBack: approvals.ReadBack(e), Summary: approvals.Summary(e)}
 }
 
 // handleTurn streams one turn as NDJSON: ack, delta*, sentence*,
@@ -54,8 +76,9 @@ type DecisionResult struct {
 // approval_required is best-effort and covers only approvals queued by this
 // turn's own model tool calls while its model call is running (one model
 // turn runs at a time; a turn waiting for its slot is not announced another
-// turn's approvals). It carries approval_id, action, risk and payload_hash,
-// enough to decide it. Approvals from anywhere else — POST
+// turn's approvals). It carries approval_id, action, risk, payload_hash and
+// read_back (the code-built text to speak or show), enough to decide it;
+// GET /v1/approvals/{id} returns the full ApprovalView. Approvals from anywhere else — POST
 // /v1/decisions/{id}/email, the agent-mail watcher, a call that lands after
 // the stream closed — appear only in GET /v1/approvals, so a client should
 // refresh that list on done rather than rely on this event alone.
@@ -172,7 +195,31 @@ func (d *Daemon) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, envs)
+	out := make([]ApprovalView, len(envs))
+	for i, e := range envs {
+		out[i] = viewOf(e)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGetApproval answers one envelope, in any status, as an ApprovalView:
+// what a client fetches after an approval_required event (or a stale-hash
+// 409) to show or speak its read_back before deciding.
+func (d *Daemon) handleGetApproval(w http.ResponseWriter, r *http.Request) {
+	if err := d.cfg.Approvals.ExpireStale(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	e, err := d.cfg.Approvals.Get(r.Context(), r.PathValue("id"))
+	if errors.Is(err, approvals.ErrNotFound) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, viewOf(e))
 }
 
 // handleDecideApproval requires the payload hash the client was shown, and
@@ -207,11 +254,11 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		}
 		// Not pending any more, expired, or another decider won the race:
 		// this answer was not applied, and the envelope shows what did.
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: e, Answer: answer.String(), Error: err.Error()})
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(e), Answer: answer.String(), Error: err.Error()})
 		return
 	}
 	if e.Status != approvals.Approved {
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: e, Answer: answer.String()})
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(e), Answer: answer.String()})
 		return
 	}
 	// Approved: run it now, exactly once. Origin comes from the envelope
@@ -246,11 +293,11 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		// Output set means the action ran and only indexing its result
 		// failed; either that or an unknown outcome must never read as
 		// "not executed", which would invite a second, duplicate request.
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Answer: answer.String(), Executed: res.Output != nil, Output: res.Output,
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(latest), Answer: answer.String(), Executed: res.Output != nil, Output: res.Output,
 			Error: ierr.Error(), OutcomeUnknown: errors.Is(ierr, gapi.ErrSendOutcomeUnknown)})
 		return
 	}
-	writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Answer: answer.String(), Executed: true, Output: res.Output})
+	writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(latest), Answer: answer.String(), Executed: true, Output: res.Output})
 }
 
 // approvedExecTimeout bounds one approved action's execution, which runs

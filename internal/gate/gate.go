@@ -81,6 +81,12 @@ type Result struct {
 
 var ErrDenied = errors.New("denied by gate")
 
+// ErrExecutedAuditFailed marks an Invoke error returned after the connector
+// call already succeeded, when only the execute audit record could not be
+// written. The action ran (mail sent, event created): the Result's Output is
+// set, and the caller must report it as executed, never as refused.
+var ErrExecutedAuditFailed = errors.New("executed but the audit record failed")
+
 // DenyError carries the reason a call was refused.
 type DenyError struct{ Reason string }
 
@@ -182,6 +188,11 @@ func (g *Gate) record(r audit.Record) error {
 }
 
 // Invoke authorizes and, if allowed, executes one call.
+//
+// A non-nil error with a non-nil Result.Output means the action ran and
+// something after it failed (the execute audit record, normalizing or
+// storing its result); only an error with a nil Output means it did not run.
+// ErrExecutedAuditFailed marks the audit case.
 func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 	if c.Args == nil {
 		c.Args = map[string]any{}
@@ -264,11 +275,13 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 		}
 		return Result{}, fmt.Errorf("%s: %w", c.Function, ierr)
 	}
-	if err := rec(audit.KindExecute, true, "ok"); err != nil {
-		return Result{}, err
-	}
-
+	// From here on the action has happened: every error return keeps res,
+	// so a caller can tell "ran, then something failed" (Output set) from
+	// "never ran" (Output nil) and never invites a duplicate.
 	res := Result{Output: raw, Untrusted: spec.External, Draft: level == twins.D}
+	if err := rec(audit.KindExecute, true, "ok"); err != nil {
+		return res, fmt.Errorf("%s: %w: %w", c.Function, ErrExecutedAuditFailed, err)
+	}
 	res.Records, err = conn.Normalize(short, raw)
 	if err != nil {
 		return res, fmt.Errorf("%s: normalize: %w", c.Function, err)

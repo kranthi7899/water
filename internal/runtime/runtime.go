@@ -60,8 +60,10 @@ const (
 // An approval_required event carries everything a client needs to show and
 // decide the queued call without a second request: ApprovalID, Action (also
 // repeated in Text for older clients), Risk and PayloadHash, which POST
-// /v1/approvals/{id}/decision requires. It is best-effort; see the gateway's
-// handleTurn doc comment for exactly which approvals are announced inline.
+// /v1/approvals/{id}/decision requires, plus ReadBack: the code-built text
+// (approvals.ReadBack) to speak or show before asking yes or no, never
+// composed by a model. It is best-effort; see the gateway's handleTurn doc
+// comment for exactly which approvals are announced inline.
 type Event struct {
 	Kind        EventKind `json:"kind"`
 	Text        string    `json:"text,omitempty"`
@@ -69,6 +71,7 @@ type Event struct {
 	Action      string    `json:"action,omitempty"`
 	Risk        string    `json:"risk,omitempty"`
 	PayloadHash string    `json:"payload_hash,omitempty"`
+	ReadBack    string    `json:"read_back,omitempty"`
 	Error       string    `json:"error,omitempty"`
 }
 

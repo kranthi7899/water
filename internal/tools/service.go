@@ -123,10 +123,11 @@ func (s *Service) recordEvent(ev Event, result string, err error) {
 
 // twinInvokeResponse is what the daemon's POST /v1/tools/invoke returns.
 type twinInvokeResponse struct {
-	Status     string          `json:"status"` // ok | queued | denied
+	Status     string          `json:"status"` // ok | queued | denied | executed_with_error
 	Output     json.RawMessage `json:"output,omitempty"`
 	ApprovalID string          `json:"approval_id,omitempty"`
 	Reason     string          `json:"reason,omitempty"`
+	Error      string          `json:"error,omitempty"` // executed_with_error only
 }
 
 // callTwin proxies one model-initiated connector call to the daemon's gate
@@ -159,6 +160,10 @@ func (s *Service) callTwin(ctx context.Context, tool string, args map[string]any
 		return string(out.Output), nil
 	case "queued":
 		return fmt.Sprintf("queued for approval %s", out.ApprovalID), nil
+	case "executed_with_error":
+		// The action ran; only its audit record or indexing failed. Tell
+		// the model it happened so it does not try it again.
+		return fmt.Sprintf("executed (do not retry); follow-up error: %s\n%s", out.Error, out.Output), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrDenied, out.Reason)
 	}
