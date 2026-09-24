@@ -176,3 +176,38 @@ Right now `water daemon` only does anything while the Mac is awake (macOS suspen
   - **Touched only:** `internal/connectors/google/gmail/gmail.go`+test, `internal/approvals/readback.go`+test, `internal/config/config.go`+test (one new field, `agent.signature_name`), `twins/ceo/twin.yaml` (`gmail.draft_for_review`, level D, same rate cap as `draft_message`).
   - **Tests, this addition:** `internal/connectors/google/gmail` gained `TestDraftForReviewCreatesDraftWithNoAgentFromOrSignature`, `TestSignatureOnSendMessageOnlyNotDraftForReview`, `TestSignatureRespectsConfiguredNameAndFallback`, `TestSendMessageAppendsSignatureToHTMLPartToo`, plus `draft_for_review` schema/declaration cases; `TestSendMessageSendsExactlyOnceAndNormalizesAsOwnContent`'s body assertion was updated to expect the signature. `internal/approvals` gained a `draft_for_review` case in `TestReadBackSendMessageAndDraftMessage`. `internal/config`'s existing `TestEveryKeyRoundTrips` covers `agent.signature_name` automatically (it iterates every key in `Keys()`).
   - **Gates run:** `go vet ./...`, `go test -count=1 -race ./...` (all packages green), `CGO_ENABLED=0 go build ./cmd/water`, `gofmt -l` clean on every touched file.
+- 2026-09-24: **Slice E built on branch `slice-e`: twin-to-twin messaging.** This CEO twin can now exchange messages with a different twin's daemon. The full spec is in `docs/slices/E.md`. The branch was built separately from `feat/ceo-twin`, so the status line above was left alone and this entry is the only change to this file.
+  - **New package `internal/twinlink`.**
+    - The envelope has the spec's fields plus `in_reply_to`, which a response needs to name the request it answers.
+    - The id is content-derived and includes the sender, so a retried delivery is a duplicate, not a second message.
+    - `Deliver` makes exactly one attempt over the peer daemon's Unix socket. An unreachable socket is a definite "nothing was sent", a 4xx is a definite refusal, and a broken connection, a 5xx or a bad ack is `ErrOutcomeUnknown`.
+    - Two connectors: `twinlink.send_message` (level A) and `twininbox.list_messages` (level R, `External`).
+    - The peer table (socket and token for each peer) is one vault secret, `water.twinlink/<own twin id>`.
+    - New migration `0008_twin_messages.sql`. Its CHECK pins `external = (direction = 'in')`, and a partial unique index allows one response per request per direction.
+  - **The existing trust model, not a new one.**
+    - Outbound goes through `gate.Invoke` with an envelope from the existing approval queue. `approvals.ReadBack` has a `twinlink.send_message` case, keyed on the full action id so it is never read back as `gmail`'s `send_message`.
+    - Inbound is untrusted unconditionally. `handleTwinReceive` calls `escalateTaint(true)` first, then validates, audits (new audit kind `receive`) and stores the message as external. It never proposes an approval, calls a model or runs anything.
+    - The model reads received messages only through the gate. The result is `Untrusted`, so the session taints, the same as reading an email.
+  - **Routes.**
+    - `POST /v1/twinlink/messages` accepts only a peer token: a `clients.json` entry named `twin:<id>`, where the id must equal `from_twin`.
+    - `GET /v1/twinlink/messages` lists stored messages, and `POST /v1/twinlink/outbox` only proposes an envelope.
+    - CLI: `water twin peer add|list|remove`, `water twin send|reply|inbox`, and a new global `--twin <id>`/`WATER_TWIN`.
+    - New minimal second twin: `twins/counterparty/`.
+  - **Judgment calls touching existing invariants. Each is a tightening; please review.**
+    - `gateway.auth()` now refuses (403) any client token whose name starts with `twin:`. No existing token has that prefix.
+    - The Google refresher starts only when the manifest grants `gcal.list_events`. The real `ceo` and `ceo-demo` twins both grant it, so their behavior is unchanged.
+    - The receive handler writes its audit record before the store write, the same order the gate uses.
+    - `twinlink.send_message` is added to the real `twins/ceo/twin.yaml` at level A. `ceo-demo` was left unchanged.
+  - **Demo result.** `TestScenarioEBudgetQuestionBetweenTwoTwins` passes. Two complete daemons, each built from its own real manifest, with separate homes and real Unix sockets, run the whole exchange:
+    - The CEO twin stages the budget question and the CEO approves it. It is delivered once.
+    - The counterparty stores it as untrusted, with zero approvals, zero model calls, and its session tainted.
+    - The counterparty's human approves the reply.
+    - The CEO twin receives the reply as untrusted, with zero approvals, zero model calls, and its session tainted.
+    - A second reply is refused at the sender. A second response forced at the socket gets a 409.
+    - Both audit chains verify.
+  - **Not done.**
+    - No run with two real `water daemon` processes. The `ceo` twin's refresher would call real Google, and the peer tables live in the real Keychain, so the scenario runs in-process over real sockets instead.
+    - Inbound messages are not in the brief or `StateSummary`, and there is no arrival notification.
+    - No network (cross-machine) transport.
+    - `clients.json` still needs a daemon restart after minting a peer token.
+  - **Gates run:** `go vet ./...`, `go test -count=1 -race ./...` (all packages green), `CGO_ENABLED=0 go build ./cmd/water`, `gofmt -l` clean.
