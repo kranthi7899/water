@@ -1,0 +1,25 @@
+id: mail.latest_from
+description: The latest email from a specific person
+function: store.latest_from
+slots:
+  who: {type: person, required: true}
+templates:
+  - "what's the latest email from {who}"
+  - "show me the last email from {who}"
+  - "what did {who} send me"
+  - "latest [message] from {who}"
+  - "latest from {who} [please]"
+  - "what's the newest email from {who}"
+  - "show me the latest message from {who}"
+  - "any recent email from {who}"
+  - "pull up the latest email from {who}"
+examples:
+  - "latest message from priya"
+  - "pull up the latest email from jordan"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "latest message from priya", intent: mail.latest_from, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "pull up the latest email from jordan", intent: mail.latest_from, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "any recent email from alex", intent: none}
+  - {utterance: "who directed that new documentary", intent: none}

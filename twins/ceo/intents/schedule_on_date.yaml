@@ -1,0 +1,39 @@
+id: schedule.on_date
+description: Events on a given day
+function: store.calendar_events
+slots:
+  when: {type: daterange, default: today}
+templates:
+  - "(what's|what is|what have i got) on [my] (calendar|schedule) [for] {when}"
+  - "what am i doing {when}"
+  - "do i have (any|anything) [meetings] {when}"
+  - "(show me|give me) [my] (schedule|calendar|agenda) [for] {when}"
+  - "what's (happening|going on) [on] {when}"
+  - "any meetings {when}"
+  - "what meetings do i have {when}"
+  - "what's on [my] (calendar|schedule)"
+examples:
+  - "what am I doing tuesday"
+  - "give me my agenda for wednesday"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "what am i doing tuesday", intent: schedule.on_date, slots: {when: tuesday}}
+  - {utterance: "give me my agenda for wednesday", intent: schedule.on_date, slots: {when: wednesday}}
+  - {utterance: "what meetings do i have monday", intent: schedule.on_date, slots: {when: monday}}
+  - {utterance: "what's on my calendar", intent: schedule.on_date}
+  - {utterance: "could you set up a call with the ops team", intent: none}
+  - {utterance: "add a calendar invite for the whole team offsite", intent: none}
+
+---
+Templates deliberately do not cover every phrasing in
+internal/nervous/eval/testdata/ceo_eval.yaml — that set is held out on
+purpose (see docs/slices/R.md Risks item 19), so some of its positive
+schedule.on_date cases are expected to escalate rather than hit Tier 0
+today. The eval's hit-rate acceptance criterion is about the aggregate
+across all 12 intents, not 100% coverage of any one intent's paraphrases.
+This file's own examples/tests utterances are deliberately DIFFERENT from
+anything in ceo_eval.yaml (verified by TestEvalNoLeak), including for the
+5 canonical legacy near-miss phrases: those are covered directly, as
+hardcoded Go strings, by TestLegacyFastPathCases instead of being
+duplicated here.

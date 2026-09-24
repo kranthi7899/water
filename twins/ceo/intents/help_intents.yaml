@@ -1,0 +1,29 @@
+id: help.intents
+description: What quick questions can be answered instantly
+function: help.intents
+templates:
+  - "what can you do"
+  - "what can i ask you"
+  - "help"
+  - "what commands do you support"
+  - "list what you can help with"
+  - "what things can you answer quickly"
+  - "show me what you can do"
+  - "what are you able to help with"
+  - "give me a list of things you can do"
+  - "what can water do"
+  - "help me understand what you can answer"
+  - "what's in your toolkit"
+  - "what kinds of things can you handle"
+  - "list your capabilities"
+  - "what options do i have with you"
+examples:
+  - "what kinds of things can you handle"
+  - "list your capabilities"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "what kinds of things can you handle", intent: help.intents}
+  - {utterance: "list your capabilities", intent: help.intents}
+  - {utterance: "what options do i have with you", intent: help.intents}
+  - {utterance: "what's the tide schedule tomorrow", intent: none}

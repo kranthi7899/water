@@ -1,0 +1,34 @@
+id: approvals.respond
+description: Answer yes or no to the one pending approval
+function: approvals.bind_pending
+requires_pending_approval: true
+templates:
+  - "yes"
+  - "no"
+  - "yeah"
+  - "nope"
+  - "yes approve it"
+  - "go ahead approve it"
+  - "no reject that"
+  - "approve it"
+  - "deny it"
+  - "yes that's fine"
+  - "no skip that"
+  - "yeah go ahead"
+  - "nope skip it"
+  - "sure approve that"
+  - "approved"
+  - "denied"
+examples:
+  - "yeah"
+  - "nope"
+  - "approved"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "yeah", intent: approvals.respond, pending: 1}
+  - {utterance: "nope", intent: approvals.respond, pending: 1}
+  - {utterance: "approved", intent: approvals.respond, pending: 1}
+  - {utterance: "denied", intent: approvals.respond, pending: 1}
+  - {utterance: "yeah", intent: none, pending: 0}
+  - {utterance: "nope", intent: none, pending: 0}

@@ -1,0 +1,26 @@
+id: schedule.free_time
+description: Gaps in the calendar on a given day
+function: store.free_slots
+slots:
+  when: {type: date, default: today}
+  part: {type: part_of_day}
+templates:
+  - "when am i <free_word> {when}"
+  - "am i <free_word> [this] {part}"
+  - "am i <free_word> {when} {part}"
+  - "do i have (any|a) <free_word> time {when}"
+  - "what's [my] <free_word> time {when}"
+  - "when do i have a gap {when}"
+  - "any <free_word> slots [this] {part}"
+  - "any <free_word> slots {when}"
+  - "what gaps do i have {when}"
+examples:
+  - "am I open monday morning"
+  - "what's my free time friday"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "am i open monday morning", intent: schedule.free_time, slots: {when: monday, part: morning}}
+  - {utterance: "what's my free time friday", intent: schedule.free_time, slots: {when: friday}}
+  - {utterance: "when do i have a gap tomorrow", intent: schedule.free_time, slots: {when: tomorrow}}
+  - {utterance: "what's the latest gadget release", intent: none}

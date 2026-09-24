@@ -1,0 +1,29 @@
+id: approvals.list
+description: What is pending approval
+function: approvals.pending
+templates:
+  - "any pending approvals"
+  - "what needs my approval"
+  - "what's waiting for my approval"
+  - "show me pending approvals"
+  - "what do i need to approve"
+  - "anything waiting on me to approve"
+  - "what's in my approval queue"
+  - "list [my] pending approvals"
+  - "what approvals are outstanding"
+  - "do i have anything to approve"
+  - "what's pending approval [right now]"
+  - "show me what needs approving"
+  - "any approvals waiting"
+  - "anything for me to sign off on"
+  - "what's stuck in my approval queue"
+examples:
+  - "anything for me to sign off on"
+  - "what's stuck in my approval queue"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "anything for me to sign off on", intent: approvals.list}
+  - {utterance: "what's stuck in my approval queue", intent: approvals.list}
+  - {utterance: "list pending approvals", intent: approvals.list}
+  - {utterance: "what's the fastest way to learn spanish", intent: none}

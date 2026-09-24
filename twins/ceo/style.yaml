@@ -6,10 +6,57 @@ prompt_block: >
   Answer in a calm, brief, plain voice. Facts first. No filler, no
   apologies, no hedging. Never say "As an AI" or similar. On voice, avoid
   markdown and long lists.
-# Filled in by task R-9 once the read and write intents exist: one entry
-# per intent id, each with header/item/empty/more templates that echo the
-# resolved slots (see docs/slices/R.md's Design §8.2).
-responses: {}
+# One entry per intent id (write intents are added in a later task, R-20).
+# header/empty are required; item/more are optional and only used when a
+# result has Items. {key} substitutes against Result.Facts (for
+# header/empty) or each Item map (for item) — a plain string replace, not
+# text/template, so external text containing literal braces is inert.
+responses:
+  schedule.on_date:
+    header: "{when_spoken}:"
+    item: "{time} {title}"
+    empty: "Nothing on your calendar {when_spoken}."
+  schedule.next_event:
+    header: "Your next event:"
+    item: "{time} {title}"
+    empty: "Nothing coming up."
+  schedule.free_time:
+    header: "Free time {when_spoken}:"
+    item: "{from}-{to}"
+    empty: "No free time {when_spoken}."
+  mail.latest:
+    header: "Latest {n} email(s):"
+    item: "{from}: {subject}"
+    empty: "No recent email."
+  mail.unread_count:
+    header: "Unread mail:"
+    empty: "I don't track read/unread state yet."
+  mail.latest_from:
+    header: "Latest from {who_spoken}:"
+    item: "{subject} ({at})"
+    empty: "Nothing from {who_spoken}."
+  brief.today:
+    header: "Today's brief:"
+    empty: "No brief cached yet."
+  approvals.list:
+    header: "Pending approvals ({count}):"
+    item: "{action} [{risk}]"
+    empty: "Nothing is waiting for approval."
+  approvals.respond:
+    header: "Approval:"
+    empty: "Nothing is waiting for approval."
+  control.stop:
+    header: "Cancelled {n} task(s)."
+    empty: "Nothing to cancel."
+  status.overview:
+    header: "Status:"
+    item: "{connector}: last synced {last_sync}"
+    empty: "No status available."
+  help.intents:
+    header: "I can help with:"
+    item: "{id}: {description}"
+    empty: "Nothing registered yet."
+    more: "and {n} more"
 voice:
   name: Water
   tone: "Calm, brief, plain. Facts first. No filler, no apologies, no hedging."

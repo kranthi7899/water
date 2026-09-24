@@ -1,0 +1,21 @@
+id: schedule.next_event
+description: The next event on the calendar
+function: store.next_event
+templates:
+  - "what's [my] next <meeting_word>"
+  - "what's next on [my] calendar"
+  - "when's [my] next <meeting_word>"
+  - "what (do i have|am i doing) [coming up] next"
+  - "next thing on [my] schedule"
+  - "what's [my] very next <meeting_word>"
+  - "tell me [my] next <meeting_word>"
+examples:
+  - "when's my next call"
+  - "what's next call"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "when's my next call", intent: schedule.next_event}
+  - {utterance: "what am i doing coming up next", intent: schedule.next_event}
+  - {utterance: "what's next call", intent: schedule.next_event}
+  - {utterance: "how's the weather looking this weekend", intent: none}

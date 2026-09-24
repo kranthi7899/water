@@ -1,0 +1,117 @@
+rules:
+  meeting_word: "(meeting|call|event)"
+  free_word: "(free|open|available)"
+
+# Only true filler words belong here: a skip word is dropped from the
+# UTTERANCE before matching, but template literals are never skip-filtered
+# at compile time, so a template that legitimately needs a word like "you"
+# or "could" (most do) would never match again if that word were listed
+# here. Keep this list to words no template ever needs as a literal.
+skip_words: [please, hey, water, um, uh, just, quickly, kindly]
+
+# deny_words is the old internal/runtime/fastpath.go's fastPathActionWords
+# list, carried forward as defense in depth: a match is rejected if the
+# utterance contains one of these and the matched template did not consume
+# it as a literal (so control.stop's own "cancel" literal, or a write
+# intent's "move"/"book"/"reply"/"send", are exempted for those intents).
+deny_words:
+  - reschedule
+  - cancel
+  - move
+  - book
+  - draft
+  - reply
+  - send
+  - write
+  - rewrite
+  - summarize
+  - summarise
+  - approve
+  - deny
+  - reject
+  - decline
+  - forward
+  - delete
+  - remove
+  - create
+  - add
+  - invite
+  - prepare
+  - email
+  - update
+  - change
+  - edit
+  - accept
+  - push
+  - shift
+
+# escalate_words force a turn straight to the main path even if a template
+# would otherwise match: reasoning, judgment and multi-step language work
+# that the sous chef never attempts. See docs/slices/R.md Design §6.
+escalate_words:
+  - should
+  - shouldn't
+  - why
+  - because
+  - prioritize
+  - prioritise
+  - priority
+  - priorities
+  - important
+  - importance
+  - matters
+  - matter
+  - compare
+  - comparison
+  - versus
+  - vs
+  - better
+  - best
+  - worse
+  - worst
+  - summarize
+  - summarise
+  - summary
+  - plan
+  - planning
+  - recommend
+  - recommendation
+  - suggest
+  - advice
+  - advise
+  - think
+  - opinion
+  - draft
+  - write
+  - compose
+  - prepare
+  - explain
+  - analyze
+  - analyse
+  - decide
+  - worth
+  - ought
+  - rank
+  - strategy
+  - "which is better"
+  - don't
+  - dont
+  - not
+  - never
+  - unless
+  - except
+  - instead
+  - without
+
+clause_joiners:
+  - "and then"
+  - "and also"
+  - "after that"
+  - "as well as"
+  - "then also"
+
+corrections:
+  - "that's wrong"
+  - "not that"
+  - "i meant"
+  - "no i said"

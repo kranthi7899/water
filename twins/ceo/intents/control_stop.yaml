@@ -1,0 +1,39 @@
+id: control.stop
+description: Cancel other in-flight turns
+function: control.cancel_tasks
+templates:
+  - "stop"
+  - "cancel"
+  - "forget it"
+  - "cancel that"
+  - "stop that"
+  - "cancel this"
+  - "abort"
+  - "stop it"
+  - "forget that"
+  - "cancel everything"
+  - "quit"
+  - "drop it"
+examples:
+  - "quit"
+  - "drop it"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "quit", intent: control.stop}
+  - {utterance: "drop it", intent: control.stop}
+  - {utterance: "never do this again", intent: none}
+  - {utterance: "could you set up a call with alex next week instead", intent: none}
+
+---
+"never mind" / "nevermind" are deliberately NOT Tier 0 templates here,
+though the owner's original spec named them alongside "stop"/"cancel"/
+"forget it". "never" is in _shared.yaml's escalate_words (it needs to
+catch reasoning negation like "I should never do X"), and the pre-tier
+eligibility check (docs/slices/R.md Design §6, built in a later task)
+tests escalate_words against the raw utterance's tokens, not just what a
+matched template consumed — so "never mind" would always be sent straight
+to the main path regardless of whether it appears here as a template.
+The main path still handles it correctly, just without Tier 0's
+sub-millisecond latency. Flagged in docs/slices/R.md; not treated as a
+missing feature.
