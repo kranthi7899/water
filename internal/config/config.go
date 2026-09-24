@@ -81,6 +81,14 @@ type AgentConfig struct {
 	// Empty means such mail is logged but never staged, since there is
 	// nowhere configured to send it.
 	ForwardTo string `yaml:"forward_to"`
+	// SignatureName is the CEO's name, used in the disclosure line
+	// gmail.send_message/draft_message append to mail sent under the agent's
+	// identity (e.g. "Sent by Water, an AI assistant, on behalf of Alex —
+	// approved before sending."). Empty by default (twins/ceo/role.md's
+	// environment section is still a placeholder, so there is no real name to
+	// read yet); an empty value omits the "on behalf of" clause entirely
+	// rather than inventing a placeholder name.
+	SignatureName string `yaml:"signature_name"`
 }
 
 // OnboardConfig records the last verified round trip.
@@ -152,6 +160,7 @@ func defaults() map[string]string {
 		"meetings.proactive_cues":    "false",
 		"agent.mail_address":         "",
 		"agent.forward_to":           "",
+		"agent.signature_name":       "",
 	}
 }
 
@@ -270,6 +279,7 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Meetings.ProactiveCues = abool("meetings.proactive_cues")
 	r.Agent.MailAddress = flat["agent.mail_address"]
 	r.Agent.ForwardTo = flat["agent.forward_to"]
+	r.Agent.SignatureName = flat["agent.signature_name"]
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -307,6 +317,7 @@ func (r *Resolved) Flat() map[string]string {
 		"meetings.proactive_cues":    strconv.FormatBool(r.Meetings.ProactiveCues),
 		"agent.mail_address":         r.Agent.MailAddress,
 		"agent.forward_to":           r.Agent.ForwardTo,
+		"agent.signature_name":       r.Agent.SignatureName,
 	}
 }
 

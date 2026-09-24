@@ -51,9 +51,13 @@ var ErrHistoryTooOld = errors.New("gmail: history too old, full resync needed")
 // as" alias (config's agent.mail_address): draft_message/send_message
 // always set MIME From: to this address, never the primary account's own,
 // and never anything an args map supplies (there is no "from" argument).
+// signatureName is config's agent.signature_name (the CEO's name, or ""):
+// it only affects the disclosure line appended to mail actually sent under
+// the agent's identity (see appendSignature), never draft_for_review.
 type Gmail struct {
-	opts        *gapi.Options
-	mailAddress string
+	opts          *gapi.Options
+	mailAddress   string
+	signatureName string
 }
 
 func New(mailAddress string) *Gmail { return &Gmail{mailAddress: mailAddress} }
@@ -61,6 +65,15 @@ func New(mailAddress string) *Gmail { return &Gmail{mailAddress: mailAddress} }
 // NewWithOptions builds a Gmail connector against test doubles.
 func NewWithOptions(mailAddress string, o *gapi.Options) *Gmail {
 	return &Gmail{mailAddress: mailAddress, opts: o}
+}
+
+// SetSignatureName sets the name used in the disclosure line appended to
+// mail sent under the agent's identity (config's agent.signature_name), and
+// returns g so it can be chained onto New/NewWithOptions. Left unset (""),
+// the line omits the name clause rather than inventing a placeholder.
+func (g *Gmail) SetSignatureName(name string) *Gmail {
+	g.signatureName = name
+	return g
 }
 
 func (*Gmail) Name() string                 { return connName }
@@ -106,6 +119,14 @@ func (*Gmail) Functions() []connectors.Function {
 			Description: "Send a Gmail message from the agent alias. This has an external effect and cannot be undone.",
 			Level:       twins.A,
 			Risk:        connectors.RiskHigh,
+			External:    false,
+			Schema:      writeMessageSchema,
+		},
+		{
+			Name:        "draft_for_review",
+			Description: "Create a Gmail draft in the CEO's own account, from the CEO's own address, for the CEO to review and send personally. Never uses the agent alias. Nothing is sent.",
+			Level:       twins.D,
+			Risk:        connectors.RiskLow,
 			External:    false,
 			Schema:      writeMessageSchema,
 		},
@@ -194,6 +215,8 @@ func (g *Gmail) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, e
 		return g.draftMessage(ctx, cl, v.Args)
 	case "send_message":
 		return g.sendMessage(ctx, cl, v.Args)
+	case "draft_for_review":
+		return g.draftForReview(ctx, cl, v.Args)
 	}
 	return nil, fmt.Errorf("gmail: unknown function %q", v.Function)
 }
@@ -454,6 +477,7 @@ func (g *Gmail) draftMessage(ctx context.Context, cl *gapi.Client, args map[stri
 	if err != nil {
 		return nil, err
 	}
+	body, html = appendSignature(body, html, g.signatureName)
 	raw, err := buildRawMessage(g.mailAddress, to, subject, body, html)
 	if err != nil {
 		return nil, err
@@ -472,6 +496,40 @@ func (g *Gmail) draftMessage(ctx context.Context, cl *gapi.Client, args map[stri
 	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, From: g.mailAddress, To: to, Subject: subject, Body: body})
 }
 
+// draftForReview serves the "draft into your own account, as yourself" mode:
+// content the agent wrote, landing in the CEO's OWN Gmail drafts, from the
+// CEO's OWN real address, so hitting send on it is indistinguishable from
+// something the CEO personally typed. Two differences from draftMessage:
+// no From header at all (buildRawMessage lets Gmail default it to the
+// account's own primary address -- the primary account's real address isn't
+// known to this code, and hardcoding a guess would be wrong), and no
+// disclosure signature (that would defeat the point: this draft must read as
+// the CEO's own unedited writing). It still runs through the primary
+// account's own credential (Credential() never changes for this function),
+// so the draft lands in the CEO's own mailbox, not the agent's.
+func (g *Gmail) draftForReview(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	to, subject, body, html, err := g.readWriteArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage("", to, subject, body, html)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Message struct {
+			ID       string `json:"id"`
+			ThreadID string `json:"threadId"`
+		} `json:"message"`
+	}
+	payload := map[string]any{"message": map[string]any{"raw": raw}}
+	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/drafts", nil, payload, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, To: to, Subject: subject, Body: body})
+}
+
 // sendMessage sends exactly once through gapi.PostJSON. A returned
 // gapi.ErrSendOutcomeUnknown is passed straight back, never swallowed into
 // a generic error, so a caller can errors.Is it and surface "uncertain,
@@ -481,6 +539,7 @@ func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[strin
 	if err != nil {
 		return nil, err
 	}
+	body, html = appendSignature(body, html, g.signatureName)
 	raw, err := buildRawMessage(g.mailAddress, to, subject, body, html)
 	if err != nil {
 		return nil, err
@@ -496,20 +555,65 @@ func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[strin
 	return json.Marshal(writeMessageOutput{ID: resp.ID, ThreadID: resp.ThreadID, From: g.mailAddress, To: to, Subject: subject, Body: body})
 }
 
-// readMessageArgs reads to/subject/body/html_attachment from args. There is
-// no "from" argument to read: the schema declares none, and even a caller
-// that smuggled one into args (bypassing schema validation) would be
-// ignored here -- the From address is always g.mailAddress, the CEO's
-// configured agent alias, set once at connect time, not per call.
+// readMessageArgs reads to/subject/body/html_attachment from args for the
+// two functions that send as the agent (draft_message, send_message): both
+// require agent.mail_address to be configured first, since that's the From
+// address they'll use. There is no "from" argument to read: the schema
+// declares none, and even a caller that smuggled one into args (bypassing
+// schema validation) would be ignored here -- the From address is always
+// g.mailAddress, the CEO's configured agent alias, set once at connect
+// time, not per call.
 func (g *Gmail) readMessageArgs(args map[string]any) (to []string, subject, body, html string, err error) {
 	if g.mailAddress == "" {
 		return nil, "", "", "", errors.New("gmail: agent.mail_address is not configured; verify the agent's Gmail alias and set it before sending")
 	}
+	return g.readWriteArgs(args)
+}
+
+// readWriteArgs reads to/subject/body/html_attachment from args, common to
+// all three write functions. draft_for_review calls this directly (skipping
+// readMessageArgs' agent.mail_address check): it never sends as the agent,
+// so that config key is irrelevant to it.
+func (g *Gmail) readWriteArgs(args map[string]any) (to []string, subject, body, html string, err error) {
 	to = argStrings(args, "to")
 	if len(to) == 0 {
 		return nil, "", "", "", errors.New("gmail: to is required")
 	}
 	return to, gapi.ArgString(args, "subject"), gapi.ArgString(args, "body"), gapi.ArgString(args, "html_attachment"), nil
+}
+
+// plainSignature and htmlSignature build the disclosure line appended to
+// mail actually sent under the agent's own identity: send_message (which
+// leaves as the agent) and draft_message (which will eventually be sent as
+// the agent too). name is config's agent.signature_name; when empty the
+// line omits the "on behalf of" clause rather than inventing a placeholder
+// name. draft_for_review must never call either of these -- that draft is
+// meant to read as the CEO's own unedited writing.
+func plainSignature(name string) string {
+	if name == "" {
+		return "\n\n---\nSent by Water, an AI assistant — approved before sending."
+	}
+	return fmt.Sprintf("\n\n---\nSent by Water, an AI assistant, on behalf of %s — approved before sending.", name)
+}
+
+func htmlSignature(name string) string {
+	text := "Sent by Water, an AI assistant — approved before sending."
+	if name != "" {
+		text = fmt.Sprintf("Sent by Water, an AI assistant, on behalf of %s — approved before sending.", name)
+	}
+	return `<hr><p style="color:#888;font-size:0.85em;">` + html.EscapeString(text) + "</p>"
+}
+
+// appendSignature appends the disclosure line to body and, when htmlBody is
+// non-empty, to the HTML alternative too -- each separated from the actual
+// message by a blank line and a rule, so it can never be confused with the
+// CEO's or agent's own words.
+func appendSignature(body, htmlBody, name string) (string, string) {
+	body += plainSignature(name)
+	if htmlBody != "" {
+		htmlBody += htmlSignature(name)
+	}
+	return body, htmlBody
 }
 
 func argStrings(args map[string]any, key string) []string {
@@ -534,15 +638,20 @@ func sanitizeHeaderValue(s string) string {
 	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 }
 
-// buildRawMessage builds an RFC 2822 message with a fixed From, base64url
-// encoded as Gmail's drafts.create/messages.send "raw" field wants. When
-// html is empty the message is a single text/plain part; otherwise it is
-// multipart/alternative with body as the plain part and html as the html
-// part, so a client with no HTML rendering still shows the plain text.
+// buildRawMessage builds an RFC 2822 message, base64url encoded as Gmail's
+// drafts.create/messages.send "raw" field wants. When html is empty the
+// message is a single text/plain part; otherwise it is multipart/alternative
+// with body as the plain part and html as the html part, so a client with no
+// HTML rendering still shows the plain text. When from is empty, the From
+// header is omitted entirely rather than set to a guess -- Gmail then
+// defaults it to the sending account's own primary address, which is what
+// draft_for_review wants and this code has no other way to know.
 func buildRawMessage(from string, to []string, subject, body, html string) (string, error) {
 	var head bytes.Buffer
 	hdr := func(k, v string) { fmt.Fprintf(&head, "%s: %s\r\n", k, sanitizeHeaderValue(v)) }
-	hdr("From", from)
+	if from != "" {
+		hdr("From", from)
+	}
 	hdr("To", strings.Join(to, ", "))
 	hdr("Subject", mime.QEncoding.Encode("UTF-8", subject))
 	head.WriteString("MIME-Version: 1.0\r\n")

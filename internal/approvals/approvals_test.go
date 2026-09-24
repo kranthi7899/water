@@ -93,6 +93,14 @@ func TestReadBackSendMessageAndDraftMessage(t *testing.T) {
 	if want := "Draft an email to Dana Lee <dana@acme.com>, subject 'Re: Q3 budget'. Body: 'Sounds good, thanks.'. Say yes to create the draft or no to cancel."; draft != want {
 		t.Fatalf("draft_message:\ngot  %q\nwant %q", draft, want)
 	}
+	// draft_for_review reads back distinctly (it explains the draft lands in
+	// the CEO's own Gmail, not the agent's), but shares draft_message's
+	// "create the draft" prompt -- both are level D, nothing is sent by
+	// either.
+	forReview := ReadBack(Envelope{Action: "gmail.draft_for_review", Recipient: "Dana Lee", Payload: payload})
+	if want := "Prepare a draft in your own Gmail for you to review and send yourself: to Dana Lee <dana@acme.com>, subject 'Re: Q3 budget'. Body: 'Sounds good, thanks.'. Say yes to create the draft or no to cancel."; forReview != want {
+		t.Fatalf("draft_for_review:\ngot  %q\nwant %q", forReview, want)
+	}
 	// html_attachment is not one of the special-cased fields, so it must
 	// still show up under "Also", never silently dropped.
 	withHTML := ReadBack(Envelope{Action: "gmail.send_message", Payload: map[string]any{

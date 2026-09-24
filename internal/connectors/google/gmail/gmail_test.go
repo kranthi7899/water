@@ -141,8 +141,8 @@ func getMessage(t *testing.T, h *harness, args map[string]any) (gate.Result, err
 
 func TestFunctionDeclaration(t *testing.T) {
 	fns := New(testAgentAddress).Functions()
-	if len(fns) != 4 {
-		t.Fatalf("functions %d, want 4", len(fns))
+	if len(fns) != 5 {
+		t.Fatalf("functions %d, want 5", len(fns))
 	}
 	byName := map[string]connectors.Function{}
 	for _, fn := range fns {
@@ -163,6 +163,12 @@ func TestFunctionDeclaration(t *testing.T) {
 	if fn := byName["send_message"]; fn.Level != twins.A || fn.External {
 		t.Fatalf("send_message declaration: %+v", fn)
 	}
+	// draft_for_review also originates its own content and is level D like
+	// draft_message, but is a distinct function from both draft_message and
+	// send_message: it never uses the agent alias.
+	if fn := byName["draft_for_review"]; fn.Level != twins.D || fn.Risk != connectors.RiskLow || fn.External {
+		t.Fatalf("draft_for_review declaration: %+v", fn)
+	}
 	if svc, acct := New(testAgentAddress).Credential(); svc != gapi.Service || acct != gapi.DefaultAccount {
 		t.Fatalf("credential: %s/%s", svc, acct)
 	}
@@ -173,7 +179,7 @@ func TestFunctionDeclaration(t *testing.T) {
 
 func TestSchemaValidation(t *testing.T) {
 	fns := New(testAgentAddress).Functions()
-	var listSchema, getSchema, draftSchema, sendSchema connectors.Schema
+	var listSchema, getSchema, draftSchema, sendSchema, draftForReviewSchema connectors.Schema
 	for _, fn := range fns {
 		switch fn.Name {
 		case "list_messages":
@@ -184,6 +190,8 @@ func TestSchemaValidation(t *testing.T) {
 			draftSchema = fn.Schema
 		case "send_message":
 			sendSchema = fn.Schema
+		case "draft_for_review":
+			draftForReviewSchema = fn.Schema
 		}
 	}
 	cases := []struct {
@@ -212,6 +220,9 @@ func TestSchemaValidation(t *testing.T) {
 		{"send: missing to/subject/body", sendSchema, map[string]any{}, false},
 		{"send: valid", sendSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b"}, true},
 		{"send: from is not a schema property", sendSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "from": "attacker@evil.com"}, false},
+		{"draft_for_review: missing to/subject/body", draftForReviewSchema, map[string]any{}, false},
+		{"draft_for_review: valid", draftForReviewSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b"}, true},
+		{"draft_for_review: from is not a schema property", draftForReviewSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "from": "attacker@evil.com"}, false},
 	}
 	for _, tc := range cases {
 		err := tc.schema.Validate(tc.args)
@@ -1079,8 +1090,9 @@ func TestSendMessageSendsExactlyOnceAndNormalizesAsExternal(t *testing.T) {
 	if !ok || !m.External {
 		t.Fatalf("sent message record: %+v, want External", m)
 	}
-	if m.From != testAgentAddress || m.Subject != "Re: Q3 budget" || m.Body != "Sounds good." {
-		t.Fatalf("normalized record: %+v", m)
+	wantBody := "Sounds good." + plainSignature("")
+	if m.From != testAgentAddress || m.Subject != "Re: Q3 budget" || m.Body != wantBody {
+		t.Fatalf("normalized record: %+v, want body %q", m, wantBody)
 	}
 }
 
@@ -1262,5 +1274,204 @@ func TestBuildRawMessageSanitizesHeaderInjection(t *testing.T) {
 	}
 	if got := msg.Header.Get("X-Evil"); got != "" {
 		t.Fatalf("X-Evil header injected: %q", got)
+	}
+}
+
+// TestDraftForReviewCreatesDraftWithNoAgentFromOrSignature covers item 1's
+// core requirement: draft_for_review must land in the CEO's own Gmail
+// drafts, from the CEO's own address, which means no agent-alias From
+// header at all -- buildRawMessage omits the header entirely so Gmail
+// defaults it to the sending account's own primary address -- and no
+// disclosure signature, unlike draft_message/send_message: this draft is
+// meant to read as the CEO's own unedited writing, byte for byte.
+func TestDraftForReviewCreatesDraftWithNoAgentFromOrSignature(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"d1","message":{"id":"m1","threadId":"t1"}}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	// SetSignatureName is configured here specifically to prove it has no
+	// effect on draft_for_review: the signature must never appear regardless
+	// of what the connector's own configuration carries.
+	g := New(testAgentAddress).SetSignatureName("Alex")
+	out, err := g.draftForReview(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "Q4 numbers", "body": "Could you share the breakdown?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.calls() != 1 {
+		t.Fatalf("calls = %d, want 1", api.calls())
+	}
+	last := api.last()
+	if last.method != http.MethodPost || last.path != "/gmail/v1/users/me/drafts" {
+		t.Fatalf("request %s %s, want POST /gmail/v1/users/me/drafts", last.method, last.path)
+	}
+	raw := rawFromBody(t, last.body, true)
+	headerBlock, _, _ := bytes.Cut(raw, []byte("\r\n\r\n"))
+	if bytes.Contains(headerBlock, []byte("From:")) {
+		t.Fatalf("draft_for_review must not set any From header, got headers %q", headerBlock)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.Header.Get("From"); got != "" {
+		t.Fatalf("From = %q, want empty (Gmail defaults it to the account's own address)", got)
+	}
+	body, err := io.ReadAll(msg.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Could you share the breakdown?"; string(body) != want {
+		t.Fatalf("body = %q, want %q: draft_for_review must never append the agent's disclosure signature", body, want)
+	}
+	var w writeMessageOutput
+	if err := json.Unmarshal(out, &w); err != nil {
+		t.Fatal(err)
+	}
+	if w.From != "" {
+		t.Fatalf("output From = %q, want empty: draft_for_review never claims the agent alias", w.From)
+	}
+	if w.DraftID != "d1" || w.ID != "m1" || w.ThreadID != "t1" {
+		t.Fatalf("output %+v", w)
+	}
+	// A draft is not sent mail, and draft_for_review's content isn't the
+	// agent's own mail either: it must not be indexed as a store record,
+	// matching draft_message.
+	rec, err := (&Gmail{}).Normalize("draft_for_review", out)
+	if err != nil || rec != nil {
+		t.Fatalf("draft_for_review normalize: %v %v, want nil, nil", rec, err)
+	}
+}
+
+// TestSignatureOnSendMessageOnlyNotDraftForReview proves the same *Gmail
+// instance appends the disclosure signature when sending under the agent's
+// identity but never when drafting for the CEO's own review.
+func TestSignatureOnSendMessageOnlyNotDraftForReview(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress)
+	out, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hello.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w writeMessageOutput
+	if err := json.Unmarshal(out, &w); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.Body, "Sent by Water") {
+		t.Fatalf("send_message body = %q, want the disclosure signature", w.Body)
+	}
+
+	api2 := &gmailWriteAPI{resp: `{"id":"d1","message":{"id":"m2","threadId":"t2"}}`}
+	srv2 := api2.server()
+	defer srv2.Close()
+	cl2 := newDirectClient(t, ts, srv2)
+	out2, err := g.draftForReview(context.Background(), cl2, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hello.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w2 writeMessageOutput
+	if err := json.Unmarshal(out2, &w2); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(w2.Body, "Sent by Water") || w2.Body != "Hello." {
+		t.Fatalf("draft_for_review body = %q, must not carry the disclosure signature", w2.Body)
+	}
+}
+
+// TestSignatureRespectsConfiguredNameAndFallback covers the config side:
+// plainSignature/htmlSignature use agent.signature_name when set, and fall
+// back to omitting the "on behalf of" clause entirely (never a placeholder
+// name) when it's empty, and SetSignatureName threads the configured name
+// through a real send_message call.
+func TestSignatureRespectsConfiguredNameAndFallback(t *testing.T) {
+	if got, want := plainSignature(""), "\n\n---\nSent by Water, an AI assistant — approved before sending."; got != want {
+		t.Fatalf("plainSignature(\"\") = %q, want %q", got, want)
+	}
+	if got, want := plainSignature("Alex Kim"), "\n\n---\nSent by Water, an AI assistant, on behalf of Alex Kim — approved before sending."; got != want {
+		t.Fatalf("plainSignature(name) = %q, want %q", got, want)
+	}
+	if strings.Contains(plainSignature(""), "on behalf of") {
+		t.Fatal("empty name must omit the \"on behalf of\" clause, not invent a placeholder")
+	}
+	if !strings.Contains(htmlSignature("Alex Kim"), "Alex Kim") {
+		t.Fatal("htmlSignature should carry the configured name")
+	}
+
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress).SetSignatureName("Alex Kim")
+	out, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hi.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w writeMessageOutput
+	if err := json.Unmarshal(out, &w); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(w.Body, "on behalf of Alex Kim") {
+		t.Fatalf("body = %q, want the configured signature name", w.Body)
+	}
+}
+
+// TestSendMessageAppendsSignatureToHTMLPartToo checks the MIME html
+// alternative also gets the disclosure line, visually separated from the
+// caller's own HTML by a rule.
+func TestSendMessageAppendsSignatureToHTMLPartToo(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress)
+	_, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hi.", "html_attachment": "<p>Hi.</p>",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := rawFromBody(t, api.last().body, false)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/alternative") {
+		t.Fatalf("content-type = %q, %v", mediaType, err)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	var gotHTML string
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(part.Header.Get("Content-Type"), "text/html") {
+			gotHTML = string(data)
+		}
+	}
+	if !strings.Contains(gotHTML, "Sent by Water") || !strings.Contains(gotHTML, "<hr>") {
+		t.Fatalf("html part = %q, want the disclosure signature set off by a rule", gotHTML)
 	}
 }
