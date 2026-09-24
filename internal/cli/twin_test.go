@@ -30,7 +30,7 @@ func TestBuildTwinDepsFSFailsLoudlyOnBadDecisionsFile(t *testing.T) {
 		// parse, not be silently ignored or treated as an empty id.
 		"twins/ceo/decisions/broken.yaml": &fstest.MapFile{Data: []byte("id: [not, a, string]\ntitle: Broken\n")},
 	}
-	_, err := buildTwinDepsFS(fsys, realTwinID, "")
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "")
 	if err == nil {
 		t.Fatal("buildTwinDepsFS: expected an error from a malformed decision-type file, got nil")
 	}
@@ -57,7 +57,7 @@ default_rule: never auto-approve
 severity_weight: 1
 `)},
 	}
-	_, err := buildTwinDepsFS(fsys, realTwinID, "")
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "")
 	if err == nil {
 		t.Fatal("buildTwinDepsFS: expected an error naming an unlisted function, got nil")
 	}
@@ -99,10 +99,10 @@ func TestTwinIDDefaultsToRealAndDemoFlagOrEnvSelectsDemo(t *testing.T) {
 // did before the demo slice; the demo manifest must load too, since it is
 // additive.
 func TestLoadTwinManifestRealAndDemoBothValidate(t *testing.T) {
-	if _, err := loadTwinManifest(water.TwinsFS(), realTwinID, ""); err != nil {
+	if _, err := loadTwinManifest(water.TwinsFS(), realTwinID, "", ""); err != nil {
 		t.Fatalf("real (non-demo) twin manifest must still load unchanged: %v", err)
 	}
-	if _, err := loadTwinManifest(water.TwinsFS(), demoTwinID, ""); err != nil {
+	if _, err := loadTwinManifest(water.TwinsFS(), demoTwinID, "", ""); err != nil {
 		t.Fatalf("demo twin manifest must load: %v", err)
 	}
 }

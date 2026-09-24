@@ -92,8 +92,10 @@ func loadCEORoleMD() string {
 // per call, and an empty value only matters if a write function is actually
 // invoked (gmail.readMessageArgs then refuses with a clear error), so
 // manifest-validation-only callers (loadTwinManifest) may pass "".
-func buildCEORegistry(demo bool, mailAddress string) (*connectors.Registry, error) {
-	cs := []connectors.Connector{gcal.New(), gmail.New(mailAddress), gdrive.New(), agentmail.New(mailAddress)}
+func buildCEORegistry(demo bool, mailAddress, signatureName string) (*connectors.Registry, error) {
+	gm := gmail.New(mailAddress)
+	gm.SetSignatureName(signatureName)
+	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress)}
 	if demo {
 		cs = append(cs,
 			fake.NewGitHub(fake.DefaultGitHubPRs(), fake.DefaultGitHubIssues()),
@@ -110,7 +112,7 @@ func buildCEORegistry(demo bool, mailAddress string) (*connectors.Registry, erro
 // one exclusive writer — the running daemon — and taking its lock from a
 // read-only command would both fail while the daemon runs and, in the
 // moment it held the lock, make a (re)starting daemon fail.
-func loadTwinManifest(fsys fs.FS, id, mailAddress string) (*twins.Manifest, error) {
+func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName string) (*twins.Manifest, error) {
 	m, err := twins.Load(fsys, id)
 	if err != nil {
 		return nil, fmt.Errorf("twin manifest: %w", err)
@@ -118,7 +120,7 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress string) (*twins.Manifest, erro
 	if _, err := decisions.LoadRegistry(fsys, m); err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
-	reg, err := buildCEORegistry(id == demoTwinID, mailAddress)
+	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName)
 	if err != nil {
 		return nil, err
 	}
@@ -131,8 +133,8 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress string) (*twins.Manifest, erro
 // buildTwinDeps opens the store and the anchored, hash-chained audit log at
 // their default ~/.water locations and wires the gate over them. Callers must
 // Close() the result. id is realTwinID or demoTwinID (see (*App).twinID).
-func buildTwinDeps(id, mailAddress string) (*twinDeps, error) {
-	return buildTwinDepsFS(water.TwinsFS(), id, mailAddress)
+func buildTwinDeps(id, mailAddress, signatureName string) (*twinDeps, error) {
+	return buildTwinDepsFS(water.TwinsFS(), id, mailAddress, signatureName)
 }
 
 // buildTwinDepsFS is buildTwinDeps parameterized over the twins filesystem,
@@ -141,7 +143,7 @@ func buildTwinDeps(id, mailAddress string) (*twinDeps, error) {
 // directory. The manifest and the decision registry are both validated
 // before anything else opens, so a bad file of either kind fails loudly here
 // and never gets as far as touching the real store or audit log.
-func buildTwinDepsFS(fsys fs.FS, id, mailAddress string) (*twinDeps, error) {
+func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName string) (*twinDeps, error) {
 	m, err := twins.Load(fsys, id)
 	if err != nil {
 		return nil, fmt.Errorf("twin manifest: %w", err)
@@ -167,7 +169,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress string) (*twinDeps, error) {
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 	q := approvals.NewQueue(st, log)
-	reg, err := buildCEORegistry(id == demoTwinID, mailAddress)
+	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName)
 	if err != nil {
 		log.Close()
 		st.Close()

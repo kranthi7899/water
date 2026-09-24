@@ -56,7 +56,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	defer unlock()
 	defer l.Close()
 
-	deps, err := buildTwinDeps(a.twinID(), cfg.Agent.MailAddress)
+	deps, err := buildTwinDeps(a.twinID(), cfg.Agent.MailAddress, cfg.Agent.SignatureName)
 	if err != nil {
 		return exitWith(ExitError, err)
 	}
