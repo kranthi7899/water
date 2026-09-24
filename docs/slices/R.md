@@ -1321,7 +1321,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - **`TestExactlyOneOwner`**: a late fake-T1 answer after `Route(main)` is dropped, and the event stream contains one answer and one `done`;
     - `TestEveryTurnStartsAtT0`.
   - Flag: `router.main.enabled` on. `router.ack_ms` is 250 through `DefaultConfig`.
-- [ ] **R-13 One-voice contract** (`internal/nervous/speak/{speak.go,lint.go}`, `internal/voice/speakable.go` delegate, facade application in `nervous.go`/`mainpath.go`).
+- [x] **R-13 One-voice contract** (`internal/nervous/speak/{speak.go,lint.go}`, `internal/voice/speakable.go` delegate, facade application in `nervous.go`/`mainpath.go`).
   - Tests:
     - `speak_test.go`: markdown, bullets, headings, tables, fences, links, bare URLs ("a link"), emoji, times ("15:00", "3pm", "3-4pm"), dates (ISO, "Thu 25 Sep"), list cap with "and N more", char cap on a sentence boundary;
     - `lint_test.go`: every warning kind, and the prose is not rewritten;
