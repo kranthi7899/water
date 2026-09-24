@@ -1215,7 +1215,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
 
 ---
 
-- [ ] **R-1 Gemma terms doc** (`docs/functiongemma.md`). Docs only; it blocks nothing.
+- [x] **R-1 Gemma terms doc** (`docs/functiongemma.md`). Docs only; it blocks nothing.
   - What FunctionGemma is: `google/functiongemma-270m-it`, a 270M-parameter function-calling Gemma 3 variant.
   - Why a sidecar: Homebrew `llama-server`, owner-approved on 2026-09-24, a separate process, no Go module, no cgo.
   - The **Gemma Terms of Use** and **Gemma Prohibited Use Policy** URLs, and a summary: not OSI-licensed; use and modification are allowed; the terms and use restrictions pass on to anyone the weights or derivatives are redistributed to; Water never redistributes weights, since they live only under `$WATER_HOME/models/` and never in the repo.
