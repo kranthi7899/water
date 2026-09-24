@@ -54,6 +54,7 @@ type globalFlags struct {
 	voice        bool
 	allowMetered bool
 	debug        bool
+	demo         bool
 }
 
 // App holds lazily-built shared state for one invocation.

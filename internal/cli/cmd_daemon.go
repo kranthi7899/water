@@ -53,7 +53,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	defer unlock()
 	defer l.Close()
 
-	deps, err := buildTwinDeps()
+	deps, err := buildTwinDeps(a.twinID())
 	if err != nil {
 		return exitWith(ExitError, err)
 	}

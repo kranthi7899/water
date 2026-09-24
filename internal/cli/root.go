@@ -74,6 +74,7 @@ subscription you already pay for.`,
 	pf.BoolVarP(&a.flags.verbose, "verbose", "v", false, "show per-node responses as they arrive")
 	pf.BoolVar(&a.flags.voice, "voice", false, "speak replies aloud (uses configured voice provider)")
 	pf.BoolVar(&a.flags.debug, "debug", false, "log every model subprocess: real flags (prompt text elided), pid, duration, exit, last stderr line")
+	pf.BoolVar(&a.flags.demo, "demo", false, "load the demo twin (twins/ceo-demo): adds fake, in-memory GitHub/Linear/HubSpot connectors and a richer investor_request card for showcasing the twin without real credentials for those services (same as WATER_DEMO=1); never the default")
 
 	root.AddCommand(
 		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(),

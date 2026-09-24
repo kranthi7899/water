@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"water"
+	"water/internal/twins"
 )
 
 // minimalCEOManifestYAML is just enough of twins/ceo/twin.yaml's shape for
@@ -27,7 +30,7 @@ func TestBuildTwinDepsFSFailsLoudlyOnBadDecisionsFile(t *testing.T) {
 		// parse, not be silently ignored or treated as an empty id.
 		"twins/ceo/decisions/broken.yaml": &fstest.MapFile{Data: []byte("id: [not, a, string]\ntitle: Broken\n")},
 	}
-	_, err := buildTwinDepsFS(fsys)
+	_, err := buildTwinDepsFS(fsys, realTwinID)
 	if err == nil {
 		t.Fatal("buildTwinDepsFS: expected an error from a malformed decision-type file, got nil")
 	}
@@ -54,7 +57,7 @@ default_rule: never auto-approve
 severity_weight: 1
 `)},
 	}
-	_, err := buildTwinDepsFS(fsys)
+	_, err := buildTwinDepsFS(fsys, realTwinID)
 	if err == nil {
 		t.Fatal("buildTwinDepsFS: expected an error naming an unlisted function, got nil")
 	}
@@ -65,3 +68,76 @@ severity_weight: 1
 // TestLoadRegistryEmptyDirIsOnlyGeneric; it is not re-tested here because
 // buildTwinDepsFS's success path goes on to open the real ~/.water store,
 // which a unit test must not touch.
+
+// TestTwinIDDefaultsToRealAndDemoFlagOrEnvSelectsDemo is the regression
+// guard the demo slice needs: with neither --demo nor WATER_DEMO set, a
+// fresh App must resolve to the real twin, exactly as before --demo
+// existed. --demo and WATER_DEMO are the only two ways to opt into the
+// demo twin, and either one is enough on its own.
+func TestTwinIDDefaultsToRealAndDemoFlagOrEnvSelectsDemo(t *testing.T) {
+	a := NewApp()
+	if got := a.twinID(); got != realTwinID {
+		t.Fatalf("twinID() with neither --demo nor WATER_DEMO set = %q, want %q (must never default to demo)", got, realTwinID)
+	}
+
+	a.flags.demo = true
+	if got := a.twinID(); got != demoTwinID {
+		t.Fatalf("twinID() with --demo = %q, want %q", got, demoTwinID)
+	}
+
+	a2 := NewApp()
+	t.Setenv(demoEnvVar, "1")
+	if got := a2.twinID(); got != demoTwinID {
+		t.Fatalf("twinID() with WATER_DEMO=1 = %q, want %q", got, demoTwinID)
+	}
+}
+
+// TestLoadTwinManifestRealAndDemoBothValidate loads both shipped manifests
+// through the real embedded filesystem and the real gate validation
+// (loadTwinManifest is exactly what `water status`/`water doctor` and the
+// daemon's startup use). The real manifest must keep loading exactly as it
+// did before the demo slice; the demo manifest must load too, since it is
+// additive.
+func TestLoadTwinManifestRealAndDemoBothValidate(t *testing.T) {
+	if _, err := loadTwinManifest(water.TwinsFS(), realTwinID); err != nil {
+		t.Fatalf("real (non-demo) twin manifest must still load unchanged: %v", err)
+	}
+	if _, err := loadTwinManifest(water.TwinsFS(), demoTwinID); err != nil {
+		t.Fatalf("demo twin manifest must load: %v", err)
+	}
+}
+
+// TestDemoManifestAddsFakeConnectorsRealDoesNot is the other half of the
+// regression guard: the fake GitHub/Linear/HubSpot functions exist only in
+// the demo manifest, all at level R (read-only), and the real manifest
+// never gains them just because the demo manifest now exists alongside it.
+func TestDemoManifestAddsFakeConnectorsRealDoesNot(t *testing.T) {
+	real, err := twins.Load(water.TwinsFS(), realTwinID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demoFake := []string{"github.list_prs", "github.list_issues", "linear.list_issues", "hubspot.list_deals", "hubspot.list_contacts"}
+	for _, id := range demoFake {
+		if _, ok := real.Function(id); ok {
+			t.Fatalf("real ceo manifest must never grant %s", id)
+		}
+	}
+
+	demo, err := twins.Load(water.TwinsFS(), demoTwinID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range demoFake {
+		f, ok := demo.Function(id)
+		if !ok || f.Level != twins.R {
+			t.Fatalf("demo manifest: %s = %+v, ok=%v; want level R", id, f, ok)
+		}
+	}
+	// The demo manifest is additive: it must still grant every real Google
+	// function the production manifest does.
+	for _, id := range []string{"gcal.list_events", "gmail.list_messages", "gmail.get_message", "gdrive.search_files", "gdrive.read_file"} {
+		if _, ok := demo.Function(id); !ok {
+			t.Fatalf("demo manifest dropped a real function it should keep: %s", id)
+		}
+	}
+}
