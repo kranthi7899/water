@@ -106,6 +106,67 @@ final class CannedServer: @unchecked Sendable {
         #expect(req.hasSuffix(#"{"channel":"voice","clear":false,"prompt":"what's on today?"}"#))
     }
 
+    @Test func approvalRequiredCarriesWhatADecisionNeeds() throws {
+        let line = #"{"kind":"approval_required","text":"gmail.send_message","approval_id":"env_2","action":"gmail.send_message","risk":"high","payload_hash":"sha256:ab"}"#
+        let e = try #require(TurnEvent.decode(line: Data(line.utf8)))
+        #expect(e == TurnEvent(kind: .approvalRequired, text: "gmail.send_message", approvalID: "env_2",
+                               action: "gmail.send_message", risk: "high", payloadHash: "sha256:ab"))
+        // Older daemons send only approval_id and the action in text.
+        let old = try #require(TurnEvent.decode(line: Data(#"{"kind":"approval_required","approval_id":"env_3","text":"x.y"}"#.utf8)))
+        #expect(old.approvalID == "env_3" && old.payloadHash == nil && old.action == nil)
+    }
+
+    /// mac-4: a turn asked during a meeting carries meeting_id, and the
+    /// daemon's X-Water-Task-Id reaches the caller before any event.
+    @Test func streamTurnSendsMeetingIDAndReportsTaskID() throws {
+        func chunk(_ s: String) -> String { String(Array(s.utf8).count, radix: 16) + "\r\n" + s + "\r\n" }
+        let server = try CannedServer(pieces: [
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nX-Water-Task-Id: task_42\r\nTransfer-Encoding: chunked\r\n\r\n",
+            chunk(#"{"kind":"ack"}"# + "\n"), chunk(#"{"kind":"done"}"# + "\n"), "0\r\n\r\n",
+        ])
+        var order: [String] = []
+        try UnixSocketClient(socketPath: server.path).streamTurn(
+            channel: .textBar, prompt: "what number did they quote?", token: "t",
+            meetingID: "mtg_abc", onTaskID: { order.append("task:" + $0) }) { e in order.append("\(e.kind)") }
+        server.wait()
+        #expect(order == ["task:task_42", "ack", "done"])
+        let req = String(decoding: server.request, as: UTF8.self)
+        #expect(req.hasSuffix(#"{"channel":"text-bar","clear":false,"meeting_id":"mtg_abc","prompt":"what number did they quote?"}"#))
+    }
+
+    @Test func streamTurnOmitsEmptyMeetingID() throws {
+        let server = try CannedServer(pieces: ["HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", "0\r\n\r\n"])
+        try UnixSocketClient(socketPath: server.path).streamTurn(channel: .cli, prompt: "x", token: "t", meetingID: "") { _ in }
+        server.wait()
+        #expect(!String(decoding: server.request, as: UTF8.self).contains("meeting_id"))
+    }
+
+    @Test func cancelTaskPostsToTheTask() throws {
+        let body = #"{"cancelled":"task_42"}"#
+        let server = try CannedServer(pieces: ["HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n" + body])
+        try UnixSocketClient(socketPath: server.path).cancelTask(id: "task_42", token: "t")
+        server.wait()
+        #expect(String(decoding: server.request, as: UTF8.self).hasPrefix("POST /v1/tasks/task_42/cancel HTTP/1.1\r\n"))
+        #expect(throws: WaterClientError.invalidRequest("bad task id")) {
+            try UnixSocketClient(socketPath: server.path).cancelTask(id: "../x", token: "t")
+        }
+    }
+
+    @Test func cancelTaskUnknownIs404() throws {
+        let server = try CannedServer(pieces: ["HTTP/1.1 404 Not Found\r\nContent-Length: 13\r\n\r\nno such task\n"])
+        #expect(throws: WaterClientError.http(status: 404, body: "no such task\n")) {
+            try UnixSocketClient(socketPath: server.path).cancelTask(id: "task_1", token: "t")
+        }
+    }
+
+    /// mac-5: what the panel shows for an approval: the action, from
+    /// `action` or (older daemons) `text`.
+    @Test func approvalActionName() {
+        #expect(TurnEvent(kind: .approvalRequired, text: "a.b", action: "gmail.send_message").approvalAction == "gmail.send_message")
+        #expect(TurnEvent(kind: .approvalRequired, text: "x.y").approvalAction == "x.y")
+        #expect(TurnEvent(kind: .approvalRequired, text: "  ").approvalAction == nil)
+    }
+
     @Test func unauthorizedSurfacesStatusAndBody() throws {
         let server = try CannedServer(pieces: ["HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 14\r\n\r\ninvalid token\n"])
         #expect(throws: WaterClientError.http(status: 401, body: "invalid token\n")) {

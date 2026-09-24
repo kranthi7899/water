@@ -51,21 +51,42 @@ const (
 	EventDelta            EventKind = "delta"
 	EventSentence         EventKind = "sentence"
 	EventApprovalRequired EventKind = "approval_required"
-	EventDone             EventKind = "done"
-	EventError            EventKind = "error"
+	// EventQueued is informational: this turn is waiting for another turn
+	// (from any client or channel) to finish its model call, since only one
+	// runs at a time. It is sent at most once, after ack and before any
+	// delta; clients that do not know it can ignore it.
+	EventQueued EventKind = "queued"
+	EventDone   EventKind = "done"
+	EventError  EventKind = "error"
 )
 
+// queuedAfter is how long BeginModel may block before RunTurn tells the
+// client the turn is queued behind another one.
+const queuedAfter = 250 * time.Millisecond
+
 // Event is one step of a turn.
+//
+// An approval_required event carries everything a client needs to show and
+// decide the queued call without a second request: ApprovalID, Action (also
+// repeated in Text for older clients), Risk and PayloadHash, which POST
+// /v1/approvals/{id}/decision requires, plus ReadBack: the code-built text
+// (approvals.ReadBack) to speak or show before asking yes or no, never
+// composed by a model. It is best-effort; see the gateway's handleTurn doc
+// comment for exactly which approvals are announced inline.
 type Event struct {
-	Kind       EventKind `json:"kind"`
-	Text       string    `json:"text,omitempty"`
-	ApprovalID string    `json:"approval_id,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	Kind        EventKind `json:"kind"`
+	Text        string    `json:"text,omitempty"`
+	ApprovalID  string    `json:"approval_id,omitempty"`
+	Action      string    `json:"action,omitempty"`
+	Risk        string    `json:"risk,omitempty"`
+	PayloadHash string    `json:"payload_hash,omitempty"`
+	ReadBack    string    `json:"read_back,omitempty"`
+	Error       string    `json:"error,omitempty"`
 }
 
 // Env is everything one turn needs. The daemon builds one Env per twin and
-// reuses it across turns; Tools is set fresh per turn (it carries a per-turn
-// token for the model's tool calls) by the caller.
+// reuses it across turns; Tools, BeginModel and OnTaint are wired per daemon
+// by the caller (see internal/gateway's turnEnv).
 type Env struct {
 	Manifest  *twins.Manifest
 	Store     *store.Store
@@ -81,9 +102,18 @@ type Env struct {
 	// tier turn.
 	Warm *backend.WarmSession
 	// Tools, when set, is handed to the backend request so the model can call
-	// the twin's connector functions through the gate (Env.Tools is prepared
-	// per turn by the gateway, which mints the per-turn proxy token).
+	// the twin's connector functions through the gate. The gateway points it
+	// at the daemon's one stable session proxy token, not a per-turn one: its
+	// taint is session-sticky (escalated for the daemon's lifetime once any
+	// turn, meeting segment or tool result brings in untrusted content).
 	Tools *tools.Policy
+	// BeginModel, when set, is called after the fast paths and before the
+	// turn's state is read and the model is called; the returned end func is
+	// called when the turn finishes. The daemon uses it to run one model turn
+	// at a time and to know which open turn stream a queued tool call belongs
+	// to. An error (the turn was cancelled while waiting) ends the turn with
+	// an error event.
+	BeginModel func(ctx context.Context) (end func(), err error)
 	// Decisions, when set, is run to produce the morning brief's ranked
 	// open-cards signal. Nil (no decision registry wired) leaves that signal
 	// absent rather than erroring.
@@ -91,12 +121,13 @@ type Env struct {
 	// Timeout bounds one model call.
 	Timeout time.Duration
 	Now     func() time.Time
-	// OnTaint, when set, is called with true whenever a fast path itself
-	// pulls in External content while answering without a model call (today
-	// only the morning brief does) — the same escalation a normal turn's
-	// tainted context gets from handleTurn, so a cached brief built from
-	// external mail or events still marks the session tainted for the tool
-	// calls that follow it. The daemon wires this to escalateTaint.
+	// OnTaint, when set, is called with true whenever the turn pulls in
+	// External content: RunTurn calls it when the state summary it hands
+	// the model is tainted (before the model sees it), and a fast path calls
+	// it when it answers from external content without a model call (today
+	// only the morning brief does), so a cached brief built from external
+	// mail or events still marks the session tainted for the tool calls that
+	// follow it. The daemon wires this to escalateTaint.
 	OnTaint func(tainted bool)
 }
 
@@ -133,7 +164,21 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 	// turn to turn and the warm session keeps its process and conversation.
 	// Live state (today's events, the pending count) changes between turns,
 	// so it travels with each turn's message instead.
-	summary, _ := StateSummary(ctx, env)
+	if env.BeginModel != nil {
+		end, err := beginModelNoting(ctx, env.BeginModel, emit)
+		if err != nil {
+			emit(Event{Kind: EventError, Error: err.Error()})
+			return
+		}
+		defer end()
+	}
+	// The summary built here is exactly what the model sees, so its taint is
+	// applied here too, before the request exists: a caller's own earlier
+	// StateSummary may predate a sync that has since stored external content.
+	summary, tainted := StateSummary(ctx, env)
+	if tainted && env.OnTaint != nil {
+		env.OnTaint(true)
+	}
 	req := backend.Request{
 		System:  RoleSystem(env),
 		Prompt:  TurnPrompt(env, summary, turn.Prompt),
@@ -166,6 +211,25 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 		}
 	}
 	emit(Event{Kind: EventDone, Text: resp.Text})
+}
+
+// beginModelNoting calls begin and, if it is still waiting for the model
+// slot after queuedAfter, emits one EventQueued so the client can tell a
+// queued turn from a hung one. The event is emitted from a timer goroutine
+// while this goroutine is blocked in begin, and beginModelNoting waits for
+// that emit to finish before returning, so emit is never called
+// concurrently by this turn.
+func beginModelNoting(ctx context.Context, begin func(context.Context) (func(), error), emit func(Event)) (func(), error) {
+	emitted := make(chan struct{})
+	timer := time.AfterFunc(queuedAfter, func() {
+		defer close(emitted)
+		emit(Event{Kind: EventQueued, Text: "waiting for the previous turn to finish"})
+	})
+	end, err := begin(ctx)
+	if !timer.Stop() {
+		<-emitted
+	}
+	return end, err
 }
 
 // streamCold is stream without the warm session, for calls whose system
@@ -240,7 +304,7 @@ func StateSummary(ctx context.Context, env Env) (summary string, tainted bool) {
 	} else {
 		fmt.Fprintf(&b, "Today's events: %d\n", len(todays))
 		for _, e := range todays {
-			fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
+			fmt.Fprintf(&b, "- %s %s\n", e.Clock(), e.Title)
 			tainted = tainted || e.External
 		}
 	}

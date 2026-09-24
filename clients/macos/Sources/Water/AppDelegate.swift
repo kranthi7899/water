@@ -7,7 +7,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityItem: NSMenuItem!
     private let panel = AskPanelController()
     private let runner = TurnRunner()
-    private let voice = VoiceController()
+    private let voice = VoiceController(holdLabel: HotKeyConfig.voice.label)
+    /// Which turn may speak: bumped by every new turn and by every barge-in,
+    /// so a sentence event from a replaced or silenced turn is never queued.
+    private var speakingTurn = 0
     private var meeting: MeetingController!
     private var meetingItem: NSMenuItem!
     private var hotkeys: HotKeyMonitor!
@@ -18,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onSubmit = { [weak self] text in self?.send(text, channel: .textBar) }
         panel.onClose = { [weak self] in
             guard let self else { return }
+            // Closing the panel (Escape, or the text-bar hotkey) silences a
+            // spoken reply. The turn itself keeps running into the hidden
+            // panel, so reopening it shows the rest of the answer.
+            self.interruptSpeech()
             if self.voice.state == .idle { self.clearStatus() }
         }
         setUpVoice()
@@ -108,10 +115,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if panel.isVisible, voice.state == .idle { panel.close() } else { panel.show() }
     }
 
+    /// Barge-in: stop speaking now and drop anything still to be spoken for
+    /// the current turn. Every path that replaces or dismisses a reply goes
+    /// through here.
+    private func interruptSpeech() {
+        speakingTurn += 1
+        voice.stopSpeaking()
+    }
+
     private func send(_ text: String, channel: Channel) {
+        interruptSpeech() // runner.run cancels the old stream; this silences it
+        let turn = speakingTurn
         panel.beginReply()
         panel.setStatus(channel == .voice ? "Thinking… (voice)" : "Thinking…")
-        runner.run(channel: channel, prompt: text, onEvent: { [weak self] e in
+        // During meeting capture every question is about the meeting: the
+        // daemon adds its recent transcript (untrusted, and it taints the turn).
+        let meetingID = meeting.state == .active ? meeting.session?.id : nil
+        runner.run(channel: channel, prompt: text, meetingID: meetingID, onEvent: { [weak self] e in
             guard let self else { return }
             switch e.kind {
             case .ack:
@@ -120,10 +140,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.clearStatus()
                 self.panel.appendReply(e.text ?? "")
             case .sentence:
-                if channel == .voice { self.voice.speak(e.text ?? "") }
+                if channel == .voice, turn == self.speakingTurn { self.voice.speak(e.text ?? "") }
             case .approvalRequired:
-                self.panel.appendApproval(id: e.approvalID)
+                self.panel.appendApproval(id: e.approvalID, action: e.approvalAction, risk: e.risk)
             case .done:
+                // Terminal: nothing follows done or error on a turn stream.
                 self.clearStatus()
             case .error:
                 self.clearStatus()
@@ -148,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         voice.onListening = { [weak self] in
             guard let self else { return }
             self.runner.cancel()
+            self.interruptSpeech()
             self.panel.setInput("")
             self.panel.show(placeholder: "Listening… release \(HotKeyConfig.voice.label) to send")
             self.panel.setStatus("● Listening")

@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -70,6 +74,37 @@ severity_weight: 1
 // TestLoadRegistryEmptyDirIsOnlyGeneric; it is not re-tested here because
 // buildTwinDepsFS's success path goes on to open the real ~/.water store,
 // which a unit test must not touch.
+
+// TestDemoTwinNeverTouchesRealStore is the review finding: the demo twin's
+// fake GitHub/Linear/HubSpot records (and its cards and classification
+// cache) used to be upserted into the real twin's ~/.water/water.db. Under a
+// temp WATER_HOME, building the demo twin's deps must create its own store
+// and audit log and never the real ones.
+func TestDemoTwinNeverTouchesRealStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WATER_HOME", home)
+	deps, err := buildTwinDepsFS(water.TwinsFS(), demoTwinID, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps.Close()
+	for _, p := range []string{filepath.Join(home, "water.db"), filepath.Join(home, "audit", "audit.jsonl")} {
+		if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("demo twin touched the real twin's %s (stat err %v)", p, err)
+		}
+	}
+	for _, p := range []string{twinStorePath(demoTwinID), twinAuditPath(demoTwinID)} {
+		if !strings.HasPrefix(p, filepath.Join(home, "twins", demoTwinID)) {
+			t.Fatalf("demo path %s not under its own twin dir", p)
+		}
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("demo twin's own %s missing: %v", p, err)
+		}
+	}
+	if twinStorePath(realTwinID) != filepath.Join(home, "water.db") || twinAuditPath(realTwinID) != filepath.Join(home, "audit", "audit.jsonl") {
+		t.Fatal("real twin paths must stay the original ~/.water layout")
+	}
+}
 
 // TestTwinIDDefaultsToRealAndDemoFlagOrEnvSelectsDemo is the regression
 // guard the demo slice needs: with neither --demo nor WATER_DEMO set, a

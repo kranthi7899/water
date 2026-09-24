@@ -381,8 +381,8 @@ func TestNormalizesPaginatesAndMarksExternal(t *testing.T) {
 	if e2.SourceID != "primary:e2" {
 		t.Fatalf("e2 source id %q", e2.SourceID)
 	}
-	if want := time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC); !e2.StartAt.Equal(want) {
-		t.Fatalf("all-day e2 start = %v, want %v", e2.StartAt, want)
+	if want := time.Date(2026, 9, 25, 0, 0, 0, 0, time.Local); !e2.StartAt.Equal(want) {
+		t.Fatalf("all-day e2 start = %v, want %v (local midnight)", e2.StartAt, want)
 	}
 
 	stored, err := store.List[store.Event](context.Background(), h.st, store.Query{Source: "gcal"})

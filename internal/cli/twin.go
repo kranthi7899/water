@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"water"
 	"water/internal/agentmail"
 	"water/internal/approvals"
 	"water/internal/audit"
 	"water/internal/backend"
+	"water/internal/config"
 	"water/internal/connectors"
 	"water/internal/connectors/fake"
 	"water/internal/connectors/github"
@@ -67,6 +69,36 @@ func (a *App) twinID() string {
 
 // twinEnvVar is the env-var fallback for --twin.
 const twinEnvVar = "WATER_TWIN"
+
+// twinDataDir is where id's store and audit log live. The real twin keeps
+// the original ~/.water layout byte for byte; any other twin (the demo one,
+// or a --twin-selected one like Slice E's counterparty) gets its own
+// directory under ~/.water/twins/<id>, so its fictional connector records,
+// decision cards and classification cache never land in the real twin's
+// database (a demo "github" PR would otherwise sit next to the real GitHub
+// connector's rows under the same source name).
+func twinDataDir(id string) string {
+	if id == realTwinID {
+		return config.Home()
+	}
+	return filepath.Join(config.Home(), "twins", id)
+}
+
+// twinStorePath is id's database: store.DefaultPath() for the real twin.
+func twinStorePath(id string) string {
+	if id == realTwinID {
+		return store.DefaultPath()
+	}
+	return filepath.Join(twinDataDir(id), "water.db")
+}
+
+// twinAuditPath is id's audit log: audit.DefaultPath() for the real twin.
+func twinAuditPath(id string) string {
+	if id == realTwinID {
+		return audit.DefaultPath()
+	}
+	return filepath.Join(twinDataDir(id), "audit", "audit.jsonl")
+}
 
 // twinDeps bundles what the CEO twin's daemon needs to run.
 type twinDeps struct {
@@ -203,14 +235,14 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 	if err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
-	st, err := store.Open(store.DefaultPath())
+	st, err := store.Open(twinStorePath(id))
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
 	// *store.Store implements audit.Anchor directly (LoadAuditAnchor /
 	// SaveAuditAnchor), so the audit log's tail is anchored in the same
 	// database the gate persists rate/usage windows to.
-	log, err := audit.Open(audit.DefaultPath(), audit.WithAnchor(st))
+	log, err := audit.Open(twinAuditPath(id), audit.WithAnchor(st))
 	if err != nil {
 		st.Close()
 		return nil, fmt.Errorf("audit: %w", err)

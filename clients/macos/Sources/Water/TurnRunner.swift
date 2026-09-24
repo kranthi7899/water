@@ -20,9 +20,11 @@ final class TurnRunner {
         current = nil
     }
 
+    /// - meetingID: the live meeting session, if any: the daemon answers
+    ///   with that meeting's recent transcript in context (Slice M).
     /// - onNote: out-of-band status text (e.g. "using the CLI token").
     /// - onFinish: nil on a clean end of stream, else the error.
-    func run(channel: Channel, prompt: String,
+    func run(channel: Channel, prompt: String, meetingID: String? = nil,
              onEvent: @escaping (TurnEvent) -> Void,
              onNote: @escaping (String) -> Void,
              onFinish: @escaping (Error?) -> Void) {
@@ -36,17 +38,17 @@ final class TurnRunner {
             do {
                 let tok = try tokens.token()
                 do {
-                    try client.streamTurn(channel: channel, prompt: prompt, token: tok, cancel: token, onEvent: deliver)
+                    try client.streamTurn(channel: channel, prompt: prompt, token: tok, meetingID: meetingID, cancel: token, onEvent: deliver)
                 } catch WaterClientError.http(status: 401, body: _) {
-                    // The daemon reads clients.json only at startup, so a
-                    // token minted after it started is unknown until it
-                    // restarts. Fall back to the CLI's own token (what
-                    // `water ask` uses) rather than failing outright.
+                    // Current daemons re-read clients.json on an unknown
+                    // token, so this only fires against an older daemon that
+                    // loaded it once at startup. Fall back to the CLI's own
+                    // token (what `water ask` uses) rather than failing.
                     guard let cli = tokens.cliFallbackToken(), cli != tok else { throw WaterClientError.http(status: 401, body: "invalid token") }
                     DispatchQueue.main.async {
-                        onNote("The daemon doesn't know this app's token yet (it loads tokens at startup) — using the CLI token. Restart `water daemon` to fix.")
+                        onNote("The daemon rejected this app's token (an older daemon loads tokens only at startup) — using the CLI token. Restart or update `water daemon` to fix.")
                     }
-                    try client.streamTurn(channel: channel, prompt: prompt, token: cli, cancel: token, onEvent: deliver)
+                    try client.streamTurn(channel: channel, prompt: prompt, token: cli, meetingID: meetingID, cancel: token, onEvent: deliver)
                 }
             } catch {
                 failure = error

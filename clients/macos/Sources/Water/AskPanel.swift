@@ -144,8 +144,14 @@ final class AskPanelController: NSObject, NSTextFieldDelegate {
     func appendError(_ s: String) { append("\n⚠︎ " + s + "\n", color: .systemRed) }
 
     /// An action the model wants to take is waiting in the approval queue.
-    func appendApproval(id: String?) {
-        let what = id.map { "Approval needed (\($0))." } ?? "Approval needed."
+    func appendApproval(id: String?, action: String?, risk: String?) {
+        var what = "Approval needed"
+        if let action { what += ": " + action }
+        var detail: [String] = []
+        if let r = risk?.trimmingCharacters(in: .whitespaces), !r.isEmpty { detail.append(r + " risk") }
+        if let id { detail.append(id) }
+        if !detail.isEmpty { what += " (" + detail.joined(separator: ", ") + ")" }
+        what += "."
         append("\n⏸ " + what + " Review it with `water approve`.\n", color: .systemOrange, weight: .semibold)
     }
 

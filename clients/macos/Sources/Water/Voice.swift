@@ -1,54 +1,60 @@
 import AVFoundation
 import Foundation
 import Speech
+import WaterClientCore
 
-/// Push-to-talk: hold the hotkey to record, release to send — `startHold`/
-/// `endHold` are the hold-gesture entry points the hotkey uses; `toggle`
-/// stays available for a plain click (e.g. the menu item), where there's no
-/// "hold" to track. Recognition is on-device only
+/// Push-to-talk plus spoken replies. The state machine itself is
+/// WaterClientCore's VoiceSession (tested there); this wires it to the real
+/// permission prompts, microphone, recognizer and main-queue timer, and owns
+/// the speech synthesizer. Recognition is on-device only
 /// (`requiresOnDeviceRecognition`): if this Mac can't recognize on-device,
 /// voice refuses to run rather than send audio to Apple's servers.
 final class VoiceController {
-    enum State { case idle, listening, finishing }
-    private(set) var state: State = .idle
+    typealias State = VoiceSession.State
 
-    private let mic = MicTap()
-    private var recognizer: SFSpeechRecognizer?
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
-    private var transcript = ""
-    private var delivered = false
+    private let session: VoiceSession
     private let synth = AVSpeechSynthesizer()
 
-    var onListening: (() -> Void)?
-    var onPartial: ((String) -> Void)?
+    var state: State { session.state }
+
+    var onListening: (() -> Void)? {
+        get { session.onListening } set { session.onListening = newValue }
+    }
+    var onPartial: ((String) -> Void)? {
+        get { session.onPartial } set { session.onPartial = newValue }
+    }
     /// The final transcript (non-empty), ready to send as a voice turn.
-    var onTranscript: ((String) -> Void)?
+    var onTranscript: ((String) -> Void)? {
+        get { session.onTranscript } set { session.onTranscript = newValue }
+    }
     /// A user-facing failure; the controller is back to idle.
-    var onFailure: ((String) -> Void)?
+    var onFailure: ((String) -> Void)? {
+        get { session.onFailure } set { session.onFailure = newValue }
+    }
 
+    init(holdLabel: String) {
+        session = VoiceSession(permissions: SystemVoicePermissions(),
+                               capture: OnDeviceSpeechCapture(),
+                               scheduler: MainQueueScheduler())
+        session.releasedEarlyMessage = "Hold \(holdLabel) while you talk, and release it to send."
+    }
+
+    /// Menu click: start listening, or stop and send.
     func toggle() {
-        switch state {
-        case .idle: begin()
-        case .listening: finish()
-        case .finishing: break
-        }
+        if session.state == .idle { stopSpeaking() }
+        session.toggle()
     }
 
-    /// Hold gesture: key went down. No-op if a capture is already in
-    /// progress (e.g. a stray repeat) — only .idle actually starts one.
+    /// Hotkey down. A new capture interrupts any reply being spoken.
     func startHold() {
-        guard state == .idle else { return }
-        begin()
+        if session.state == .idle { stopSpeaking() }
+        session.startHold()
     }
 
-    /// Hold gesture: key went up. No-op unless we're actually listening —
-    /// guards a release with no matching press (e.g. focus changed
-    /// mid-hold) from tearing down a capture that never started.
-    func endHold() {
-        guard state == .listening else { return }
-        finish()
-    }
+    /// Hotkey up.
+    func endHold() { session.endHold() }
+
+    func cancel() { session.cancel() }
 
     /// Speaks one reply sentence. AVSpeechSynthesizer queues utterances, so
     /// sentences play back-to-back in arrival order while more stream in.
@@ -58,106 +64,81 @@ final class VoiceController {
         synth.speak(AVSpeechUtterance(string: s))
     }
 
+    /// Stops the current utterance and drops every queued one.
     func stopSpeaking() {
         synth.stopSpeaking(at: .immediate)
     }
+}
 
-    // MARK: permissions
+private final class SystemVoicePermissions: VoicePermissionGate {
+    func request(_ done: @escaping (String?) -> Void) {
+        SpeechPermissions.request(retry: "press the voice hotkey again", done)
+    }
+}
 
-    private func begin() {
-        stopSpeaking()
-        state = .finishing // guard against a double press while prompts are up
-        SpeechPermissions.request(retry: "press the voice hotkey again") { [weak self] problem in
-            guard let self else { return }
-            if let problem {
-                self.state = .idle
-                self.onFailure?(problem)
-                return
-            }
-            self.startCapture()
-        }
+private final class MainQueueScheduler: VoiceScheduler {
+    func after(_ seconds: TimeInterval, _ work: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+}
+
+/// The mic feeding one on-device SFSpeech request at a time.
+private final class OnDeviceSpeechCapture: SpeechCapture {
+    private let mic = MicTap()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    private var onResult: ((SpeechResult) -> Void)?
+
+    init() {
+        // A hold is short: if the input device changes mid-hold, end it with
+        // a clear error rather than splice two audio formats into one request.
+        mic.onInterrupted = { [weak self] message in self?.onResult?(.error(message)) }
     }
 
-    // MARK: capture
-
-    private func startCapture() {
+    func start(onResult: @escaping (SpeechResult) -> Void) throws {
+        cancel()
         let recognizer: SFSpeechRecognizer
         switch SpeechPermissions.onDeviceRecognizer() {
         case .success(let r): recognizer = r
-        case .failure(let e): return fail(e.message)
+        case .failure(let e): throw CaptureStartError(e.message)
         }
-        self.recognizer = recognizer
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.requiresOnDeviceRecognition = true
         req.shouldReportPartialResults = true
         req.taskHint = .dictation
-
         do {
             try mic.start { buffer in req.append(buffer) }
         } catch {
-            return fail(error.localizedDescription)
+            throw CaptureStartError(error.localizedDescription)
         }
-
         request = req
-        transcript = ""
-        delivered = false
-        state = .listening
-        task = recognizer.recognitionTask(with: req) { [weak self] result, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let result {
-                    self.transcript = result.bestTranscription.formattedString
-                    if !self.delivered { self.onPartial?(self.transcript) }
-                    if result.isFinal { self.deliver() }
-                } else if error != nil, self.state == .finishing {
-                    self.deliver()
-                } else if let error, self.state == .listening {
-                    self.teardown()
-                    self.fail("Speech recognition stopped: \(error.localizedDescription)")
-                }
+        self.onResult = onResult
+        task = recognizer.recognitionTask(with: req) { result, error in
+            let r: SpeechResult?
+            if let result {
+                let t = result.bestTranscription.formattedString
+                r = result.isFinal ? .final(t) : .partial(t)
+            } else if let error {
+                r = .error(error.localizedDescription)
+            } else {
+                r = nil
             }
-        }
-        onListening?()
-    }
-
-    private func finish() {
-        state = .finishing
-        teardownAudio()
-        request?.endAudio()
-        // endAudio() only has already-buffered audio left to decode, so
-        // isFinal normally arrives in well under a second — this is a worst
-        // case backstop, not the typical path. Most of the old toggle-mode
-        // latency was never recognition speed; it was the user having to
-        // decide to press the hotkey a second time. Holding removes that.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.deliver() }
-    }
-
-    private func deliver() {
-        guard !delivered, state == .finishing else { return }
-        delivered = true
-        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        teardown()
-        if text.isEmpty {
-            onFailure?("Didn't catch anything — try again.")
-        } else {
-            onTranscript?(text)
+            // `onResult` is this capture's own closure (VoiceSession drops it
+            // once stale), so a late callback can't reach a later capture.
+            if let r { DispatchQueue.main.async { onResult(r) } }
         }
     }
 
-    private func teardownAudio() {
+    func endAudio() {
         mic.stop()
+        request?.endAudio()
     }
 
-    private func teardown() {
-        teardownAudio()
+    func cancel() {
+        mic.stop()
         task?.cancel()
         task = nil
         request = nil
-        state = .idle
-    }
-
-    private func fail(_ message: String) {
-        state = .idle
-        onFailure?(message)
+        onResult = nil
     }
 }

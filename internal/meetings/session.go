@@ -96,7 +96,18 @@ func (m *Manager) Stop(ctx context.Context, id string) (Session, error) {
 	return m.Get(ctx, id)
 }
 
-// AddSegment appends one segment to a live session. A zero At means now.
+// MaxSegmentSkew is how far past the daemon's clock a segment's At may be
+// before it is clamped to now.
+const MaxSegmentSkew = 5 * time.Second
+
+// AddSegment appends one segment to a live session.
+//
+// seg.At is when the speech began (optional; zero means now). It orders the
+// transcript and is clamped to [session start, now + MaxSegmentSkew], so a
+// bad client clock cannot pin a line into the rolling windows or push it
+// ahead of the meeting. Help's and cues' rolling windows select segments by
+// when the daemon received them, not by At, so a long utterance stamped with
+// its start (posted tens of seconds later) is still "recent" when it lands.
 func (m *Manager) AddSegment(ctx context.Context, sessionID string, seg Segment) error {
 	text := strings.TrimSpace(seg.Text)
 	if seg.Channel != Mic && seg.Channel != System {
@@ -112,11 +123,17 @@ func (m *Manager) AddSegment(ctx context.Context, sessionID string, seg Segment)
 	if s.EndedAt != nil {
 		return ErrEnded
 	}
+	now := m.now()
 	at := seg.At
-	if at.IsZero() {
-		at = m.now()
+	switch {
+	case at.IsZero():
+		at = now
+	case at.After(now.Add(MaxSegmentSkew)):
+		at = now
+	case at.Before(s.StartedAt):
+		at = s.StartedAt
 	}
-	return m.st.InsertMeetingSegment(ctx, store.MeetingSegmentRow{SessionID: sessionID, At: at.UTC(), Channel: string(seg.Channel), Text: text})
+	return m.st.InsertMeetingSegment(ctx, store.MeetingSegmentRow{SessionID: sessionID, At: at.UTC(), ReceivedAt: now.UTC(), Channel: string(seg.Channel), Text: text})
 }
 
 // Segments returns a session's whole transcript, oldest first.

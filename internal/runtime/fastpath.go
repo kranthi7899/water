@@ -112,9 +112,8 @@ func matchSchedule(p string) (day string, ok bool) {
 	triggers := []string{
 		"my schedule", "my calendar", "my agenda", "my meetings",
 		"on my calendar", "any meetings", "meetings do i have",
-		"what's on my", "whats on my", "what is on my",
 	}
-	if !containsAny(p, triggers...) {
+	if !containsAny(p, triggers...) && !matchOnMy(p) {
 		return "", false
 	}
 	tomorrow := containsAny(p, "tomorrow")
@@ -127,14 +126,61 @@ func matchSchedule(p string) (day string, ok bool) {
 	}
 }
 
-// matchApprovals recognises a question about the approval queue.
+// fastPathFiller are the words an open-ended trigger ("what's pending",
+// "what's on my ...") may be padded with and still be the whole question.
+// Anything else ("what's pending on the acme deal", "what's on my mind") is
+// a different question and falls through to the model.
+var fastPathFiller = map[string]bool{
+	"": true, "for": true, "me": true, "right": true, "now": true, "today": true, "tomorrow": true,
+	"anything": true, "is": true, "there": true, "so": true, "hey": true, "ok": true, "okay": true,
+	"still": true, "else": true, "currently": true, "the": true, "rest": true, "of": true, "day": true,
+}
+
+// onlyFiller reports whether every word of s is filler.
+func onlyFiller(s string) bool {
+	for _, w := range strings.Fields(s) {
+		if !fastPathFiller[w] {
+			return false
+		}
+	}
+	return true
+}
+
+// wholePhrase reports whether p is trigger plus nothing but filler.
+func wholePhrase(p string, triggers ...string) bool {
+	for _, tr := range triggers {
+		if i := strings.Index(p, tr); i >= 0 && onlyFiller(p[:i]) && onlyFiller(p[i+len(tr):]) {
+			return true
+		}
+	}
+	return false
+}
+
+// onMyCalendarNouns are what "what's on my ___" must be about to be a
+// calendar question.
+var onMyCalendarNouns = []string{"calendar", "schedule", "agenda", "plate", "day"}
+
+// matchOnMy recognises "what's on my <calendar noun>" and nothing else
+// ("what's on my mind" or "... reading list" fall through).
+func matchOnMy(p string) bool {
+	var triggers []string
+	for _, lead := range []string{"what's on my ", "whats on my ", "what is on my "} {
+		for _, n := range onMyCalendarNouns {
+			triggers = append(triggers, lead+n)
+		}
+	}
+	return wholePhrase(p, triggers...)
+}
+
+// matchApprovals recognises a question about the approval queue. The
+// open-ended "what's pending" only counts as the whole question.
 func matchApprovals(p string) bool {
 	triggers := []string{
 		"pending approval", "pending approvals", "any approvals",
 		"approvals waiting", "waiting for my approval", "waiting on my approval",
-		"what needs my approval", "what's pending", "whats pending",
+		"what needs my approval",
 	}
-	return containsAny(p, triggers...)
+	return containsAny(p, triggers...) || wholePhrase(p, "what's pending", "whats pending", "what is pending")
 }
 
 // matchBrief recognises a question about the (not yet built, A4) morning
@@ -164,7 +210,7 @@ func scheduleAnswer(ctx context.Context, env Env, day string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %d event(s).\n", strings.ToUpper(day[:1])+day[1:], len(todays))
 	for _, e := range todays {
-		fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
+		fmt.Fprintf(&b, "- %s %s\n", e.Clock(), e.Title)
 	}
 	return strings.TrimSpace(b.String())
 }

@@ -112,3 +112,45 @@ func TestFTSIndexesTrackUpsert(t *testing.T) {
 		t.Fatalf("documents_fts integrity-check: %v", err)
 	}
 }
+
+// TestSearchHitKeepsReadExcerpt is the review finding: gdrive.search_files
+// normalizes every hit with an empty Excerpt, and Upsert used to overwrite
+// the excerpt a read_file stored, dropping the body text from documents_fts.
+func TestSearchHitKeepsReadExcerpt(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	read := &Document{Meta: Meta{Source: "gdrive", SourceID: "d1", External: true}, Title: "Q3 plan", Excerpt: "alpha pricing 42"}
+	if err := s.Upsert(ctx, read); err != nil {
+		t.Fatal(err)
+	}
+	hit := &Document{Meta: Meta{Source: "gdrive", SourceID: "d1", External: true}, Title: "Q3 plan v2"}
+	if err := s.Upsert(ctx, hit); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Get[Document](ctx, s, "gdrive", "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Excerpt != "alpha pricing 42" || got.Title != "Q3 plan v2" {
+		t.Fatalf("after search-hit upsert: title=%q excerpt=%q, want the new title and the kept excerpt", got.Title, got.Excerpt)
+	}
+	hits, err := s.SearchDocuments(ctx, QuoteFTSTerm("pricing"), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].SourceID != "d1" {
+		t.Fatalf("SearchDocuments(pricing) = %+v, want d1", hits)
+	}
+	// A later read with a new excerpt still replaces it.
+	read.Excerpt = "beta margins"
+	if err := s.Upsert(ctx, read); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := Get[Document](ctx, s, "gdrive", "d1"); got.Excerpt != "beta margins" {
+		t.Fatalf("excerpt = %q, want the newer read's", got.Excerpt)
+	}
+}

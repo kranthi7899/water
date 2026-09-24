@@ -32,6 +32,25 @@ final class MeetingController {
 
     init(daemon: MeetingDaemon) {
         self.daemon = daemon
+        // A meeting outlives device changes (AirPods connecting mid-call):
+        // keep the mic channel going on the new input, and say so if that
+        // isn't possible rather than silently losing the CEO's side.
+        mic.restartOnDeviceChange = true
+        mic.onRestarted = { [weak self] in
+            guard let self, self.state == .active else { return }
+            self.onNote?("The audio input device changed; meeting capture switched to it.")
+        }
+        mic.onInterrupted = { [weak self] message in
+            guard let self, self.state == .active else { return }
+            self.streams[.mic]?.cancel()
+            self.streams[.mic] = nil
+            if self.streams.isEmpty {
+                self.onNote?("Microphone: \(message) Nothing else was being captured, so the meeting capture ended.")
+                self.end()
+            } else {
+                self.onNote?("Microphone: \(message) System audio is still being captured; stop and restart meeting capture (\(HotKeyConfig.meeting.label)) to bring your side back.")
+            }
+        }
     }
 
     func toggle() {
@@ -413,7 +432,7 @@ final class MeetingDaemon {
                     return s
                 } catch WaterClientError.http(status: 401, body: _) {
                     guard let cli = tokens.cliFallbackToken(), cli != tok else { throw WaterClientError.http(status: 401, body: "invalid token") }
-                    note = "The daemon doesn't know this app's token yet (it loads tokens at startup) — using the CLI token. Restart `water daemon` to fix."
+                    note = "The daemon rejected this app's token (an older daemon loads tokens only at startup) — using the CLI token. Restart or update `water daemon` to fix."
                     let s = try client.startMeeting(token: cli)
                     token = cli
                     return s

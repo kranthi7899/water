@@ -152,7 +152,7 @@ func TestPrefetchPullsAttendeeMailAndLinkedDocsForSoonEvent(t *testing.T) {
 	if len(mailCalls) != 1 {
 		t.Fatalf("mail prefetch calls = %d, want 1: %v", len(mailCalls), mailCalls)
 	}
-	if q, _ := mailCalls[0]["query"].(string); q != "from:priya@acme.com OR from:sam@acme.com" {
+	if q, _ := mailCalls[0]["query"].(string); q != "(from:priya@acme.com OR from:sam@acme.com) newer_than:30d" {
 		t.Fatalf("mail query = %q", q)
 	}
 	docCalls := r.docs.callArgs()

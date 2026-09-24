@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"water/internal/approvals"
@@ -30,11 +32,38 @@ type daemonClient struct {
 
 var errDaemonNotRunning = fmt.Errorf("water daemon is not running. Start it with `water daemon` (or install it to start automatically: `water daemon install`)")
 
+// daemonLiveness is what probeDaemon learned about the daemon's socket.
+type daemonLiveness int
+
+const (
+	daemonAbsent daemonLiveness = iota // no socket file
+	daemonStale                        // a socket file is there but nothing answers (a crash or SIGKILL left it)
+	daemonUp                           // something accepted a connection on the socket
+)
+
+// probeDaemon decides whether the daemon is running by dialling its socket,
+// not by checking that the socket file exists: a daemon that was SIGKILLed
+// or crashed never runs its shutdown, so the file outlives it.
+func probeDaemon(sock string) daemonLiveness {
+	if _, err := os.Stat(sock); err != nil {
+		return daemonAbsent
+	}
+	c, err := net.DialTimeout("unix", sock, 500*time.Millisecond)
+	if err != nil {
+		return daemonStale
+	}
+	_ = c.Close()
+	return daemonUp
+}
+
 func newDaemonClient() (*daemonClient, error) {
 	paths := gateway.Paths{Home: config.Home()}
 	sock := paths.SocketPath()
-	if _, err := os.Stat(sock); err != nil {
+	switch probeDaemon(sock) {
+	case daemonAbsent:
 		return nil, errDaemonNotRunning
+	case daemonStale:
+		return nil, fmt.Errorf("%w (stale socket at %s: nothing is listening)", errDaemonNotRunning, sock)
 	}
 	clients, err := gateway.LoadClients(paths.ClientsPath())
 	if err != nil {
@@ -73,6 +102,11 @@ func (c *daemonClient) do(ctx context.Context, method, path string, body any) (*
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		// A daemon that died mid-session gets the same start-it hint as one
+		// that was never running.
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
+			return nil, fmt.Errorf("%w (%v)", errDaemonNotRunning, err)
+		}
 		return nil, fmt.Errorf("water daemon: %w", err)
 	}
 	return resp, nil

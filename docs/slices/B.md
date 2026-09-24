@@ -70,17 +70,20 @@ third-party packages and makes no metered calls. It builds without Xcode.
    - Expect one keychain "allow access" prompt.
 
 ## Findings from reading the daemon
-- **The daemon reads `clients.json` only at startup** (`gateway.LoadClients`
-  in `runDaemon`). A token minted by `water daemon token new` gets a 401
-  until the daemon restarts. That's why the app falls back to the `cli` token.
+- **The daemon read `clients.json` only at startup** (`gateway.LoadClients`
+  in `runDaemon`). A token minted by `water daemon token new` got a 401
+  until the daemon restarted, which is why the app falls back to the `cli`
+  token. *Fixed in the 2026-09-24 review pass:* the daemon now re-reads the
+  file on an unknown token. The fallback remains only for older daemons.
 - **`approval_required` was never emitted** (fixed in the whole-system
   review). A model tool call that the daemon queues for approval is now
   reported on the open `POST /v1/turns` stream as `approval_required`
-  (`approval_id`, and the action in `text`), before `done`. Every turn shares
-  one session tool token, so the event goes to every open turn stream; in
-  practice the warm session serializes turns, so there is one. A call that
-  lands after its turn's stream closed is still queued, just not announced
-  inline. Voice approvals are still Slice B work.
+  (`approval_id`, and the action in `text`), before `done`. *Since the
+  2026-09-24 review pass:* the daemon runs one model turn at a time, and the
+  event goes only to the stream of the turn whose model is running. It also
+  carries `action`, `risk` and `payload_hash`. A call that lands after its
+  turn's stream closed is still queued, just not announced inline. See A2.md
+  for the full contract. Voice approvals are still Slice B work.
 - `sentence` events come only on the `voice` channel. Fast-path answers get
   them too (`deliverText`).
 

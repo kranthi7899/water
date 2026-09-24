@@ -36,13 +36,17 @@ func NewOS() *OS {
 	return o
 }
 
-func (o *OS) detect() {
+func (o *OS) detect() { o.detectFor(runtime.GOOS) }
+
+func (o *OS) detectFor(goos string) {
 	candidates := [][]string{}
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		candidates = append(candidates, []string{"say"})
 	case "linux":
-		candidates = append(candidates, []string{"spd-say", "--wait"}, []string{"espeak"}, []string{"espeak-ng"})
+		// spd-say reads stdin only in pipe mode (-e); without it and without
+		// a text argument it prints its usage and exits 1.
+		candidates = append(candidates, []string{"spd-say", "--wait", "-e"}, []string{"espeak"}, []string{"espeak-ng"})
 	}
 	for _, c := range candidates {
 		if p, err := o.Look(c[0]); err == nil {
@@ -82,7 +86,8 @@ func (o *OS) Speak(ctx context.Context, text string) error {
 	}
 	args := append([]string{}, o.args...)
 	args = append(args, o.voiceArgs()...)
-	// `say`, spd-say and espeak all read stdin when no text argument is given.
+	// `say` and espeak read stdin when no text argument is given; spd-say
+	// does in pipe mode, which detectFor always passes (-e).
 	cmd := exec.CommandContext(ctx, o.bin, args...)
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Env = backend.ScrubbedEnv()

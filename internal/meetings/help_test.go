@@ -24,14 +24,17 @@ func newHelpManager(t *testing.T) (*Manager, *store.Store) {
 func TestHelpReturnsOnlyRecentSegmentsAndIsAlwaysTainted(t *testing.T) {
 	m, _ := newHelpManager(t)
 	ctx := context.Background()
+	now := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
+	clock := now.Add(-15 * time.Minute)
+	useClock(m, &clock)
 	s, err := m.Start(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
 	old := Segment{At: now.Add(-10 * time.Minute), Channel: System, Text: "ancient unrelated remark"}
 	recent := Segment{At: now.Add(-1 * time.Minute), Channel: Mic, Text: "how's the kafka budget looking"}
 	for _, seg := range []Segment{old, recent} {
+		clock = seg.At
 		if err := m.AddSegment(ctx, s.ID, seg); err != nil {
 			t.Fatal(err)
 		}

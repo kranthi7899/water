@@ -41,6 +41,12 @@ connectors:
 // fixture message seeded yet -- callers add one per test.
 func newEmailTestDaemon(t *testing.T) (*Daemon, string, *approvals.Queue, *store.Store) {
 	t.Helper()
+	return newEmailTestDaemonWith(t, emailTestManifest)
+}
+
+// newEmailTestDaemonWith is newEmailTestDaemon over a caller's manifest.
+func newEmailTestDaemonWith(t *testing.T, manifest string) (*Daemon, string, *approvals.Queue, *store.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "water.db"))
 	if err != nil {
@@ -54,7 +60,7 @@ func newEmailTestDaemon(t *testing.T) (*Daemon, string, *approvals.Queue, *store
 	t.Cleanup(func() { log.Close() })
 	q := approvals.NewQueue(st, log)
 
-	m, err := twins.Parse([]byte(emailTestManifest))
+	m, err := twins.Parse([]byte(manifest))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,9 @@ let package = Package(
     ],
     targets: [
         // Everything testable without a GUI, permissions, or a real daemon:
-        // the HTTP-over-Unix-socket client, NDJSON parsing, token storage.
+        // the HTTP-over-Unix-socket client, NDJSON parsing, token storage,
+        // and the push-to-talk state machine + hotkey hold tracking
+        // (HoldToTalk.swift; the app plugs in the real mic/recognizer).
         .target(name: "WaterClientCore"),
         // The AppKit app: status item, pop-up panel, hotkeys, voice.
         .executableTarget(name: "Water", dependencies: ["WaterClientCore"]),

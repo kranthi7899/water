@@ -76,9 +76,47 @@ var (
 	// assignment; Name is used as Owner when it matches, "" otherwise. Only
 	// "will"/"to" are case-insensitive — the name itself must actually be
 	// capitalized, or every sentence starting a clause with a lowercase verb
-	// (e.g. "moved to the east building") would be misread as a name.
-	ownerRe = regexp.MustCompile(`\b([A-Z][a-zA-Z]+)\s+(?i:will|to)\s+(.+)`)
+	// (e.g. "moved to the east building") would be misread as a name. A
+	// capitalized word is still only a candidate: ownerOf drops the common
+	// sentence-starters in notOwners. The match stops after "will"/"to" so
+	// every candidate in a segment is seen, not just the first.
+	ownerRe = regexp.MustCompile(`\b([A-Z][a-zA-Z]+)\s+(?i:will|to)\s+\S`)
 )
+
+// notOwners are capitalized words that start ordinary sentences before
+// "to"/"will" ("Nice to meet you", "We will see", "Want to grab lunch?")
+// and so are never read as a person's name. The recap must never invent an
+// owner, so this errs toward leaving Owner empty.
+var notOwners = func() map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(`
+		we you they he she it i me us them this that these those there here who what which
+		when where why how someone somebody everyone everybody anyone anybody nobody noone
+		nothing something everything anything one people team folks guys all both each
+		nice welcome good great happy glad sorry sad hard easy tough time next last first
+		want wants need needs have has had going gonna got get trying try tried used
+		able unable likely unlikely supposed about back due thanks thank talk listen up
+		similar compared according moved move went go come came due going plan plans
+		and but or so also just still maybe probably definitely hopefully actually really
+		then now today tomorrow yesterday tonight later soon yes no ok okay sure well right
+		let lets please ready free fine hello hi hey bye cheers mind remember
+		monday tuesday wednesday thursday friday saturday sunday
+		january february march july september october november december`) {
+		m[w] = true
+	}
+	return m
+}()
+
+// ownerOf returns the first plausible person named as "<Name> will|to ..."
+// in text, or "" when none is.
+func ownerOf(text string) string {
+	for _, m := range ownerRe.FindAllStringSubmatch(text, -1) {
+		if !notOwners[strings.ToLower(m[1])] {
+			return m[1]
+		}
+	}
+	return ""
+}
 
 func containsAny(s string, markers []string) bool {
 	for _, m := range markers {
@@ -101,17 +139,18 @@ func ExtractSignals(segs []Segment) RecapSignals {
 	for _, s := range segs {
 		lower := strings.ToLower(s.Text)
 		item := RecapItem{Text: s.Text, At: s.At, Channel: s.Channel}
+		owner := ownerOf(s.Text)
 		switch {
 		case containsAny(lower, decisionMarkers):
 			sig.Decisions = append(sig.Decisions, item)
-		case containsAny(lower, actionMarkers) || ownerRe.MatchString(s.Text):
-			owner := ""
-			if m := ownerRe.FindStringSubmatch(s.Text); m != nil {
-				owner = m[1]
-			}
+		case containsAny(lower, actionMarkers):
 			sig.ActionItems = append(sig.ActionItems, ActionItem{RecapItem: item, Owner: owner, Level: twins.D})
 		case strings.Contains(s.Text, "?"):
+			// A question stays a question unless it carries an explicit
+			// action marker: "Want to grab lunch after?" names no owner.
 			sig.OpenQuestions = append(sig.OpenQuestions, item)
+		case owner != "":
+			sig.ActionItems = append(sig.ActionItems, ActionItem{RecapItem: item, Owner: owner, Level: twins.D})
 		case containsAny(lower, fyiMarkers):
 			sig.FYI = append(sig.FYI, item)
 		}

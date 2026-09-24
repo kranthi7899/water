@@ -140,6 +140,41 @@ func TestBriefAnswerPropagatesTaintForExternalMessages(t *testing.T) {
 	}
 }
 
+// TestBriefIgnoresOldMailIngestedToday is the review finding: a prefetch or
+// model search pulls a months-old message into the store today (created_at
+// = now). It was sent long ago, so it is not "new since yesterday" and must
+// not be flagged as needing a reply.
+func TestBriefIgnoresOldMailIngestedToday(t *testing.T) {
+	env, ctx := testEnv(t)
+	old := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "old", External: true, CreatedAt: env.now()},
+		From:    "dana@acme.com",
+		Subject: "can you review the deck?",
+		SentAt:  env.now().AddDate(0, 0, -90),
+	}
+	fresh := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "fresh", External: true, CreatedAt: env.now()},
+		From:    "lee@acme.com",
+		Subject: "urgent: sign today",
+		SentAt:  env.now().Add(-time.Hour),
+	}
+	for _, m := range []*store.Message{old, fresh} {
+		if err := env.Store.Upsert(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sig, _, err := computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sig.NewMessages != 1 || sig.DistinctSenders != 1 {
+		t.Fatalf("NewMessages=%d DistinctSenders=%d, want 1/1 (only the message sent in the window)", sig.NewMessages, sig.DistinctSenders)
+	}
+	if len(sig.NeedsAttention) != 1 || sig.NeedsAttention[0].SourceID != "fresh" {
+		t.Fatalf("NeedsAttention = %+v, want only the fresh message", sig.NeedsAttention)
+	}
+}
+
 // TestBriefSignalsRankOpenCardsAndOmitTheSectionWhenEmpty covers both the
 // morning brief's new signal (task 3) and its explicit "absent, not an
 // empty section" rule: no Env.Decisions at all renders no cards section,

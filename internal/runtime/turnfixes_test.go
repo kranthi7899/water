@@ -181,6 +181,12 @@ func TestFastPathLeavesActionRequestsToTheModel(t *testing.T) {
 		"What's on my calendar next week",
 		"what's on my calendar on thursday",
 		"move my 3pm meeting on my calendar to 4",
+		// Open-ended triggers followed by a different subject (review finding).
+		"what's pending on the Acme deal?",
+		"what's on my mind",
+		"what's on my reading list",
+		"whats pending with legal",
+		"what's on my plate for Acme",
 	} {
 		if _, ok := FastPath(ctx, env, p); ok {
 			t.Errorf("FastPath(%q) answered from the fast path; it must fall through to the model", p)
@@ -189,6 +195,8 @@ func TestFastPathLeavesActionRequestsToTheModel(t *testing.T) {
 	for _, p := range []string{
 		"what's on my calendar today", "any pending approvals", "what's my morning brief",
 		"do I have any meetings tomorrow", "is my brief ready", "what needs my approval",
+		"what's pending", "so what's pending for me right now?", "what's on my plate today",
+		"what is on my schedule tomorrow",
 	} {
 		if _, ok := FastPath(ctx, env, p); !ok {
 			t.Errorf("FastPath(%q) should still match", p)

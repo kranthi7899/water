@@ -153,14 +153,34 @@ public final class UnixSocketClient {
     /// its line is complete — the same contract as the Go client's Turn.
     /// A non-200 reply throws `.http` with the daemon's error text (401 for a
     /// token the daemon doesn't know).
+    ///
+    /// - meetingID: a meeting session's id (Slice M). The daemon extends the
+    ///   turn with that session's recent transcript (and taints the turn);
+    ///   an unknown id is silently ignored. Nil or empty sends none.
+    /// - onTaskID: called once, before any event, with the daemon's
+    ///   `X-Water-Task-Id` — the id `cancelTask(id:token:)` takes. Closing
+    ///   the stream (`cancel`) also cancels the turn; this is for a caller
+    ///   that wants to cancel from somewhere other than the reading thread.
+    ///
+    /// The stream ends after exactly one terminal event (`done` or `error`):
+    /// the daemon returns right after it, which ends the chunked body, so
+    /// this returns without waiting for the socket to close.
     public func streamTurn(channel: Channel, prompt: String, token: String, clear: Bool = false,
-                           cancel: CancelToken? = nil, onEvent: @escaping (TurnEvent) -> Void) throws {
-        let req = try HTTPRequest.json("POST", "/v1/turns", token: token,
-                                       ["channel": channel.rawValue, "prompt": prompt, "clear": clear])
+                           meetingID: String? = nil,
+                           cancel: CancelToken? = nil,
+                           onTaskID: ((String) -> Void)? = nil,
+                           onEvent: @escaping (TurnEvent) -> Void) throws {
+        var body: [String: Any] = ["channel": channel.rawValue, "prompt": prompt, "clear": clear]
+        if let m = meetingID?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty { body["meeting_id"] = m }
+        let req = try HTTPRequest.json("POST", "/v1/turns", token: token, body)
         var status = 0
         var errBody = Data()
         var splitter = NDJSONLineSplitter()
-        try perform(req, cancel: cancel, onHead: { s, _ in status = s }, onBody: { d in
+        try perform(req, cancel: cancel, onHead: { s, h in
+            status = s
+            // The parser lowercases header names.
+            if s == 200, let id = h["x-water-task-id"], !id.isEmpty { onTaskID?(id) }
+        }, onBody: { d in
             if status != 200 {
                 if errBody.count < 64 * 1024 { errBody.append(d) }
                 return
@@ -174,6 +194,20 @@ public final class UnixSocketClient {
         }
         for line in splitter.flush() {
             if let e = TurnEvent.decode(line: line) { onEvent(e) }
+        }
+    }
+
+    /// POST /v1/tasks/{id}/cancel: cancels a running turn by the id
+    /// `streamTurn` reported through `onTaskID`. 404 (`.http`) once the
+    /// turn has already ended.
+    public func cancelTask(id: String, token: String) throws {
+        let ok = !id.isEmpty && id.unicodeScalars.allSatisfy {
+            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" || $0 == "-"
+        }
+        guard ok else { throw WaterClientError.invalidRequest("bad task id") }
+        let r = try send(try HTTPRequest.json("POST", "/v1/tasks/\(id)/cancel", token: token, [:]))
+        if r.status != 200 {
+            throw WaterClientError.http(status: r.status, body: String(decoding: r.body, as: UTF8.self))
         }
     }
 

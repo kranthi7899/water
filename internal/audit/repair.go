@@ -2,9 +2,13 @@ package audit
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 )
 
 // KindRepair records that Repair dropped a torn final line.
@@ -14,7 +18,11 @@ const KindRepair Kind = "repair"
 // torn final write is the only thing wrong with it, and appends a KindRepair
 // entry recording what was dropped. It refuses to touch anything earlier
 // than the last line: a break further back is a real tamper or bug, not an
-// interrupted write, and must never be "fixed" by truncation.
+// interrupted write, and must never be "fixed" by truncation. It also
+// refuses, leaving the file unchanged, a final line that is a complete JSON
+// entry (an edit, not a torn write) or one the anchor in opts already
+// covers. The dropped bytes are kept in a 0600 "<path>.repair-dropped-<n>"
+// file next to the log.
 func Repair(path string, opts ...Option) error {
 	unlock, err := lockFile(path + ".lock")
 	if err != nil {
@@ -43,6 +51,24 @@ func Repair(path string, opts ...Option) error {
 	}
 
 	torn := lines[len(lines)-1]
+	// A torn write leaves a prefix of a line, never a whole JSON object. A
+	// final line that parses completely but does not verify was edited
+	// after it was written: that is evidence, not an interrupted write.
+	var whole Entry
+	if json.Unmarshal([]byte(torn), &whole) == nil {
+		return fmt.Errorf("audit: %s: the final line is a complete entry that does not verify; that is an edit, not a torn write, so it is left in place", path)
+	}
+	// Check the anchor before touching the file: Open (below) would refuse
+	// the truncated file anyway if the dropped line was already anchored,
+	// but only after the line was gone for good.
+	if err := checkRepairAnchor(path, lines[:len(lines)-1], opts); err != nil {
+		return err
+	}
+	// Keep the dropped bytes, whatever happens next.
+	dropped := fmt.Sprintf("%s.repair-dropped-%d", path, time.Now().UnixNano())
+	if err := os.WriteFile(dropped, []byte(torn+"\n"), 0o600); err != nil {
+		return fmt.Errorf("audit: preserving the dropped line: %w", err)
+	}
 	if err := truncateToLines(path, lines[:len(lines)-1]); err != nil {
 		return err
 	}
@@ -57,8 +83,44 @@ func Repair(path string, opts ...Option) error {
 	if len(preview) > 200 {
 		preview = preview[:200] + "…"
 	}
-	_, err = log.Append(Record{Kind: KindRepair, Reason: fmt.Sprintf("dropped a torn final line (%d bytes): %s", len(torn), preview)})
+	_, err = log.Append(Record{Kind: KindRepair, Reason: fmt.Sprintf("dropped a torn final line (%d bytes, kept in %s): %s", len(torn), filepath.Base(dropped), preview)})
 	return err
+}
+
+// checkRepairAnchor refuses a repair whose result Open would not accept
+// against the anchor in opts (if any): the file after dropping the final
+// line must end at the anchored entry, or exactly one validly chained entry
+// past it (a crash between a durable append and its anchor update). An
+// anchor at or past the dropped line means that line was a complete,
+// anchored entry, so dropping it would destroy tamper evidence.
+func checkRepairAnchor(path string, kept []string, opts []Option) error {
+	var scratch Log
+	for _, o := range opts {
+		o(&scratch)
+	}
+	if scratch.anchor == nil {
+		return nil
+	}
+	aseq, ahash, ok, err := scratch.anchor.LoadAuditAnchor(context.Background())
+	if err != nil {
+		return fmt.Errorf("audit: loading anchor: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	var last Entry
+	if len(kept) > 0 {
+		if err := json.Unmarshal([]byte(kept[len(kept)-1]), &last); err != nil {
+			return fmt.Errorf("audit: %s: reading the last good entry: %w", path, err)
+		}
+	}
+	if aseq == last.Seq && ahash == last.Hash {
+		return nil
+	}
+	if last.Seq > 0 && aseq == last.Seq-1 && ahash == last.PrevHash {
+		return nil
+	}
+	return fmt.Errorf("audit: %s: the anchor is at seq=%d but the last good entry is seq=%d; the final line was already anchored, so it is not a torn write; refusing to drop it (the file is unchanged)", path, aseq, last.Seq)
 }
 
 func readLines(path string) ([]string, error) {

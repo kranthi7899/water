@@ -230,6 +230,26 @@ func (a *App) daemonTokenCmd() *cobra.Command {
 
 const launchAgentLabel = "com.water.daemon"
 
+// launchdDomain is the per-user GUI launchd domain the agent loads into.
+func launchdDomain() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
+
+// launchdTarget is the agent's service target within launchdDomain.
+func launchdTarget() string { return launchdDomain() + "/" + launchAgentLabel }
+
+// launchAgentLoaded reports whether launchd currently has the agent loaded.
+func launchAgentLoaded() bool {
+	return exec.Command("launchctl", "print", launchdTarget()).Run() == nil
+}
+
+// waitLaunchAgentUnloaded polls until a bootout has taken effect (bootout
+// is asynchronous) or d passes.
+func waitLaunchAgentUnloaded(d time.Duration) {
+	deadline := time.Now().Add(d)
+	for launchAgentLoaded() && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func launchAgentPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -268,21 +288,46 @@ func (a *App) daemonInstallCmd() *cobra.Command {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
-			plist := renderLaunchAgentPlist(launchAgentPlistArgs{
+			pa := launchAgentPlistArgs{
 				Label: launchAgentLabel, WaterBin: waterBin, ExtraPathDir: claudeDir,
 				StdoutLog: filepath.Join(logDir, "daemon.log"), StderrLog: filepath.Join(logDir, "daemon.err.log"),
-			})
-			if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+				Demo: a.twinID() == demoTwinID,
+			}
+			if os.Getenv("WATER_HOME") != "" {
+				if pa.WaterHome, err = filepath.Abs(home); err != nil {
+					return err
+				}
+			}
+			// A reinstall (e.g. after a rebuild) must replace a loaded
+			// daemon: launchd refuses to bootstrap a label that is already
+			// loaded, and the old daemon would keep serving the old binary.
+			// Unload first, before the plist on disk changes.
+			restarted := launchAgentLoaded()
+			if restarted {
+				_, _ = exec.Command("launchctl", "bootout", launchdTarget()).CombinedOutput()
+				waitLaunchAgentUnloaded(5 * time.Second)
+			}
+			if err := os.WriteFile(path, []byte(renderLaunchAgentPlist(pa)), 0o644); err != nil {
 				return err
 			}
 			if lookErr != nil {
 				fmt.Fprintln(os.Stderr, "warning: claude was not found on PATH at install time; add it to PATH before the daemon starts")
 			}
-			out, err := exec.Command("launchctl", "bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), path).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("launchctl bootstrap: %w: %s", err, out)
+			var out []byte
+			for attempt := 0; attempt < 5; attempt++ {
+				if out, err = exec.Command("launchctl", "bootstrap", launchdDomain(), path).CombinedOutput(); err == nil {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
 			}
-			fmt.Println("installed", path)
+			if err != nil {
+				return fmt.Errorf("launchctl bootstrap: %w: %s (try `water daemon uninstall` then install again)", err, out)
+			}
+			if restarted {
+				fmt.Println("reinstalled (restarted running daemon)", path)
+			} else {
+				fmt.Println("installed", path)
+			}
 			return nil
 		},
 	}
@@ -298,7 +343,7 @@ func (a *App) daemonUninstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, _ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", os.Getuid()), path).CombinedOutput()
+			_, _ = exec.Command("launchctl", "bootout", launchdDomain(), path).CombinedOutput()
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}

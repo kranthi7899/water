@@ -16,11 +16,13 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"sync"
 	"time"
 
+	"water/internal/connectors/google/gapi"
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gmail"
 	"water/internal/gate"
@@ -234,8 +236,9 @@ func defaultMailArgs(_ time.Time, cursor string) map[string]any {
 
 // Refresher runs Config's periodic sync.
 type Refresher struct {
-	cfg      Config
-	prefetch *prefetchState
+	cfg       Config
+	prefetch  *prefetchState
+	reconnect reconnectState
 }
 
 // New builds a Refresher, filling in defaults.
@@ -288,6 +291,11 @@ func (r *Refresher) RunOnce(ctx context.Context) {
 // precompute is due.
 func (r *Refresher) RunOnceEvents(ctx context.Context) {
 	if !r.checkConnected(r.cfg.EventsFunction) {
+		if paused, _ := r.ReconnectNeeded(); paused {
+			// The brief is built from the local store, so it still goes out
+			// while Google sync waits for a reconnect.
+			r.maybePrecomputeBrief(ctx)
+		}
 		return
 	}
 	r.tick(ctx, r.cfg.EventsFunction, r.cfg.EventsCursorKey, r.cfg.EventsCursorField, r.cfg.EventsExpiredErr, r.cfg.EventsArgs)
@@ -304,11 +312,85 @@ func (r *Refresher) RunOnceMail(ctx context.Context) {
 }
 
 func (r *Refresher) checkConnected(fn string) bool {
-	if _, err := r.cfg.Vault.Get(r.cfg.Service, r.cfg.Account); err != nil {
+	sec, err := r.cfg.Vault.Get(r.cfg.Service, r.cfg.Account)
+	if err != nil {
 		r.cfg.Logf("sync: skipping %s, google is not connected (%v)", fn, err)
 		return false
 	}
+	return r.reconnect.allow(r.cfg.Now(), credentialFingerprint(sec))
+}
+
+// Reconnect backoff: once Google refuses the stored grant (gapi.ErrReconnect,
+// e.g. the weekly expiry of a Testing-mode OAuth app, or a revoke), the sync
+// loops stop calling it every tick. They probe again after reconnectMinProbe,
+// doubling up to reconnectMaxProbe, and immediately once the stored
+// credential changes (`water connect google` wrote a new one).
+const (
+	reconnectMinProbe = 5 * time.Minute
+	reconnectMaxProbe = 30 * time.Minute
+)
+
+// reconnectState is the sticky "Google needs reconnecting" state shared by
+// the mail and events loops.
+type reconnectState struct {
+	mu        sync.Mutex
+	needed    bool
+	since     time.Time
+	nextProbe time.Time
+	backoff   time.Duration
+	cred      [32]byte // fingerprint of the credential Google refused
+}
+
+func credentialFingerprint(s vault.Secret) [32]byte { return sha256.Sum256([]byte(s.Reveal())) }
+
+// allow reports whether a sync call may go out now: always, unless Google
+// refused the credential, in which case only a changed credential or a due
+// probe lets one through.
+func (s *reconnectState) allow(now time.Time, cred [32]byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.needed || cred != s.cred {
+		return true
+	}
+	if now.Before(s.nextProbe) {
+		return false
+	}
+	s.nextProbe = now.Add(s.backoff)
+	s.backoff = min(2*s.backoff, reconnectMaxProbe)
 	return true
+}
+
+// refused records that Google refused cred; first reports whether this
+// started the state (so it is logged once, not every probe).
+func (s *reconnectState) refused(now time.Time, cred [32]byte) (first bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.needed && s.cred == cred {
+		return false
+	}
+	s.needed, s.since, s.cred = true, now, cred
+	s.backoff = reconnectMinProbe
+	s.nextProbe = now.Add(s.backoff)
+	s.backoff = min(2*s.backoff, reconnectMaxProbe)
+	return true
+}
+
+// ok clears the state after a successful call; it reports whether it was set.
+func (s *reconnectState) ok() (was bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	was = s.needed
+	s.needed = false
+	return was
+}
+
+// ReconnectNeeded reports whether Google has refused the stored credential
+// (sync is backing off until it is reconnected) and since when, so a status
+// surface can tell the CEO to run `water connect google`.
+func (r *Refresher) ReconnectNeeded() (bool, time.Time) {
+	r.reconnect.mu.Lock()
+	defer r.reconnect.mu.Unlock()
+	return r.reconnect.needed, r.reconnect.since
 }
 
 // tick loads fn's stored cursor (if any), calls it through the gate, and on
@@ -336,8 +418,18 @@ func (r *Refresher) tick(ctx context.Context, fn, cursorKey, cursorField string,
 			}
 			return
 		}
+		if errors.Is(err, gapi.ErrReconnect) {
+			if sec, verr := r.cfg.Vault.Get(r.cfg.Service, r.cfg.Account); verr == nil &&
+				r.reconnect.refused(now, credentialFingerprint(sec)) {
+				r.cfg.Logf("sync: google authorization expired or was revoked; pausing sync until `water connect google` (%s)", fn)
+			}
+			return
+		}
 		r.cfg.Logf("sync: %s: %v", fn, err)
 		return
+	}
+	if r.reconnect.ok() {
+		r.cfg.Logf("sync: google authorization works again; sync resumed (%s)", fn)
 	}
 	if truncated(res.Output) {
 		// The connector cut its output short and withheld a cursor that

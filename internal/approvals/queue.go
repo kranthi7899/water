@@ -27,20 +27,23 @@ const (
 )
 
 // Envelope is an outward action awaiting, or bound by, the CEO's decision.
+// Its JSON form (snake_case, matching the rest of the daemon API) is what
+// GET /v1/approvals and the decision endpoint return; it is not how the
+// envelope is persisted (the store keeps it as columns).
 type Envelope struct {
-	ID           string
-	Action       string // "connector.function"
-	Recipient    string
-	Payload      map[string]any
-	EvidenceRefs []string
-	Risk         string
-	Origin       string
-	ExpiresAt    time.Time
+	ID           string         `json:"id"`
+	Action       string         `json:"action"` // "connector.function"
+	Recipient    string         `json:"recipient"`
+	Payload      map[string]any `json:"payload"`
+	EvidenceRefs []string       `json:"evidence_refs"`
+	Risk         string         `json:"risk"`
+	Origin       string         `json:"origin"`
+	ExpiresAt    time.Time      `json:"expires_at"`
 
-	PayloadHash string
-	Status      Status
-	Reason      string
-	CreatedAt   time.Time
+	PayloadHash string    `json:"payload_hash"`
+	Status      Status    `json:"status"`
+	Reason      string    `json:"reason"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 var (
@@ -238,7 +241,9 @@ func (q *Queue) Decide(ctx context.Context, id string, a Answer) (Envelope, erro
 		return Envelope{}, err
 	}
 	if !ok {
-		return Envelope{}, fmt.Errorf("approvals: %s changed while deciding", id)
+		// As on the deny path: this answer was not applied, and the current
+		// envelope comes back with the error so the caller can show what won.
+		return q.getAfter(ctx, id, fmt.Errorf("approvals: %s changed while deciding; this answer was not applied", id))
 	}
 	if _, err := q.log.Append(audit.Record{Kind: audit.KindApproval, Function: e.Action, EnvelopeID: id, Origin: e.Origin, Allowed: true, Reason: "answered yes", ArgsHash: e.PayloadHash}); err != nil {
 		// An approval that is not on the record must not stand.

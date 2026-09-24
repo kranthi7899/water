@@ -70,6 +70,44 @@ type WarmSession struct {
 	model        string
 	toolsKey     string
 	toolsCleanup func()
+	stderr       *tailBuffer // the live process's recent stderr
+	// badModel is a --model the CLI rejected; later turns asking for it run
+	// on the CLI's default model instead of failing again.
+	badModel string
+}
+
+// tailBuffer keeps the last tailBufferCap bytes written to it, so a dead
+// process's final error text can be inspected without buffering all of its
+// stderr.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+const tailBufferCap = 4096
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - tailBufferCap; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
+
+// stderrText is the live process's recent stderr, or "".
+func (w *WarmSession) stderrText() string {
+	if w.stderr == nil {
+		return ""
+	}
+	return w.stderr.String()
 }
 
 // toolsKey identifies the tool-proxy scope of a request, so RunTurn can tell
@@ -170,7 +208,7 @@ func (w *WarmSession) killLocked() {
 		w.toolsCleanup()
 		w.toolsCleanup = nil
 	}
-	w.cmd, w.stdin, w.lines, w.done, w.werr, w.live, w.toolsKey = nil, nil, nil, nil, nil, false, ""
+	w.cmd, w.stdin, w.lines, w.done, w.werr, w.live, w.toolsKey, w.stderr = nil, nil, nil, nil, nil, false, "", nil
 }
 
 func (w *WarmSession) scratch() string {
@@ -233,7 +271,12 @@ func (w *WarmSession) start(ctx context.Context, req Request) error {
 		toolsCleanup()
 		return err
 	}
-	cmd.Stderr = io.Discard
+	// Kept (its tail only) so a rejected --model can be recognized when the
+	// CLI exits on it. WaitDelay bounds Wait if a surviving child still holds
+	// the stderr pipe open after the process itself exits.
+	stderr := &tailBuffer{}
+	cmd.Stderr = stderr
+	cmd.WaitDelay = time.Second
 	if err := cmd.Start(); err != nil {
 		toolsCleanup()
 		return err
@@ -257,7 +300,7 @@ func (w *WarmSession) start(ctx context.Context, req Request) error {
 	werr := make(chan error, 1)
 	go func() { werr <- cmd.Wait() }()
 
-	w.cmd, w.stdin, w.lines, w.done, w.werr = cmd, stdin, lines, done, werr
+	w.cmd, w.stdin, w.lines, w.done, w.werr, w.stderr = cmd, stdin, lines, done, werr, stderr
 	w.live, w.turns, w.system, w.model = true, 0, req.System, req.Model
 	return nil
 }
@@ -301,15 +344,39 @@ func buildWarmArgs(fs flagSet, req Request, mcpCfg string) ([]string, error) {
 // busyForTest reports whether a turn currently holds the session.
 func (w *WarmSession) busyForTest() bool { return len(w.sem) == 1 }
 
+// ErrSessionBusy is returned by RunTurn when another turn held the session
+// for the whole of this turn's Timeout.
+var ErrSessionBusy = errors.New("warm session: busy with another turn")
+
 // RunTurn sends one user turn and streams the reply, reusing the live process
-// when possible. It honors req.Timeout (defaultWarmTimeout when zero) and
-// ctx both while waiting for the session and while the turn runs. A turn
-// that ends early for any reason — cancelled, timed out, write failed, or
-// the process died — kills the process, because the rest of that turn's
-// output would otherwise be read as the next turn's reply, and the model
-// would keep working (and calling tools) on a turn nobody is waiting for.
+// when possible.
+//
+// Every caller shares the one process, and so one model conversation, and
+// only one turn runs at a time: a turn that arrives while another holds the
+// session waits for it, emitting nothing. That wait is bounded by ctx and by
+// req.Timeout (defaultWarmTimeout when zero; ErrSessionBusy when it runs
+// out), and the turn then gets a fresh req.Timeout of its own once it holds
+// the session.
+//
+// A turn that ends early for any reason — cancelled, timed out, write
+// failed, or the process died — kills the process, because the rest of that
+// turn's output would otherwise be read as the next turn's reply, and the
+// model would keep working (and calling tools) on a turn nobody is waiting
+// for. A --model the CLI rejects is dropped and the turn retried once on the
+// CLI's default model, as the cold path does; later turns never pass that
+// model again.
 func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(string)) (Response, error) {
-	if err := w.acquire(ctx); err != nil {
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = defaultWarmTimeout
+	}
+	wctx, wcancel := context.WithTimeout(ctx, timeout)
+	err := w.acquire(wctx)
+	wcancel()
+	if err != nil {
+		if ctx.Err() == nil {
+			return Response{}, fmt.Errorf("%w (waited %s)", ErrSessionBusy, timeout)
+		}
 		return Response{}, err
 	}
 	defer w.release()
@@ -317,10 +384,6 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 		return Response{}, errors.New("warm session: closed")
 	}
 
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = defaultWarmTimeout
-	}
 	tctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	w.turnMu.Lock()
@@ -332,6 +395,25 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 		w.turnMu.Unlock()
 	}()
 
+	if req.Model != "" && req.Model == w.badModel {
+		req.Model = ""
+	}
+	resp, rejected, err := w.turnLocked(ctx, tctx, timeout, req, onDelta)
+	if rejected != "" && req.Model != "" {
+		warnBadModelOnce(req.Model, rejected)
+		w.badModel = req.Model
+		w.killLocked()
+		req.Model = ""
+		resp, _, err = w.turnLocked(ctx, tctx, timeout, req, onDelta)
+	}
+	return resp, err
+}
+
+// turnLocked runs one turn with the session held. rejected is non-empty
+// (the CLI's error text) when the turn failed only because the CLI rejected
+// req.Model, before any delta was delivered, so the caller can retry it
+// without the model.
+func (w *WarmSession) turnLocked(ctx, tctx context.Context, timeout time.Duration, req Request, onDelta func(string)) (resp Response, rejected string, err error) {
 	needRestart := !w.live || w.system != req.System || (req.Model != "" && w.model != req.Model) ||
 		w.turns >= w.maxTurns() || w.toolsKey != toolsKey(req.Tools)
 	if needRestart {
@@ -345,22 +427,32 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 			// Warm start failed: fall back to a single non-warm streamed call
 			// rather than surfacing a warm-session-specific error.
 			cold := &ClaudeSubscription{Bin: w.cfg.Bin, WorkDir: w.cfg.WorkDir, Model: req.Model, SelfExe: w.cfg.SelfExe, ScratchDir: w.cfg.ScratchDir}
-			return cold.RunStream(ctx, req, onDelta)
+			resp, err := cold.RunStream(ctx, req, onDelta)
+			return resp, "", err
 		}
 	}
 
 	msg := map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": req.Prompt}}
 	b, err := json.Marshal(msg)
 	if err != nil {
-		return Response{}, err
+		return Response{}, "", err
 	}
 	start := time.Now()
+	// modelRejected reports the CLI's rejection of this process's --model in
+	// detail, if that is what it is and nothing has been streamed yet.
+	var raw, text strings.Builder
+	modelRejected := func(detail string) string {
+		if w.model != "" && text.Len() == 0 && looksLikeBadModel(detail) {
+			return detail
+		}
+		return ""
+	}
 	if _, err := w.stdin.Write(append(b, '\n')); err != nil {
+		stderr := w.stderrText()
 		w.killLocked()
-		return Response{}, fmt.Errorf("warm session: write turn: %w", err)
+		return Response{}, modelRejected(stderr), fmt.Errorf("warm session: write turn: %w", err)
 	}
 
-	var raw, text strings.Builder
 	for {
 		select {
 		case line, ok := <-w.lines:
@@ -370,8 +462,9 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 				// surviving children) so the next call starts clean.
 				werr := <-w.werr
 				w.werr = nil
+				stderr := w.stderrText()
 				w.killLocked()
-				return Response{}, fmt.Errorf("warm session ended mid-turn: %w", werr)
+				return Response{}, modelRejected(stderr), fmt.Errorf("warm session ended mid-turn: %w", werr)
 			}
 			raw.WriteString(line)
 			raw.WriteByte('\n')
@@ -398,21 +491,21 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 				resp.RateLimit = parseRateLimit(raw.String())
 				if res.IsError {
 					if IsRateLimitText(res.Result) {
-						return resp, fmt.Errorf("%w: %s", ErrRateLimited, firstLine(res.Result))
+						return resp, "", fmt.Errorf("%w: %s", ErrRateLimited, firstLine(res.Result))
 					}
-					return resp, fmt.Errorf("claude reported an error: %s", firstLine(res.Result))
+					return resp, modelRejected(res.Result), fmt.Errorf("claude reported an error: %s", firstLine(res.Result))
 				}
-				return resp, nil
+				return resp, "", nil
 			}
 		case <-tctx.Done():
 			w.killLocked()
 			if ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
-				return Response{}, fmt.Errorf("%w: warm claude turn killed after %s", ErrCallTimeout, timeout)
+				return Response{}, "", fmt.Errorf("%w: warm claude turn killed after %s", ErrCallTimeout, timeout)
 			}
 			if ctx.Err() != nil {
-				return Response{}, ctx.Err()
+				return Response{}, "", ctx.Err()
 			}
-			return Response{}, fmt.Errorf("warm session: turn interrupted: %w", context.Canceled)
+			return Response{}, "", fmt.Errorf("warm session: turn interrupted: %w", context.Canceled)
 		}
 	}
 }

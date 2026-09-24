@@ -15,6 +15,14 @@ type launchAgentPlistArgs struct {
 	ExtraPathDir string // claude's directory, prepended to launchd's minimal PATH
 	StdoutLog    string
 	StderrLog    string
+	// WaterHome, when non-empty, is passed to the daemon as WATER_HOME.
+	// launchd does not inherit the installing shell's environment, so
+	// without it a daemon installed under a custom WATER_HOME would bind
+	// ~/.water while every client looks under $WATER_HOME.
+	WaterHome string
+	// Demo, when true, passes WATER_DEMO=1 so the launchd daemon loads the
+	// same (demo) twin the install was run for.
+	Demo bool
 }
 
 // renderLaunchAgentPlist renders the LaunchAgent property list that starts
@@ -27,6 +35,13 @@ func renderLaunchAgentPlist(a launchAgentPlistArgs) string {
 		return b.String()
 	}
 	path := a.ExtraPathDir + ":/usr/bin:/bin:/usr/sbin:/sbin"
+	env := "\t\t<key>PATH</key>\n\t\t<string>" + esc(path) + "</string>\n"
+	if a.WaterHome != "" {
+		env += "\t\t<key>WATER_HOME</key>\n\t\t<string>" + esc(a.WaterHome) + "</string>\n"
+	}
+	if a.Demo {
+		env += "\t\t<key>" + demoEnvVar + "</key>\n\t\t<string>1</string>\n"
+	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -40,9 +55,7 @@ func renderLaunchAgentPlist(a launchAgentPlistArgs) string {
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
-		<key>PATH</key>
-		<string>%s</string>
-	</dict>
+%s	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
@@ -53,5 +66,5 @@ func renderLaunchAgentPlist(a launchAgentPlistArgs) string {
 	<string>%s</string>
 </dict>
 </plist>
-`, esc(a.Label), esc(a.WaterBin), esc(path), esc(a.StdoutLog), esc(a.StderrLog))
+`, esc(a.Label), esc(a.WaterBin), env, esc(a.StdoutLog), esc(a.StderrLog))
 }

@@ -20,7 +20,7 @@ func (a *App) auditCmd() *cobra.Command {
 			Short: "Verify the audit log's hash chain",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				n, err := audit.Verify(audit.DefaultPath())
+				n, err := audit.Verify(twinAuditPath(a.twinID()))
 				if err != nil {
 					return exitWith(ExitError, err)
 				}
@@ -33,12 +33,13 @@ func (a *App) auditCmd() *cobra.Command {
 			Short: "Drop a single torn final line, if that is the only break, and record the repair",
 			Args:  cobra.NoArgs,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				st, err := store.Open(store.DefaultPath())
+				id := a.twinID()
+				st, err := store.Open(twinStorePath(id))
 				if err != nil {
 					return err
 				}
 				defer st.Close()
-				if err := audit.Repair(audit.DefaultPath(), audit.WithAnchor(st)); err != nil {
+				if err := audit.Repair(twinAuditPath(id), audit.WithAnchor(st)); err != nil {
 					return exitWith(ExitError, err)
 				}
 				fmt.Println("repaired")

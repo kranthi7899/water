@@ -436,7 +436,12 @@ func capText(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// eventTime parses either an all-day date or a timed dateTime, in UTC.
+// eventTime parses either an all-day date or a timed dateTime, returned in
+// UTC. An all-day date ("2026-09-24") names a calendar day, not an instant,
+// so it is anchored at local midnight: every consumer (StateSummary, the
+// brief, the schedule fast path, prefetch) windows on local days, and a UTC
+// midnight would land the event on the previous evening west of Greenwich
+// and at a made-up clock time east of it.
 func eventTime(s string) time.Time {
 	if s == "" {
 		return time.Time{}
@@ -444,7 +449,7 @@ func eventTime(s string) time.Time {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.UTC()
 	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
+	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
 		return t.UTC()
 	}
 	return time.Time{}

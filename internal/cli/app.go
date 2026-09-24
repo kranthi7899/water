@@ -47,10 +47,7 @@ type globalFlags struct {
 	output       string
 	jsonOut      bool
 	backend      string
-	traceDir     string
 	yes          bool
-	quiet        bool
-	verbose      bool
 	voice        bool
 	allowMetered bool
 	debug        bool
@@ -75,9 +72,6 @@ func (a *App) config() (*config.Resolved, error) {
 	over := map[string]string{}
 	if a.flags.backend != "" {
 		over["backend.preferred"] = a.flags.backend
-	}
-	if a.flags.traceDir != "" {
-		over["telemetry.trace_dir"] = a.flags.traceDir
 	}
 	if a.flags.allowMetered {
 		over["backend.allow_metered"] = "true"

@@ -31,8 +31,14 @@ func defaultPrefetchMailArgs(ev store.Event) map[string]any {
 	if len(parts) == 0 {
 		return nil
 	}
-	return map[string]any{"query": strings.Join(parts, " OR ")}
+	// Bounded to recent mail: meeting prep wants what the attendees said
+	// lately, and an unbounded search would pull months-old threads into the
+	// store as if they had just arrived.
+	return map[string]any{"query": "(" + strings.Join(parts, " OR ") + ") " + prefetchMailWindow}
 }
+
+// prefetchMailWindow is the Gmail search bound on prefetched attendee mail.
+const prefetchMailWindow = "newer_than:30d"
 
 // defaultPrefetchDocsArgs searches Drive by the event title's plain words.
 // The title is written by whoever sent the invite, so quotes, operators and

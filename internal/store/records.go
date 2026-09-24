@@ -68,6 +68,31 @@ type Event struct {
 	Status    string    `db:"status"`
 }
 
+// AllDay reports whether e spans whole local days: it starts at local
+// midnight and ends at a later local midnight. Calendar connectors store an
+// all-day event (a date, not a dateTime) exactly that way.
+func (e Event) AllDay() bool {
+	if e.StartAt.IsZero() || e.EndAt.IsZero() {
+		return false
+	}
+	st, en := e.StartAt.Local(), e.EndAt.Local()
+	return en.After(st) && isLocalMidnight(st) && isLocalMidnight(en)
+}
+
+func isLocalMidnight(t time.Time) bool {
+	return t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0
+}
+
+// Clock is e's local start time for a one-line schedule ("09:30"), or
+// "all day" for an all-day event, so a date-only event never shows a
+// made-up "00:00".
+func (e Event) Clock() string {
+	if e.AllDay() {
+		return "all day"
+	}
+	return e.StartAt.Local().Format("15:04")
+}
+
 type Document struct {
 	Meta
 	Title      string    `db:"title"`
@@ -222,9 +247,10 @@ func scanTarget(v reflect.Value) (any, func() error) {
 }
 
 // Upsert inserts r or, when (source, source_id) exists, replaces its fields.
-// One exception: a record type with a body_full column (Message) never has
-// a stored full body replaced by an incoming preview; the other fields
-// still update.
+// Two exceptions: a record type with a body_full column (Message) never has
+// a stored full body replaced by an incoming preview, and a Document never
+// has a stored excerpt replaced by an empty one (a search hit carries none);
+// the other fields still update.
 func (s *Store) Upsert(ctx context.Context, r Record) error {
 	m := r.meta()
 	if m.Source == "" || m.SourceID == "" {
@@ -258,6 +284,10 @@ func (s *Store) Upsert(ctx context.Context, r Record) error {
 			sets = append(sets, "body = excluded.body")
 		case "body_full":
 			sets = append(sets, fmt.Sprintf("body_full = MAX(%s.body_full, excluded.body_full)", r.Table()))
+		case "excerpt":
+			// A search hit carries no excerpt; it must not wipe the one a
+			// read stored (documents_fts indexes it for meeting help/cues).
+			sets = append(sets, fmt.Sprintf("excerpt = CASE WHEN excluded.excerpt = '' THEN %s.excerpt ELSE excluded.excerpt END", r.Table()))
 		default:
 			sets = append(sets, c.name+" = excluded."+c.name)
 		}
@@ -365,17 +395,40 @@ func EventsInRange(ctx context.Context, s *Store, from, to time.Time) ([]Event, 
 	return out, rows.Err()
 }
 
+// MessagesInRange returns messages sent in [from, to), newest first. It is
+// what "new mail since yesterday" needs: List's Since bounds created_at (when
+// the row was ingested), so old mail pulled in today by a prefetch, a model
+// search or a first backfill would count as new. A message with no sent_at
+// (a connector that could not tell) falls back to its ingest time. A zero to
+// leaves the range open-ended.
+func MessagesInRange(ctx context.Context, s *Store, from, to time.Time) ([]Message, error) {
+	cond := "COALESCE(sent_at, created_at) >= ?"
+	args := []any{from.UnixNano()}
+	if !to.IsZero() {
+		cond += " AND COALESCE(sent_at, created_at) < ?"
+		args = append(args, to.UnixNano())
+	}
+	return listOrdered[Message](ctx, s, cond, args, 0, "messages", "COALESCE(sent_at, created_at) DESC, id DESC")
+}
+
 func list[T any, P interface {
 	*T
 	Record
 }](ctx context.Context, s *Store, cond string, args []any, limit int, table string) ([]T, error) {
+	return listOrdered[T, P](ctx, s, cond, args, limit, table, "created_at DESC, id DESC")
+}
+
+func listOrdered[T any, P interface {
+	*T
+	Record
+}](ctx context.Context, s *Store, cond string, args []any, limit int, table, order string) ([]T, error) {
 	var probe T
 	cols := columns(P(&probe))
 	names := make([]string, len(cols))
 	for i, c := range cols {
 		names[i] = c.name
 	}
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY created_at DESC, id DESC", strings.Join(names, ", "), table, cond)
+	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s ORDER BY %s", strings.Join(names, ", "), table, cond, order)
 	if limit > 0 {
 		q += fmt.Sprintf(" LIMIT %d", limit)
 	}

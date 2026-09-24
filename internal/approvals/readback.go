@@ -17,6 +17,10 @@ func ReadBack(e Envelope) string {
 	return summary(e, true) + " " + prompt(e.Action)
 }
 
+// Summary is the one-line list form of e (long values shortened, with a
+// visible note of how much is cut) that Menu shows; code-built like ReadBack.
+func Summary(e Envelope) string { return summary(e, false) }
+
 // summary renders e's payload. full renders every value uncut (ReadBack,
 // right before yes/no); otherwise long values are shortened for a list,
 // but always with a visible note of how much is not shown. Either way,

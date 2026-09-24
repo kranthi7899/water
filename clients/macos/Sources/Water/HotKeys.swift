@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import WaterClientCore
 
 // MARK: - Change the hotkeys here.
 //
@@ -39,11 +40,16 @@ final class HotKeyMonitor {
     private var trustPoll: Timer?
     private let handler: (HotKey) -> Void
     var onTrustChange: ((Bool) -> Void)?
-    /// Fires when the voice hotkey's key is physically released, for
-    /// push-to-talk. Matched by key code alone, not modifiers: a user
-    /// commonly releases ⌃/⌥ a beat before or after the letter key, and the
-    /// release must still register as "stop recording" either way.
+    /// Fires when the voice hotkey's key is physically released after a
+    /// press of the full hotkey, for push-to-talk. The release is matched by
+    /// key code alone, not modifiers: a user commonly releases ⌃/⌥ a beat
+    /// before or after the letter key, and it must still register as "stop
+    /// recording". A plain 'v' released with no hold in progress is not ours
+    /// and passes through untouched.
     var onVoiceKeyUp: (() -> Void)?
+    /// Shared by both monitors: the press can arrive through the global one
+    /// and its release through the local one once Water's panel is key.
+    private var voiceHold = HoldKeyTracker(keyCode: HotKeyConfig.voice.keyCode)
 
     init(handler: @escaping (HotKey) -> Void) {
         self.handler = handler
@@ -68,11 +74,17 @@ final class HotKeyMonitor {
     @discardableResult
     private func handle(_ e: NSEvent, swallow: Bool) -> NSEvent? {
         if e.type == .keyUp {
-            guard e.keyCode == HotKeyConfig.voice.keyCode else { return e }
+            guard voiceHold.keyUp(keyCode: e.keyCode) == .release else { return e }
             onVoiceKeyUp?()
             return swallow ? nil : e
         }
-        guard let k = match(e) else { return e }
+        let k = match(e)
+        if voiceHold.keyDown(keyCode: e.keyCode, isRepeat: e.isARepeat, matchesHotKey: k == HotKeyConfig.voice) == .swallow {
+            // Auto-repeat while the voice hotkey is held: keep it out of the
+            // panel's text field (a beep per repeat, into the open mic).
+            return swallow ? nil : e
+        }
+        guard let k else { return e }
         handler(k)
         return swallow ? nil : e
     }
