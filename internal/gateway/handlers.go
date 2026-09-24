@@ -32,10 +32,17 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Channel string `json:"channel"`
 		Prompt  string `json:"prompt"`
+		// Clear resets the warm session's context before this turn (the
+		// chat client's /clear). A false zero value is always safe: a fresh
+		// warm session's first turn already starts clean.
+		Clear bool `json:"clear"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
+	}
+	if body.Clear && d.cfg.Warm != nil {
+		d.cfg.Warm.Clear()
 	}
 	ch := runtime.Channel(body.Channel)
 	switch ch {

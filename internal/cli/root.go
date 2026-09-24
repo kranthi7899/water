@@ -59,7 +59,7 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 				return a.runOnboard(cmd)
 			}
 			if isTTY(os.Stdin) && isTTY(os.Stdout) {
-				return a.runChat(context.Background(), "", "", true)
+				return a.runChat(context.Background())
 			}
 			return cmd.Help()
 		},

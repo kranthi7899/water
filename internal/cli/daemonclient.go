@@ -82,9 +82,10 @@ func httpError(resp *http.Response) error {
 	return fmt.Errorf("water daemon: %s: %s", resp.Status, strings.TrimSpace(string(b)))
 }
 
-// Turn streams one turn, calling onEvent for each event in order.
-func (c *daemonClient) Turn(ctx context.Context, channel, prompt string, onEvent func(runtime.Event)) error {
-	resp, err := c.do(ctx, http.MethodPost, "/v1/turns", map[string]string{"channel": channel, "prompt": prompt})
+// Turn streams one turn, calling onEvent for each event in order. clear
+// resets the warm session's context before this turn runs (chat's /clear).
+func (c *daemonClient) Turn(ctx context.Context, channel, prompt string, clear bool, onEvent func(runtime.Event)) error {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/turns", map[string]any{"channel": channel, "prompt": prompt, "clear": clear})
 	if err != nil {
 		return err
 	}

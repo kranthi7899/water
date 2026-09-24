@@ -43,7 +43,7 @@ func (a *App) askCmd() *cobra.Command {
 			}
 			ctx := context.Background()
 			var turnErr error
-			err = client.Turn(ctx, string(ch), prompt, func(e runtime.Event) {
+			err = client.Turn(ctx, string(ch), prompt, false, func(e runtime.Event) {
 				switch e.Kind {
 				case runtime.EventDelta:
 					if !speak {

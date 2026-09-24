@@ -154,7 +154,7 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	fmt.Fprintf(os.Stderr, "\n  %s\n", surface.StyleDim.Render("next: water chat · water orchestrate \"<brief>\" · water status"))
 	if interactive && !noPicker && isTTY(os.Stdout) {
 		a.cfg = nil
-		return a.runChat(ctx, "", "", true)
+		return a.runChat(ctx)
 	}
 	return nil
 }
