@@ -245,6 +245,28 @@ var (
 // and caches; every other caller for that same day blocks on the same result
 // instead of starting its own. This is the sync loop's background precompute
 // and FastPath's on-demand path calling into exactly the same place.
+// CachedBrief reads day's cached brief with no model call and no write:
+// store reads only. It is what Slice R's Tier 0 "brief.today" reflex
+// handler calls, so a request for today's brief never itself triggers a
+// backend call — a cache miss is reported via ok=false, and the caller
+// (the facade, on escalation to the main path) is the one that runs
+// ComputeAndCacheBrief. Any read error, or an unreadable/missing taint
+// record, is reported tainted=true (fail closed), exactly like
+// cachedBriefTainted already does for the existing compute path.
+func CachedBrief(ctx context.Context, env Env, day string) (text string, tainted bool, ok bool, err error) {
+	if env.Store == nil {
+		return "", true, false, errors.New("runtime: brief needs a store")
+	}
+	text, ok, err = env.Store.GetBrief(ctx, day)
+	if err != nil {
+		return "", true, false, fmt.Errorf("brief: reading cache: %w", err)
+	}
+	if !ok {
+		return "", true, false, nil
+	}
+	return text, cachedBriefTainted(ctx, env, day), true, nil
+}
+
 func ComputeAndCacheBrief(ctx context.Context, env Env) (string, error) {
 	if env.Store == nil {
 		return "", errors.New("runtime: brief needs a store")

@@ -325,3 +325,80 @@ func TestBriefOmitsAgentMailSectionWhenThereIsNothingToShow(t *testing.T) {
 		t.Fatal("the agent-mail section must not render when there is nothing to show")
 	}
 }
+
+// ---- CachedBrief (Slice R task R-8): store reads only, no model call ----
+
+func TestCachedBriefMissReportsNotOKAndTainted(t *testing.T) {
+	env, ctx := testEnv(t)
+	day := startOfDay(env.now()).Format("2006-01-02")
+	text, tainted, ok, err := CachedBrief(ctx, env, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("no cached brief exists for this day; ok must be false")
+	}
+	if text != "" {
+		t.Fatalf("text = %q on a miss, want empty", text)
+	}
+	if !tainted {
+		t.Fatal("a cache miss must fail closed (tainted=true)")
+	}
+}
+
+func TestCachedBriefHitNoTaintRecordFailsClosed(t *testing.T) {
+	env, ctx := testEnv(t)
+	day := startOfDay(env.now()).Format("2006-01-02")
+	if err := env.Store.SetBrief(ctx, day, "cached text"); err != nil {
+		t.Fatal(err)
+	}
+	// No SetCursor(briefTaintKey(day), ...) call: simulates a brief cached
+	// before the taint record existed, or a failed write.
+	text, tainted, ok, err := CachedBrief(ctx, env, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "cached text" {
+		t.Fatalf("text=%q ok=%v, want the cached text and ok=true", text, ok)
+	}
+	if !tainted {
+		t.Fatal("a missing taint record must fail closed (tainted=true)")
+	}
+}
+
+func TestCachedBriefHitCleanTaintRecord(t *testing.T) {
+	env, ctx := testEnv(t)
+	day := startOfDay(env.now()).Format("2006-01-02")
+	if err := env.Store.SetBrief(ctx, day, "cached text"); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Store.SetCursor(ctx, briefTaintKey(day), "0"); err != nil {
+		t.Fatal(err)
+	}
+	text, tainted, ok, err := CachedBrief(ctx, env, day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || text != "cached text" {
+		t.Fatalf("text=%q ok=%v", text, ok)
+	}
+	if tainted {
+		t.Fatal("an explicit clean taint record must not be overridden")
+	}
+}
+
+func TestCachedBriefNeverCallsBackend(t *testing.T) {
+	env, ctx := testEnv(t)
+	day := startOfDay(env.now()).Format("2006-01-02")
+	if err := env.Store.SetBrief(ctx, day, "cached text"); err != nil {
+		t.Fatal(err)
+	}
+	fk := backend.NewFake("fake")
+	env.Backend = fk
+	if _, _, _, err := CachedBrief(ctx, env, day); err != nil {
+		t.Fatal(err)
+	}
+	if fk.Calls() != 0 {
+		t.Fatalf("CachedBrief must never call the model; backend called %d times", fk.Calls())
+	}
+}
