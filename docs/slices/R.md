@@ -1234,7 +1234,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
 - [x] **R-3 Slot resolvers** (`internal/nervous/slots/{slots.go,date.go,time.go,duration.go,count.go,person.go,text.go}`).
   - Tests: the earlier plan's date (40 or more), time, count and person tables, plus `duration_test.go` (every accepted form, out-of-range rejection) and `spoken_test.go` (`Spoken` for today, tomorrow, a weekday, next week, a time and a part of day, in a fixed PT zone).
   - Flag: none.
-- [ ] **R-4 Migration, store helpers, read-only pool** (`internal/store/migrations/0008_router.sql`, `route_log.go`, `intent_state.go`, `reader.go`, `queries_router.go`).
+- [x] **R-4 Migration, store helpers, read-only pool** (`internal/store/migrations/0008_router.sql`, `route_log.go`, `intent_state.go`, `reader.go`, `queries_router.go`). Migration number `0008` was still free at commit time, so no renumbering was needed.
   - **First run `ls internal/store/migrations` after `git rebase feat/ceo-twin`, use the next free number, and record the actual file name in this plan in the same commit.**
   - Tests:
     - `route_log_test.go`: round trip of every column, including JSON and nullable ints; the `PruneRoutes` boundary; `QuickOnlyRoutes` filter; the migration on a fresh DB and on a DB already at the previous head;
