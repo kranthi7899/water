@@ -1,0 +1,356 @@
+# Slice R's held-out eval set for the sous chef (Tier 0 templates, Tier 1
+# FunctionGemma). Written in task R-7, BEFORE any twins/ceo/intents/*.yaml
+# template file exists (task R-9) — see docs/slices/R.md's Design §18 and
+# Risks item 19 ("eval leakage"). Do not hand-tune this file's wording to
+# match a specific template later; that would defeat the point of a
+# held-out set. Slot label conventions here follow internal/nervous/slots'
+# actual Value.Label output (dates: "today"/"tomorrow"/a bare lowercase
+# weekday/"this week"/"next week"; times: "3pm" style; people:
+# "name <email>" lowercase) against the fixture clock Thu 2026-09-24 09:00
+# Pacific (eval.DefaultFixture).
+#
+# class values: positive (read-intent paraphrase) | write (write-intent
+# paraphrase) | reasoning | multi_clause | legacy_near_miss |
+# action_unsupported | ood | yesno_zero_pending.
+cases:
+  # ---- schedule.on_date (13) ----
+  - {utterance: "what's on my calendar today", intent: schedule.on_date, class: positive, slots: {when: today}}
+  - {utterance: "what's on my calendar tomorrow", intent: schedule.on_date, class: positive, slots: {when: tomorrow}}
+  - {utterance: "do I have any meetings today", intent: schedule.on_date, class: positive, slots: {when: today}}
+  - {utterance: "what do I have going on tomorrow", intent: schedule.on_date, class: positive, slots: {when: tomorrow}}
+  - {utterance: "show me my schedule for friday", intent: schedule.on_date, class: positive, slots: {when: friday}}
+  - {utterance: "what's happening on monday", intent: schedule.on_date, class: positive, slots: {when: monday}}
+  - {utterance: "anything on my calendar this week", intent: schedule.on_date, class: positive, slots: {when: "this week"}}
+  - {utterance: "what's on next week", intent: schedule.on_date, class: positive, slots: {when: "next week"}}
+  - {utterance: "do I have anything today", intent: schedule.on_date, class: positive, slots: {when: today}}
+  - {utterance: "what meetings do I have tomorrow", intent: schedule.on_date, class: positive, slots: {when: tomorrow}}
+  - {utterance: "what's on my agenda today", intent: schedule.on_date, class: positive, slots: {when: today}}
+  - {utterance: "any meetings friday", intent: schedule.on_date, class: positive, slots: {when: friday}}
+  - {utterance: "what's going on this week", intent: schedule.on_date, class: positive, slots: {when: "this week"}}
+
+  # ---- schedule.next_event (13) ----
+  - {utterance: "what's my next meeting", intent: schedule.next_event, class: positive}
+  - {utterance: "what's next on my calendar", intent: schedule.next_event, class: positive}
+  - {utterance: "when's my next meeting", intent: schedule.next_event, class: positive}
+  - {utterance: "what do I have coming up next", intent: schedule.next_event, class: positive}
+  - {utterance: "what's my next event", intent: schedule.next_event, class: positive}
+  - {utterance: "what am I doing next", intent: schedule.next_event, class: positive}
+  - {utterance: "next thing on my schedule", intent: schedule.next_event, class: positive}
+  - {utterance: "what's next for me today", intent: schedule.next_event, class: positive}
+  - {utterance: "when is my next event", intent: schedule.next_event, class: positive}
+  - {utterance: "what's coming up next on my calendar", intent: schedule.next_event, class: positive}
+  - {utterance: "next meeting please", intent: schedule.next_event, class: positive}
+  - {utterance: "what's my very next meeting", intent: schedule.next_event, class: positive}
+  - {utterance: "tell me my next meeting", intent: schedule.next_event, class: positive}
+
+  # ---- schedule.free_time (13) ----
+  - {utterance: "when am I free today", intent: schedule.free_time, class: positive, slots: {when: today}}
+  - {utterance: "am I free this afternoon", intent: schedule.free_time, class: positive, slots: {when: today, part: afternoon}}
+  - {utterance: "do I have any free time tomorrow", intent: schedule.free_time, class: positive, slots: {when: tomorrow}}
+  - {utterance: "when am I free tomorrow morning", intent: schedule.free_time, class: positive, slots: {when: tomorrow, part: morning}}
+  - {utterance: "what's my free time today", intent: schedule.free_time, class: positive, slots: {when: today}}
+  - {utterance: "am I free thursday afternoon", intent: schedule.free_time, class: positive, slots: {when: thursday, part: afternoon}}
+  - {utterance: "when do I have a gap today", intent: schedule.free_time, class: positive, slots: {when: today}}
+  - {utterance: "any free slots this afternoon", intent: schedule.free_time, class: positive, slots: {when: today, part: afternoon}}
+  - {utterance: "am I open tomorrow evening", intent: schedule.free_time, class: positive, slots: {when: tomorrow, part: evening}}
+  - {utterance: "when's my next free slot today", intent: schedule.free_time, class: positive, slots: {when: today}}
+  - {utterance: "do I have a free hour today", intent: schedule.free_time, class: positive, slots: {when: today}}
+  - {utterance: "am I free friday morning", intent: schedule.free_time, class: positive, slots: {when: friday, part: morning}}
+  - {utterance: "what gaps do I have today", intent: schedule.free_time, class: positive, slots: {when: today}}
+
+  # ---- mail.latest (13) ----
+  - {utterance: "what's my latest email", intent: mail.latest, class: positive}
+  - {utterance: "show me my last 5 emails", intent: mail.latest, class: positive, slots: {n: "5"}}
+  - {utterance: "what are my most recent emails", intent: mail.latest, class: positive}
+  - {utterance: "show me the latest 3 emails", intent: mail.latest, class: positive, slots: {n: "3"}}
+  - {utterance: "what's the newest email I got", intent: mail.latest, class: positive}
+  - {utterance: "give me my recent mail", intent: mail.latest, class: positive}
+  - {utterance: "show me my last 10 messages", intent: mail.latest, class: positive, slots: {n: "10"}}
+  - {utterance: "what came in most recently", intent: mail.latest, class: positive}
+  - {utterance: "latest emails please", intent: mail.latest, class: positive}
+  - {utterance: "show me my newest messages", intent: mail.latest, class: positive}
+  - {utterance: "what's new in my inbox", intent: mail.latest, class: positive}
+  - {utterance: "show me the last couple of emails", intent: mail.latest, class: positive}
+  - {utterance: "recent mail please", intent: mail.latest, class: positive}
+
+  # ---- mail.unread_count (13) ----
+  - {utterance: "how many unread emails do I have", intent: mail.unread_count, class: positive}
+  - {utterance: "what's my unread count", intent: mail.unread_count, class: positive}
+  - {utterance: "how much unread mail do I have", intent: mail.unread_count, class: positive}
+  - {utterance: "any unread emails", intent: mail.unread_count, class: positive}
+  - {utterance: "how many emails haven't I read", intent: mail.unread_count, class: positive}
+  - {utterance: "what's in my unread", intent: mail.unread_count, class: positive}
+  - {utterance: "unread count please", intent: mail.unread_count, class: positive}
+  - {utterance: "how many messages are unread", intent: mail.unread_count, class: positive}
+  - {utterance: "do I have unread mail", intent: mail.unread_count, class: positive}
+  - {utterance: "how many new unread emails", intent: mail.unread_count, class: positive}
+  - {utterance: "what's my inbox unread count", intent: mail.unread_count, class: positive}
+  - {utterance: "how many unread messages right now", intent: mail.unread_count, class: positive}
+  - {utterance: "give me my unread email count", intent: mail.unread_count, class: positive}
+
+  # ---- mail.latest_from (13) ----
+  - {utterance: "what's the latest email from priya", intent: mail.latest_from, class: positive, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "show me the last email from jordan", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "what did priya send me", intent: mail.latest_from, class: positive, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "latest message from jordan", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "what's the most recent email from priya nair", intent: mail.latest_from, class: positive, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "show me jordan's last email", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "what did jordan lee send me recently", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "latest from priya please", intent: mail.latest_from, class: positive, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "what's the newest email from jordan", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "show me the latest message from priya", intent: mail.latest_from, class: positive, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "any recent email from jordan", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "what's the last thing priya emailed me", intent: mail.latest_from, class: positive, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "pull up jordan's latest email", intent: mail.latest_from, class: positive, slots: {who: "jordan lee <jordan@example.com>"}}
+
+  # ---- brief.today (13) ----
+  - {utterance: "what needs my attention", intent: brief.today, class: positive}
+  - {utterance: "what's my brief for today", intent: brief.today, class: positive}
+  - {utterance: "give me my morning brief", intent: brief.today, class: positive}
+  - {utterance: "is my brief ready", intent: brief.today, class: positive}
+  - {utterance: "what's on my plate today", intent: brief.today, class: positive}
+  - {utterance: "what should I know this morning", intent: brief.today, class: positive}
+  - {utterance: "brief me on today", intent: brief.today, class: positive}
+  - {utterance: "what's my daily brief", intent: brief.today, class: positive}
+  - {utterance: "catch me up for today", intent: brief.today, class: positive}
+  - {utterance: "what's my morning summary", intent: brief.today, class: positive}
+  - {utterance: "give me today's brief", intent: brief.today, class: positive}
+  - {utterance: "what do I need to know today", intent: brief.today, class: positive}
+  - {utterance: "morning brief please", intent: brief.today, class: positive}
+
+  # ---- approvals.list (13) ----
+  - {utterance: "any pending approvals", intent: approvals.list, class: positive}
+  - {utterance: "what needs my approval", intent: approvals.list, class: positive}
+  - {utterance: "what's waiting for my approval", intent: approvals.list, class: positive}
+  - {utterance: "show me pending approvals", intent: approvals.list, class: positive}
+  - {utterance: "what do I need to approve", intent: approvals.list, class: positive}
+  - {utterance: "anything waiting on me to approve", intent: approvals.list, class: positive}
+  - {utterance: "what's in my approval queue", intent: approvals.list, class: positive}
+  - {utterance: "list my pending approvals", intent: approvals.list, class: positive}
+  - {utterance: "what approvals are outstanding", intent: approvals.list, class: positive}
+  - {utterance: "do I have anything to approve", intent: approvals.list, class: positive}
+  - {utterance: "what's pending approval right now", intent: approvals.list, class: positive}
+  - {utterance: "show me what needs approving", intent: approvals.list, class: positive}
+  - {utterance: "any approvals waiting", intent: approvals.list, class: positive}
+
+  # ---- approvals.respond (13, all with a pending envelope) ----
+  - {utterance: "yes", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "no", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "yes approve it", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "go ahead approve it", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "no don't approve that", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "approve it", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "deny it", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "yes that's fine", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "no reject that", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "yeah go ahead", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "nope don't do that", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "sure approve that", intent: approvals.respond, class: positive, pending: 1}
+  - {utterance: "yes, approved", intent: approvals.respond, class: positive, pending: 1}
+
+  # ---- control.stop (13) ----
+  - {utterance: "stop", intent: control.stop, class: positive}
+  - {utterance: "cancel", intent: control.stop, class: positive}
+  - {utterance: "never mind", intent: control.stop, class: positive}
+  - {utterance: "forget it", intent: control.stop, class: positive}
+  - {utterance: "cancel that", intent: control.stop, class: positive}
+  - {utterance: "stop that", intent: control.stop, class: positive}
+  - {utterance: "never mind, forget it", intent: control.stop, class: positive}
+  - {utterance: "nevermind", intent: control.stop, class: positive}
+  - {utterance: "cancel this", intent: control.stop, class: positive}
+  - {utterance: "abort", intent: control.stop, class: positive}
+  - {utterance: "stop it", intent: control.stop, class: positive}
+  - {utterance: "forget that", intent: control.stop, class: positive}
+  - {utterance: "cancel everything", intent: control.stop, class: positive}
+
+  # ---- status.overview (13) ----
+  - {utterance: "what's my status", intent: status.overview, class: positive}
+  - {utterance: "give me a status check", intent: status.overview, class: positive}
+  - {utterance: "how's everything running", intent: status.overview, class: positive}
+  - {utterance: "what's the system status", intent: status.overview, class: positive}
+  - {utterance: "are all my connectors working", intent: status.overview, class: positive}
+  - {utterance: "what's connected right now", intent: status.overview, class: positive}
+  - {utterance: "give me a system status", intent: status.overview, class: positive}
+  - {utterance: "how are things looking", intent: status.overview, class: positive}
+  - {utterance: "status check", intent: status.overview, class: positive}
+  - {utterance: "what's running right now", intent: status.overview, class: positive}
+  - {utterance: "is everything connected", intent: status.overview, class: positive}
+  - {utterance: "give me an overview", intent: status.overview, class: positive}
+  - {utterance: "what's my daemon status", intent: status.overview, class: positive}
+
+  # ---- help.intents (13) ----
+  - {utterance: "what can you do", intent: help.intents, class: positive}
+  - {utterance: "what can I ask you", intent: help.intents, class: positive}
+  - {utterance: "help", intent: help.intents, class: positive}
+  - {utterance: "what commands do you support", intent: help.intents, class: positive}
+  - {utterance: "list what you can help with", intent: help.intents, class: positive}
+  - {utterance: "what things can you answer quickly", intent: help.intents, class: positive}
+  - {utterance: "show me what you can do", intent: help.intents, class: positive}
+  - {utterance: "what are you able to help with", intent: help.intents, class: positive}
+  - {utterance: "give me a list of things you can do", intent: help.intents, class: positive}
+  - {utterance: "what can water do", intent: help.intents, class: positive}
+  - {utterance: "help me understand what you can answer", intent: help.intents, class: positive}
+  - {utterance: "what should I ask you", intent: help.intents, class: positive}
+  - {utterance: "what's in your toolkit", intent: help.intents, class: positive}
+
+  # ---- calendar.create_event (write, 9) ----
+  - {utterance: "schedule a meeting with priya tomorrow at 3pm", intent: calendar.create_event, class: write, slots: {when: tomorrow, at: 3pm, who: "priya nair <priya@example.com>"}}
+  - {utterance: "book a meeting at 10am today", intent: calendar.create_event, class: write, slots: {when: today, at: 10am}}
+  - {utterance: "set up a meeting with jordan friday at 2pm", intent: calendar.create_event, class: write, slots: {when: friday, at: 2pm, who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "schedule a call tomorrow at 9am for 30 minutes", intent: calendar.create_event, class: write, slots: {when: tomorrow, at: 9am, dur: "30 minutes"}}
+  - {utterance: "book time with priya monday at 11am", intent: calendar.create_event, class: write, slots: {when: monday, at: 11am, who: "priya nair <priya@example.com>"}}
+  - {utterance: "set up a meeting called board sync tomorrow at 4pm", intent: calendar.create_event, class: write, slots: {when: tomorrow, at: 4pm, title: "board sync"}}
+  - {utterance: "schedule a meeting today at 1pm", intent: calendar.create_event, class: write, slots: {when: today, at: 1pm}}
+  - {utterance: "book a call with jordan tomorrow at noon", intent: calendar.create_event, class: write, slots: {when: tomorrow, at: noon, who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "set up time with priya friday at 3:30", intent: calendar.create_event, class: write, slots: {when: friday, at: "3:30", who: "priya nair <priya@example.com>"}}
+
+  # ---- calendar.move_event (write, 9) ----
+  - {utterance: "move my 3pm to 4pm", intent: calendar.move_event, class: write, slots: {from: 3pm, to: 4pm}}
+  - {utterance: "move my 10am tomorrow to 2pm", intent: calendar.move_event, class: write, slots: {from: 10am, on: tomorrow, to: 2pm}}
+  - {utterance: "move my 3pm meeting to friday", intent: calendar.move_event, class: write, slots: {from: 3pm, to_date: friday}}
+  - {utterance: "move my 9am to 11am", intent: calendar.move_event, class: write, slots: {from: 9am, to: 11am}}
+  - {utterance: "reschedule my 3pm to 4:30", intent: calendar.move_event, class: write, slots: {from: 3pm, to: "4:30"}}
+  - {utterance: "move my noon meeting to 1pm", intent: calendar.move_event, class: write, slots: {from: noon, to: 1pm}}
+  - {utterance: "shift my 10am to friday at 10am", intent: calendar.move_event, class: write, slots: {from: 10am, to_date: friday, to: 10am}}
+  - {utterance: "move my 3pm tomorrow to thursday", intent: calendar.move_event, class: write, slots: {from: 3pm, on: tomorrow, to_date: thursday}}
+  - {utterance: "move my 2pm to 3pm", intent: calendar.move_event, class: write, slots: {from: 2pm, to: 3pm}}
+
+  # ---- mail.draft_reply (write, 9) ----
+  - {utterance: "reply to priya saying sounds good see you then", intent: mail.draft_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "reply to jordan saying thanks I'll take a look", intent: mail.draft_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "reply to priya saying that works for me", intent: mail.draft_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "reply to jordan saying let's touch base tomorrow", intent: mail.draft_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "reply to priya saying I'm in, see you at 3", intent: mail.draft_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "reply to jordan saying can we push this to friday", intent: mail.draft_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "reply to priya saying noted, thank you", intent: mail.draft_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "reply to jordan saying appreciate the update", intent: mail.draft_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "reply to priya saying confirmed for tomorrow", intent: mail.draft_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+
+  # ---- mail.send_reply (write, 9) ----
+  - {utterance: "send priya a reply saying got it thanks", intent: mail.send_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "reply to jordan and send it saying sounds great", intent: mail.send_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "send jordan a reply saying confirmed see you then", intent: mail.send_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "reply to priya and send it saying thanks for the update", intent: mail.send_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "send priya a reply saying I'll be there", intent: mail.send_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "reply to jordan and send it saying let's do it", intent: mail.send_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "send jordan a reply saying works for me", intent: mail.send_reply, class: write, slots: {who: "jordan lee <jordan@example.com>"}}
+  - {utterance: "reply to priya and send it saying noted thanks", intent: mail.send_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+  - {utterance: "send priya a reply saying appreciate it", intent: mail.send_reply, class: write, slots: {who: "priya nair <priya@example.com>"}}
+
+  # ---- reasoning (42): never answered by a quick tier ----
+  - {utterance: "what should I prioritize tomorrow", intent: none, class: reasoning}
+  - {utterance: "which meeting matters more", intent: none, class: reasoning}
+  - {utterance: "why is the board sync on friday", intent: none, class: reasoning}
+  - {utterance: "summarize my inbox", intent: none, class: reasoning}
+  - {utterance: "compare my tuesday and wednesday", intent: none, class: reasoning}
+  - {utterance: "plan my week", intent: none, class: reasoning}
+  - {utterance: "is the board sync important", intent: none, class: reasoning}
+  - {utterance: "should I reschedule the board sync", intent: none, class: reasoning}
+  - {utterance: "what matters most this week", intent: none, class: reasoning}
+  - {utterance: "why did priya send that email", intent: none, class: reasoning}
+  - {utterance: "what should I focus on today", intent: none, class: reasoning}
+  - {utterance: "which of these emails is more urgent", intent: none, class: reasoning}
+  - {utterance: "should I take the meeting with jordan", intent: none, class: reasoning}
+  - {utterance: "what's more important, the board sync or the investor call", intent: none, class: reasoning}
+  - {utterance: "why do I have so many meetings tomorrow", intent: none, class: reasoning}
+  - {utterance: "what do you think I should do about the budget request", intent: none, class: reasoning}
+  - {utterance: "recommend what I should tackle first", intent: none, class: reasoning}
+  - {utterance: "what's your take on my schedule this week", intent: none, class: reasoning}
+  - {utterance: "should I cancel the board sync", intent: none, class: reasoning}
+  - {utterance: "which email deserves a reply first", intent: none, class: reasoning}
+  - {utterance: "what's the priority order for today", intent: none, class: reasoning}
+  - {utterance: "why does priya keep emailing me about this", intent: none, class: reasoning}
+  - {utterance: "is my week too packed", intent: none, class: reasoning}
+  - {utterance: "what's worth my time today", intent: none, class: reasoning}
+  - {utterance: "should I push back the meeting with jordan", intent: none, class: reasoning}
+  - {utterance: "which is better, meeting priya monday or tuesday", intent: none, class: reasoning}
+  - {utterance: "what do you recommend for tomorrow's schedule", intent: none, class: reasoning}
+  - {utterance: "why is this decision important", intent: none, class: reasoning}
+  - {utterance: "should I approve the budget request", intent: none, class: reasoning}
+  - {utterance: "what's the best use of my afternoon", intent: none, class: reasoning}
+  - {utterance: "analyze my schedule for conflicts", intent: none, class: reasoning}
+  - {utterance: "explain why the board sync got moved", intent: none, class: reasoning}
+  - {utterance: "what's my biggest priority this week", intent: none, class: reasoning}
+  - {utterance: "should I meet with jordan or priya first", intent: none, class: reasoning}
+  - {utterance: "draft a strategy for the board sync", intent: none, class: reasoning}
+  - {utterance: "think through my options for tomorrow", intent: none, class: reasoning}
+  - {utterance: "what's worth prioritizing this morning", intent: none, class: reasoning}
+  - {utterance: "rank my meetings by importance", intent: none, class: reasoning}
+  - {utterance: "why should I care about this email", intent: none, class: reasoning}
+  - {utterance: "what's the smartest way to plan my day", intent: none, class: reasoning}
+  - {utterance: "should I worry about the budget request", intent: none, class: reasoning}
+  - {utterance: "compare this week to last week", intent: none, class: reasoning}
+
+  # ---- multi_clause (21): never answered by a quick tier ----
+  - {utterance: "what's on my calendar today and then email jordan", intent: none, class: multi_clause}
+  - {utterance: "check my mail and also tell me my brief", intent: none, class: multi_clause}
+  - {utterance: "what's on my calendar and then what's my next meeting", intent: none, class: multi_clause}
+  - {utterance: "show me pending approvals and also my unread count", intent: none, class: multi_clause}
+  - {utterance: "what's on tomorrow and then move my 3pm to friday", intent: none, class: multi_clause}
+  - {utterance: "check my schedule after that give me my brief", intent: none, class: multi_clause}
+  - {utterance: "what's next on my calendar and also who emailed me", intent: none, class: multi_clause}
+  - {utterance: "show me my mail and then check pending approvals", intent: none, class: multi_clause}
+  - {utterance: "what's on my plate today and then what's free this afternoon", intent: none, class: multi_clause}
+  - {utterance: "check pending approvals and also cancel my 3pm", intent: none, class: multi_clause}
+  - {utterance: "what's on friday and then book a meeting with priya", intent: none, class: multi_clause}
+  - {utterance: "give me my brief and also show me my next meeting", intent: none, class: multi_clause}
+  - {utterance: "check my calendar. Then tell me my unread count.", intent: none, class: multi_clause}
+  - {utterance: "what's on today? Also, who emailed me last?", intent: none, class: multi_clause}
+  - {utterance: "show me approvals and then reply to jordan saying thanks", intent: none, class: multi_clause}
+  - {utterance: "what's my next meeting and then what's free tomorrow", intent: none, class: multi_clause}
+  - {utterance: "check my mail after that give me pending approvals", intent: none, class: multi_clause}
+  - {utterance: "what's on my schedule and also draft a reply to priya", intent: none, class: multi_clause}
+  - {utterance: "show me today's brief and then my next event", intent: none, class: multi_clause}
+  - {utterance: "what's pending and also move my 10am to 2pm", intent: none, class: multi_clause}
+  - {utterance: "check my calendar today. Then check tomorrow.", intent: none, class: multi_clause}
+
+  # ---- legacy_near_miss (5, verbatim from internal/runtime/fastpath_test.go) ----
+  - {utterance: "help me schedule a meeting with the calendar team", intent: none, class: legacy_near_miss}
+  - {utterance: "please schedule a meeting with bob tomorrow", intent: none, class: legacy_near_miss}
+  - {utterance: "can you approve this for me", intent: none, class: legacy_near_miss}
+  - {utterance: "tell me about the weather", intent: none, class: legacy_near_miss}
+  - {utterance: "write a brief history of the company", intent: none, class: legacy_near_miss}
+
+  # ---- action_unsupported (16): real actions with no quick-tier handler ----
+  - {utterance: "cancel my 3pm", intent: none, class: action_unsupported}
+  - {utterance: "delete the email from alex", intent: none, class: action_unsupported}
+  - {utterance: "draft a reply to alex", intent: none, class: action_unsupported}
+  - {utterance: "delete my 3pm meeting", intent: none, class: action_unsupported}
+  - {utterance: "archive the email from jordan", intent: none, class: action_unsupported}
+  - {utterance: "forward priya's email to jordan", intent: none, class: action_unsupported}
+  - {utterance: "cc jordan on my reply to priya", intent: none, class: action_unsupported}
+  - {utterance: "block off my whole afternoon", intent: none, class: action_unsupported}
+  - {utterance: "mute notifications for the board sync", intent: none, class: action_unsupported}
+  - {utterance: "unsubscribe me from this newsletter", intent: none, class: action_unsupported}
+  - {utterance: "snooze this email", intent: none, class: action_unsupported}
+  - {utterance: "flag priya's email as important", intent: none, class: action_unsupported}
+  - {utterance: "decline the meeting with jordan", intent: none, class: action_unsupported}
+  - {utterance: "add jordan to the board sync", intent: none, class: action_unsupported}
+  - {utterance: "remove priya from tomorrow's meeting", intent: none, class: action_unsupported}
+  - {utterance: "set a reminder for the board sync", intent: none, class: action_unsupported}
+
+  # ---- ood (20): out of domain ----
+  - {utterance: "what's the weather today", intent: none, class: ood}
+  - {utterance: "tell me a joke", intent: none, class: ood}
+  - {utterance: "who won the election", intent: none, class: ood}
+  - {utterance: "what's the capital of France", intent: none, class: ood}
+  - {utterance: "play some music", intent: none, class: ood}
+  - {utterance: "what time is it in Tokyo", intent: none, class: ood}
+  - {utterance: "how do I make pasta", intent: none, class: ood}
+  - {utterance: "what's the score of the game", intent: none, class: ood}
+  - {utterance: "tell me a fun fact", intent: none, class: ood}
+  - {utterance: "what's 12 times 8", intent: none, class: ood}
+  - {utterance: "who's the president", intent: none, class: ood}
+  - {utterance: "what's a good restaurant nearby", intent: none, class: ood}
+  - {utterance: "how's the stock market doing", intent: none, class: ood}
+  - {utterance: "set a timer for 10 minutes", intent: none, class: ood}
+  - {utterance: "what's the news today", intent: none, class: ood}
+  - {utterance: "translate hello into spanish", intent: none, class: ood}
+  - {utterance: "what's the traffic like", intent: none, class: ood}
+  - {utterance: "tell me a story", intent: none, class: ood}
+  - {utterance: "what's the meaning of life", intent: none, class: ood}
+  - {utterance: "how tall is mount everest", intent: none, class: ood}
+
+  # ---- yesno_zero_pending (2): must never match approvals.respond ----
+  - {utterance: "yes", intent: none, class: yesno_zero_pending, pending: 0}
+  - {utterance: "no", intent: none, class: yesno_zero_pending, pending: 0}
