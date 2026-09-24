@@ -57,6 +57,24 @@ connectors:
   - name: twininbox
     functions:
       - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+  # github, linear and hubspot are real, read-only connectors
+  # (internal/connectors/{github,linear,hubspot}), always registered
+  # (see buildCEORegistry's doc comment for why), but each one's own token
+  # is optional: an owner who never runs `water connect <name>` sees a
+  # clear per-call "not connected" error rather than a daemon that fails to
+  # start. github.repo must also be set in config for github's functions to
+  # do anything (see docs/real-connectors-setup.md).
+  - name: github
+    functions:
+      - {name: list_prs, level: R, rate: {max: 60, per: 1h}}
+      - {name: list_issues, level: R, rate: {max: 60, per: 1h}}
+  - name: linear
+    functions:
+      - {name: list_issues, level: R, rate: {max: 60, per: 1h}}
+  - name: hubspot
+    functions:
+      - {name: list_deals, level: R, rate: {max: 60, per: 1h}}
+      - {name: list_contacts, level: R, rate: {max: 60, per: 1h}}
 
 # Only functions that read (never draft or act) may run unattended in the
 # background sync (internal/sync); get_message and the Drive functions stay

@@ -115,14 +115,32 @@ func TestInvestorRequestDemoRegistryFileLoads(t *testing.T) {
 		t.Fatal("demo investor_request must use internal://investor_request.compute_deal_health")
 	}
 
-	// The real (non-demo) manifest must never be asked to validate this
-	// need: hubspot is not one of its connectors, by design.
+	// The real (non-demo) investor_request decision type must still not use
+	// a hubspot need: twins/ceo/decisions/investor_request.yaml was
+	// deliberately not given one (see this file's own package doc and
+	// docs/EVOLUTION_PLAN.md's demo-slice log entry), so this stays a
+	// regression guard on that file's content specifically. Note this is no
+	// longer a guard on hubspot.list_deals being absent from the real
+	// manifest's connector grants: a later slice gave twins/ceo/twin.yaml a
+	// real, read-only hubspot connector (internal/connectors/hubspot), so
+	// the function now legitimately exists there — just unused by this
+	// decision type.
 	real, err := twins.Load(water.TwinsFS(), "ceo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := real.Function("hubspot.list_deals"); ok {
-		t.Fatal("hubspot.list_deals must not exist in the real ceo manifest")
+	realReg, err := LoadRegistry(water.TwinsFS(), real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realIT, ok := realReg.Lookup("investor_request")
+	if !ok {
+		t.Fatal("investor_request not registered in the real registry")
+	}
+	for _, n := range realIT.Needs {
+		if n.Fetch == "hubspot.list_deals" {
+			t.Fatal("the real (non-demo) investor_request type must not fetch hubspot.list_deals; only the demo variant does")
+		}
 	}
 }
 

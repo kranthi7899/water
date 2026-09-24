@@ -27,7 +27,7 @@ func TestTwinFlagSelectsAnyTwinAndCounterpartyLoads(t *testing.T) {
 		t.Fatalf("WATER_TWIN=counterparty resolved %q", got)
 	}
 
-	m, err := loadTwinManifest(water.TwinsFS(), "counterparty", "", "")
+	m, err := loadTwinManifest(water.TwinsFS(), "counterparty", "", "", "")
 	if err != nil {
 		t.Fatalf("counterparty manifest must load with no code of its own: %v", err)
 	}
