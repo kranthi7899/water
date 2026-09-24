@@ -147,6 +147,12 @@ func (c *Client) requestURL(rawURL string, query url.Values) (string, error) {
 		// The bearer token only ever goes to Google's API hosts.
 		return "", fmt.Errorf("google: refusing to send credentials to %q", u.Host)
 	}
+	for _, seg := range strings.Split(u.EscapedPath(), "/") {
+		if seg == "." || seg == ".." {
+			// An id argument of "." or ".." would climb out of its collection.
+			return "", errors.New("google: invalid id in request path")
+		}
+	}
 	if len(query) > 0 {
 		q := u.Query()
 		for k, vs := range query {

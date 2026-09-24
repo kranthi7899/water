@@ -127,11 +127,9 @@ func revokeGoogle(ctx context.Context, v vault.Vault, account string) error {
 		fmt.Printf("google: nothing to revoke (%s/%s)\n", gapi.Service, account)
 		return nil
 	}
-	cred, err := gapi.CredentialFromSecret(s)
-	if err != nil {
-		return exitWith(ExitError, err)
-	}
-	if err := gapi.Revoke(ctx, cred.RefreshToken, nil); err != nil {
+	if cred, err := gapi.CredentialFromSecret(s); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: stored credential is unreadable, deleting it without revoking at Google:", err)
+	} else if err := gapi.Revoke(ctx, cred.RefreshToken, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: revoke at Google failed:", err)
 	}
 	if err := v.Delete(gapi.Service, account); err != nil {

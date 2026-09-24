@@ -77,14 +77,18 @@ func Authorize(ctx context.Context, cfg ClientConfig, open func(authURL string) 
 			status := http.StatusOK
 			switch {
 			case subtle.ConstantTimeCompare([]byte(cb.state), []byte(state)) != 1:
+				// Anything local can reach this port; a forged callback is
+				// refused without ending the real sign-in.
 				msg, status = "This sign-in did not come from water. You can close this tab.", http.StatusBadRequest
 			case cb.err != "":
 				msg = "Google did not grant access (" + cb.err + "). You can close this tab."
 			}
-			select {
-			case results <- cb:
-			default:
-				msg, status = "This sign-in was already handled. You can close this tab.", http.StatusConflict
+			if status == http.StatusOK {
+				select {
+				case results <- cb:
+				default:
+					msg, status = "This sign-in was already handled. You can close this tab.", http.StatusConflict
+				}
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")

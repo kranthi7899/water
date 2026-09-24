@@ -528,9 +528,6 @@ func TestAuthorizeRejects(t *testing.T) {
 		want  string
 		code  int
 	}{
-		{"bad state", func(g *fakeGoogle) {
-			g.redirectQ = func(q url.Values) url.Values { q.Set("state", "forged"); return q }
-		}, "state", 400},
 		{"denied", func(g *fakeGoogle) {
 			g.redirectQ = func(q url.Values) url.Values {
 				return url.Values{"error": {"access_denied"}, "state": q["state"]}
@@ -552,7 +549,7 @@ func TestAuthorizeRejects(t *testing.T) {
 			if status != tc.code {
 				t.Fatalf("status %d", status)
 			}
-			if tc.name == "bad state" || tc.name == "denied" {
+			if tc.name == "denied" {
 				if g.exchanges.Load() != 0 {
 					t.Fatal("code exchanged")
 				}
