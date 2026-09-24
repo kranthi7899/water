@@ -67,6 +67,9 @@ Every phase must pass vet, test and a `CGO_ENABLED=0` build.
 
 **Deferred:** Twilio and X (both cost money), project health rubrics, dependency linking, the department layer, a phone client, wake word, and barge-in.
 
+**Deferred, tracked separately (owner's long-term concern, 2026-09-23): host the daemon off the laptop.**
+Right now `water daemon` only does anything while the Mac is awake (macOS suspends background processes on sleep), so background sync and Gmail push (once built) only work while the laptop is up. That's fine for now but won't scale to "always available." The eventual fix: run `water daemon` on a small always-on machine (e.g. a Mac mini, since it still needs to run the `claude` CLI logged into the subscription), with the laptop, phone, etc. becoming clients that just talk to it over the network instead of running it locally. Not scheduled to any slice yet; revisit once the core agent loop (through Slice C) is solid.
+
 ## Log
 - 2026-09-23: Step 0 done. Reasoning-layer work committed on `feat/build-site`, branch `feat/ceo-twin` created, and CONTEXT.md, CLAUDE.md and this plan written.
 - 2026-09-23: **A1 done.** New packages: `store`, `audit`, `canon`, `twins` (with `twins/ceo/twin.yaml`, embedded), `gate` (+ `gate/permit`, `gate/internal/mint`), `connectors` (+ `connectors/fake`), `approvals`, `vault`. The council code is untouched.
