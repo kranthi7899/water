@@ -30,6 +30,7 @@ type Config struct {
 	Brief    BriefConfig    `yaml:"brief"`
 	Meetings MeetingsConfig `yaml:"meetings"`
 	Agent    AgentConfig    `yaml:"agent"`
+	GitHub   GitHubConfig   `yaml:"github"`
 }
 
 // SyncConfig configures the daemon's background Google refresh
@@ -89,6 +90,15 @@ type AgentConfig struct {
 	// read yet); an empty value omits the "on behalf of" clause entirely
 	// rather than inventing a placeholder name.
 	SignatureName string `yaml:"signature_name"`
+}
+
+// GitHubConfig configures the real github connector (internal/connectors/
+// github).
+type GitHubConfig struct {
+	// Repo is the "owner/name" repo list_prs/list_issues query. Empty by
+	// default: the connector refuses with a clear error until this is set,
+	// rather than guessing a repo.
+	Repo string `yaml:"repo"`
 }
 
 // OnboardConfig records the last verified round trip.
@@ -161,6 +171,7 @@ func defaults() map[string]string {
 		"agent.mail_address":         "",
 		"agent.forward_to":           "",
 		"agent.signature_name":       "",
+		"github.repo":                "",
 	}
 }
 
@@ -280,6 +291,7 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Agent.MailAddress = flat["agent.mail_address"]
 	r.Agent.ForwardTo = flat["agent.forward_to"]
 	r.Agent.SignatureName = flat["agent.signature_name"]
+	r.GitHub.Repo = flat["github.repo"]
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -318,6 +330,7 @@ func (r *Resolved) Flat() map[string]string {
 		"agent.mail_address":         r.Agent.MailAddress,
 		"agent.forward_to":           r.Agent.ForwardTo,
 		"agent.signature_name":       r.Agent.SignatureName,
+		"github.repo":                r.GitHub.Repo,
 	}
 }
 
