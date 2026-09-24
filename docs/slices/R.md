@@ -1306,7 +1306,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - `Emitter` drops non-owner events, router-only kinds, and everything after done;
     - TTL sweep, the `maxListening` eviction and the done-id keep window.
   - Flag: none.
-- [ ] **R-11 Eligibility, Tier 0 adapter, shared validator** (`internal/nervous/{tier.go,eligibility.go,validate.go,tier0.go}`).
+- [x] **R-11 Eligibility, Tier 0 adapter, shared validator** (`internal/nervous/{tier.go,eligibility.go,validate.go,tier0.go}`).
   - Tests:
     - `eligibility_test.go`: every escalate word and phrase; the multi-clause cases; `too_long`;
     - `tier0_test.go`: a tie gives `ambiguous_match`; unresolved or ambiguous person gives `slot_unresolved`; a deny word gives `action_word`; an inactive intent gives `intent_inactive:<id>`; a handler error escalates; "yes" with 0 pending is not matched; the timeout path; the fake backend shows 0 calls.
