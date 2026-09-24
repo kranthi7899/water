@@ -56,7 +56,7 @@ func (s *Store) GetApproval(ctx context.Context, id string) (ApprovalRow, error)
 
 // ListApprovals returns rows with the given status, oldest first.
 func (s *Store) ListApprovals(ctx context.Context, status string) ([]ApprovalRow, error) {
-	return s.queryApprovals(ctx, `SELECT `+approvalCols+` FROM approvals WHERE status = ? ORDER BY created_at, id`, status)
+	return s.queryApprovals(ctx, `SELECT `+approvalCols+` FROM approvals WHERE status = ? ORDER BY created_at, rowid`, status)
 }
 
 // TransitionApproval moves id from one status to another only if it is
