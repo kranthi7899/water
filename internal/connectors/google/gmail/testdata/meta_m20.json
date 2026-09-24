@@ -1,0 +1,15 @@
+{
+  "id": "m20",
+  "threadId": "t20",
+  "snippet": "Standup moved to 10am.",
+  "internalDate": "1758700200000",
+  "historyId": "155",
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "ops@acme.com"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "Standup"},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 08:03:20 -0400"}
+    ]
+  }
+}

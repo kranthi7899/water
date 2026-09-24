@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "e12",
+      "summary": "Quick check-in",
+      "status": "confirmed",
+      "start": {"dateTime": "2026-09-24T11:00:00-04:00"},
+      "end": {"dateTime": "2026-09-24T11:15:00-04:00"}
+    }
+  ],
+  "nextSyncToken": "st-single-next"
+}

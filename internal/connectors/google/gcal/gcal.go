@@ -5,7 +5,9 @@ package gcal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -17,6 +19,11 @@ import (
 	"water/internal/twins"
 )
 
+// ErrSyncTokenExpired is returned when Google rejects a sync_token with a
+// 410 (the token is too old or otherwise invalid); the caller must drop its
+// stored cursor and fall back to a full time_min/time_max fetch.
+var ErrSyncTokenExpired = errors.New("gcal: sync token expired, full resync needed")
+
 const (
 	defaultMax = 250
 	maxMax     = 250
@@ -27,6 +34,16 @@ const (
 	// someone else) is surfaced in the tool output.
 	descriptionCap = 280
 )
+
+// listEventsOutput is the JSON shape Invoke returns for list_events:
+// the events plus a cursor for the next incremental call. NextSyncToken is
+// populated from Google's last page in both the time_min/time_max path (so
+// the first, non-incremental call already seeds a usable cursor) and the
+// sync_token path.
+type listEventsOutput struct {
+	Events        []Event `json:"events"`
+	NextSyncToken string  `json:"next_sync_token,omitempty"`
+}
 
 // Event is the compact shape Invoke returns and Normalize consumes.
 type Event struct {
@@ -91,14 +108,17 @@ func (*Calendar) Functions() []connectors.Function {
 			// Titles, locations, descriptions and attendees come from
 			// whoever created or was invited to the event, not the CEO.
 			External: true,
+			// time_min/time_max and sync_token are alternatives (either the
+			// window pair or the token, never both), which this flat schema
+			// can't express as Required; Invoke enforces the combination.
 			Schema: connectors.Schema{
 				Properties: map[string]connectors.Property{
-					"time_min":    {Type: "string", Description: "RFC 3339 start of the range (required)"},
-					"time_max":    {Type: "string", Description: "RFC 3339 end of the range (required)"},
+					"time_min":    {Type: "string", Description: "RFC 3339 start of the range (required unless sync_token is set)"},
+					"time_max":    {Type: "string", Description: "RFC 3339 end of the range (required unless sync_token is set)"},
+					"sync_token":  {Type: "string", Description: "incremental sync cursor from a previous call's next_sync_token; must not be combined with time_min/time_max"},
 					"calendar_id": {Type: "string", Description: `calendar id, default "primary"`},
 					"max":         {Type: "integer", Description: "maximum events to return, capped at 250"},
 				},
-				Required: []string{"time_min", "time_max"},
 			},
 		},
 	}
@@ -114,14 +134,21 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 	}
 	timeMin := gapi.ArgString(v.Args, "time_min")
 	timeMax := gapi.ArgString(v.Args, "time_max")
-	if timeMin == "" || timeMax == "" {
-		return nil, fmt.Errorf("gcal: time_min and time_max are required")
-	}
-	if _, err := time.Parse(time.RFC3339, timeMin); err != nil {
-		return nil, fmt.Errorf("gcal: time_min must be RFC 3339: %w", err)
-	}
-	if _, err := time.Parse(time.RFC3339, timeMax); err != nil {
-		return nil, fmt.Errorf("gcal: time_max must be RFC 3339: %w", err)
+	syncToken := gapi.ArgString(v.Args, "sync_token")
+	switch {
+	case syncToken != "":
+		if timeMin != "" || timeMax != "" {
+			return nil, fmt.Errorf("gcal: sync_token cannot be combined with time_min/time_max")
+		}
+	case timeMin != "" && timeMax != "":
+		if _, err := time.Parse(time.RFC3339, timeMin); err != nil {
+			return nil, fmt.Errorf("gcal: time_min must be RFC 3339: %w", err)
+		}
+		if _, err := time.Parse(time.RFC3339, timeMax); err != nil {
+			return nil, fmt.Errorf("gcal: time_max must be RFC 3339: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("gcal: time_min and time_max are required (or sync_token)")
 	}
 	calendarID := gapi.ArgString(v.Args, "calendar_id")
 	if calendarID == "" {
@@ -140,13 +167,18 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 	endpoint := gapi.CalendarBase + "/calendars/" + url.PathEscape(calendarID) + "/events"
 	events := make([]Event, 0, max)
 	pageToken := ""
+	nextSyncToken := ""
 	for page := 0; page < maxPages; page++ {
-		q := url.Values{
-			"singleEvents": {"true"},
-			"orderBy":      {"startTime"},
-			"timeMin":      {timeMin},
-			"timeMax":      {timeMax},
-			"maxResults":   {strconv.Itoa(max)},
+		q := url.Values{"maxResults": {strconv.Itoa(max)}}
+		if syncToken != "" {
+			// Google rejects syncToken combined with timeMin/timeMax,
+			// singleEvents or orderBy.
+			q.Set("syncToken", syncToken)
+		} else {
+			q.Set("singleEvents", "true")
+			q.Set("orderBy", "startTime")
+			q.Set("timeMin", timeMin)
+			q.Set("timeMax", timeMax)
 		}
 		if pageToken != "" {
 			q.Set("pageToken", pageToken)
@@ -154,8 +186,12 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 		var resp struct {
 			Items         []wireEvent `json:"items"`
 			NextPageToken string      `json:"nextPageToken"`
+			NextSyncToken string      `json:"nextSyncToken"`
 		}
 		if err := cl.GetJSON(ctx, endpoint, q, &resp); err != nil {
+			if syncToken != "" && gapi.Status(err) == http.StatusGone {
+				return nil, ErrSyncTokenExpired
+			}
 			return nil, err
 		}
 		for _, w := range resp.Items {
@@ -164,13 +200,16 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 				break
 			}
 		}
+		if resp.NextSyncToken != "" {
+			nextSyncToken = resp.NextSyncToken
+		}
 		if len(events) >= max || resp.NextPageToken == "" {
 			break
 		}
 		pageToken = resp.NextPageToken
 	}
 
-	return json.Marshal(events)
+	return json.Marshal(listEventsOutput{Events: events, NextSyncToken: nextSyncToken})
 }
 
 func toEvent(w wireEvent, calendarID string) Event {
@@ -233,12 +272,12 @@ func (c *Calendar) Normalize(fn string, raw json.RawMessage) ([]store.Record, er
 	if fn != "list_events" {
 		return nil, nil
 	}
-	var events []Event
-	if err := json.Unmarshal(raw, &events); err != nil {
+	var res listEventsOutput
+	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, err
 	}
-	out := make([]store.Record, 0, len(events))
-	for _, e := range events {
+	out := make([]store.Record, 0, len(res.Events))
+	for _, e := range res.Events {
 		out = append(out, &store.Event{
 			Meta:      store.Meta{Source: c.Name(), SourceID: e.CalendarID + ":" + e.ID, External: true},
 			Title:     e.Title,

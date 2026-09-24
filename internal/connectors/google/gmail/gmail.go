@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -29,8 +30,15 @@ const connName = "gmail"
 const maxBodyBytes = 20 << 10
 
 // maxPages bounds list_messages pagination regardless of what a server says,
-// so a misbehaving nextPageToken can't loop forever.
+// so a misbehaving nextPageToken can't loop forever. It applies to both the
+// query-based messages.list path and the incremental history.list path.
 const maxPages = 20
+
+// ErrHistoryTooOld is returned when since_history_id names a history record
+// Gmail no longer has (history.list answers 404). The caller should retry
+// list_messages without since_history_id to get a full resync and a fresh
+// history_id to resume from next time.
+var ErrHistoryTooOld = errors.New("gmail: history too old, full resync needed")
 
 // Gmail is the connector. opts is nil in production and set in tests to
 // point at a fake server.
@@ -54,8 +62,9 @@ func (*Gmail) Functions() []connectors.Function {
 			External:    true,
 			Schema: connectors.Schema{
 				Properties: map[string]connectors.Property{
-					"query": {Type: "string", Description: "Gmail search syntax, e.g. \"from:dana newer_than:1d\""},
-					"max":   {Type: "integer", Description: "max messages to return (default 20, cap 100)"},
+					"query":            {Type: "string", Description: "Gmail search syntax, e.g. \"from:dana newer_than:1d\""},
+					"max":              {Type: "integer", Description: "max messages to return (default 20, cap 100)"},
+					"since_history_id": {Type: "string", Description: "optional: resume from this Gmail historyId instead of query, for incremental sync"},
 				},
 			},
 		},
@@ -105,7 +114,21 @@ type gmailMessage struct {
 	ThreadID     string   `json:"threadId"`
 	Snippet      string   `json:"snippet"`
 	InternalDate string   `json:"internalDate"`
+	HistoryID    string   `json:"historyId"`
 	Payload      mimePart `json:"payload"`
+}
+
+// idPair is a message ID paired with its thread ID, as returned by both
+// messages.list and history.list before either's per-message metadata has
+// been fetched.
+type idPair struct{ id, thread string }
+
+// listMessagesOutput is list_messages' JSON output: the messages plus the
+// mailbox's latest known history ID, so a caller can persist it as the next
+// incremental-sync cursor (gmail:history_id).
+type listMessagesOutput struct {
+	Messages  []message `json:"messages"`
+	HistoryID string    `json:"history_id,omitempty"`
 }
 
 func (g *Gmail) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, error) {
@@ -131,9 +154,19 @@ func (g *Gmail) listMessages(ctx context.Context, cl *gapi.Client, args map[stri
 	if err != nil {
 		return nil, err
 	}
+	if since := gapi.ArgString(args, "since_history_id"); since != "" {
+		return g.listMessagesSinceHistory(ctx, cl, since, max)
+	}
+	return g.listMessagesByQuery(ctx, cl, args, max)
+}
+
+// listMessagesByQuery is the original query-based search: unchanged from
+// before since_history_id existed, aside from wrapping its result in
+// listMessagesOutput and reporting the highest historyId seen along the way
+// (messages.list itself carries no historyId field to read).
+func (g *Gmail) listMessagesByQuery(ctx context.Context, cl *gapi.Client, args map[string]any, max int) (json.RawMessage, error) {
 	query := gapi.ArgString(args, "query")
 
-	type idPair struct{ id, thread string }
 	var ids []idPair
 	pageToken := ""
 	for page := 0; len(ids) < max && page < maxPages; page++ {
@@ -167,8 +200,9 @@ func (g *Gmail) listMessages(ctx context.Context, cl *gapi.Client, args map[stri
 	}
 
 	out := make([]message, 0, len(ids))
+	historyID := ""
 	for _, id := range ids {
-		m, err := fetchMetadata(ctx, cl, id.id)
+		m, mHistoryID, err := fetchMetadata(ctx, cl, id.id)
 		if err != nil {
 			return nil, err
 		}
@@ -176,18 +210,123 @@ func (g *Gmail) listMessages(ctx context.Context, cl *gapi.Client, args map[stri
 			m.ThreadID = id.thread
 		}
 		out = append(out, m)
+		historyID = laterHistoryID(historyID, mHistoryID)
 	}
-	return json.Marshal(out)
+	return json.Marshal(listMessagesOutput{Messages: out, HistoryID: historyID})
 }
 
-func fetchMetadata(ctx context.Context, cl *gapi.Client, id string) (message, error) {
+// listMessagesSinceHistory serves list_messages when since_history_id is
+// set: it walks users.history.list for messageAdded records instead of
+// searching, then reuses fetchMetadata for each newly-added message ID so
+// the output/record shape matches the query-based path exactly.
+func (g *Gmail) listMessagesSinceHistory(ctx context.Context, cl *gapi.Client, sinceHistoryID string, max int) (json.RawMessage, error) {
+	var ids []idPair
+	seen := map[string]bool{}
+	historyID := ""
+	pageToken := ""
+	for page := 0; page < maxPages; page++ {
+		q := url.Values{"startHistoryId": {sinceHistoryID}, "historyTypes": {"messageAdded"}}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		var resp struct {
+			History []struct {
+				MessagesAdded []struct {
+					Message struct {
+						ID       string `json:"id"`
+						ThreadID string `json:"threadId"`
+					} `json:"message"`
+				} `json:"messagesAdded"`
+			} `json:"history"`
+			NextPageToken string `json:"nextPageToken"`
+			HistoryID     string `json:"historyId"`
+		}
+		if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/history", q, &resp); err != nil {
+			if gapi.Status(err) == http.StatusNotFound {
+				return nil, fmt.Errorf("gmail: %w", ErrHistoryTooOld)
+			}
+			return nil, err
+		}
+		for _, rec := range resp.History {
+			for _, a := range rec.MessagesAdded {
+				if a.Message.ID == "" || seen[a.Message.ID] {
+					continue
+				}
+				seen[a.Message.ID] = true
+				ids = append(ids, idPair{a.Message.ID, a.Message.ThreadID})
+			}
+		}
+		historyID = laterHistoryID(historyID, resp.HistoryID)
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+	if len(ids) > max {
+		ids = ids[:max]
+	}
+
+	out := make([]message, 0, len(ids))
+	for _, id := range ids {
+		m, mHistoryID, err := fetchMetadata(ctx, cl, id.id)
+		if err != nil {
+			// A message added-then-deleted between history.list and this
+			// fetch is a normal race, not the stale-cursor condition: skip
+			// it rather than failing the whole call.
+			if gapi.Status(err) == http.StatusNotFound {
+				continue
+			}
+			return nil, err
+		}
+		if m.ThreadID == "" {
+			m.ThreadID = id.thread
+		}
+		out = append(out, m)
+		historyID = laterHistoryID(historyID, mHistoryID)
+	}
+	return json.Marshal(listMessagesOutput{Messages: out, HistoryID: historyID})
+}
+
+func fetchMetadata(ctx context.Context, cl *gapi.Client, id string) (message, string, error) {
 	var raw gmailMessage
 	q := url.Values{"format": {"metadata"}, "metadataHeaders": {"From", "To", "Subject", "Date"}}
 	if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/messages/"+url.PathEscape(id), q, &raw); err != nil {
-		return message{}, err
+		return message{}, "", err
 	}
 	from, to, subject := headerValues(raw.Payload.Headers)
-	return message{ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: capBody(raw.Snippet), InternalDate: raw.InternalDate}, nil
+	m := message{ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: capBody(raw.Snippet), InternalDate: raw.InternalDate}
+	return m, raw.HistoryID, nil
+}
+
+// laterHistoryID returns whichever of a, b is the more recent Gmail history
+// ID, treating "" as absent. History IDs are decimal strings that increase
+// over time; unparseable or differently-sized values fall back to a length,
+// then lexical, comparison, which still holds for any all-digit string.
+func laterHistoryID(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	ai, aerr := strconv.ParseUint(a, 10, 64)
+	bi, berr := strconv.ParseUint(b, 10, 64)
+	if aerr == nil && berr == nil {
+		if bi > ai {
+			return b
+		}
+		return a
+	}
+	if len(a) != len(b) {
+		if len(b) > len(a) {
+			return b
+		}
+		return a
+	}
+	if b > a {
+		return b
+	}
+	return a
 }
 
 func (g *Gmail) getMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
@@ -301,12 +440,12 @@ func parseInternalDate(s string) time.Time {
 func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) {
 	switch fn {
 	case "list_messages":
-		var msgs []message
-		if err := json.Unmarshal(raw, &msgs); err != nil {
+		var lm listMessagesOutput
+		if err := json.Unmarshal(raw, &lm); err != nil {
 			return nil, err
 		}
-		out := make([]store.Record, 0, len(msgs))
-		for _, m := range msgs {
+		out := make([]store.Record, 0, len(lm.Messages))
+		for _, m := range lm.Messages {
 			out = append(out, toRecord(m))
 		}
 		return out, nil

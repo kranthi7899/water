@@ -3,6 +3,7 @@ package gmail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -165,6 +166,8 @@ func TestSchemaValidation(t *testing.T) {
 	}{
 		{"list: empty args", listSchema, map[string]any{}, true},
 		{"list: query and max", listSchema, map[string]any{"query": "from:dana", "max": json.Number("10")}, true},
+		{"list: since_history_id alone", listSchema, map[string]any{"since_history_id": "12345"}, true},
+		{"list: since_history_id wrong type", listSchema, map[string]any{"since_history_id": 12345}, false},
 		{"list: unexpected argument", listSchema, map[string]any{"bogus": "x"}, false},
 		{"list: max wrong type", listSchema, map[string]any{"max": "lots"}, false},
 		{"list: query wrong type", listSchema, map[string]any{"query": 5}, false},
@@ -222,12 +225,16 @@ func TestNormalizesPaginatesAndMarksExternal(t *testing.T) {
 		t.Fatal("expected Untrusted output: mail is written by other people")
 	}
 
-	var msgs []message
-	if err := json.Unmarshal(res.Output, &msgs); err != nil {
+	var out listMessagesOutput
+	if err := json.Unmarshal(res.Output, &out); err != nil {
 		t.Fatal(err)
 	}
+	msgs := out.Messages
 	if len(msgs) != 3 || msgs[0].ID != "m1" || msgs[2].ID != "m3" {
 		t.Fatalf("messages %+v", msgs)
+	}
+	if out.HistoryID != "" {
+		t.Fatalf("history_id = %q, want empty: fixtures carry no historyId", out.HistoryID)
 	}
 	if got := msgs[1].To; len(got) != 2 || got[0] != "ceo@water.dev" || got[1] != "assistant@water.dev" {
 		t.Fatalf("To split: %v", got)
@@ -290,10 +297,11 @@ func TestMaxCapsResultsAndStopsPaginating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var msgs []message
-	if err := json.Unmarshal(res.Output, &msgs); err != nil {
+	var out listMessagesOutput
+	if err := json.Unmarshal(res.Output, &out); err != nil {
 		t.Fatal(err)
 	}
+	msgs := out.Messages
 	if len(msgs) != 1 || msgs[0].ID != "m1" {
 		t.Fatalf("messages %+v, want just m1 (max cap)", msgs)
 	}
@@ -490,5 +498,162 @@ func TestBodyIsCapped(t *testing.T) {
 	got := capBody(long)
 	if len(got) > maxBodyBytes {
 		t.Fatalf("capBody left %d bytes, want <= %d", len(got), maxBodyBytes)
+	}
+}
+
+// TestListMessagesSinceHistoryID_FetchesAddedAndDedupesAcrossPages exercises
+// the incremental path end to end through the gate: history.list pagination
+// via nextPageToken, deduping a message ID (m10) that history.list repeats
+// across pages, and reusing the same per-message metadata fetch as the
+// query-based path to build identical records.
+func TestListMessagesSinceHistoryID_FetchesAddedAndDedupesAcrossPages(t *testing.T) {
+	ts := newTokenServer(t)
+	api := gmailAPI(t, map[string][]byte{
+		"/gmail/v1/users/me/history":                      fixture(t, "history_page1.json"),
+		"/gmail/v1/users/me/history&pageToken=hp2":        fixture(t, "history_page2.json"),
+		"/gmail/v1/users/me/messages/m10?format=metadata": fixture(t, "meta_m10.json"),
+		"/gmail/v1/users/me/messages/m11?format=metadata": fixture(t, "meta_m11.json"),
+	})
+	defer api.Close()
+
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listMessages(t, h, map[string]any{"since_history_id": "100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Untrusted {
+		t.Fatal("expected Untrusted output: mail is written by other people")
+	}
+
+	var out listMessagesOutput
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 2 {
+		t.Fatalf("messages %+v, want 2 (m10 deduped once, m11)", out.Messages)
+	}
+	got := map[string]bool{}
+	for _, m := range out.Messages {
+		got[m.ID] = true
+	}
+	if !got["m10"] || !got["m11"] {
+		t.Fatalf("messages %+v, want m10 and m11", out.Messages)
+	}
+	if out.HistoryID != "205" {
+		t.Fatalf("history_id = %q, want %q (history.list's own last-page value)", out.HistoryID, "205")
+	}
+
+	if len(res.Records) != 2 {
+		t.Fatalf("records %d, want 2", len(res.Records))
+	}
+	for _, r := range res.Records {
+		m, ok := r.(*store.Message)
+		if !ok || !m.External || m.Source != "gmail" {
+			t.Fatalf("record: %+v", r)
+		}
+	}
+}
+
+// TestListMessagesSinceHistoryID_SkipsDeletedMessage covers the case the
+// task calls out explicitly: a message history.list still reports as added
+// but that 404s on its own metadata fetch (deleted in between) must be
+// skipped, not mistaken for ErrHistoryTooOld.
+func TestListMessagesSinceHistoryID_SkipsDeletedMessage(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/gmail/v1/users/me/history":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(fixture(t, "history_single.json"))
+		case "/gmail/v1/users/me/messages/m20":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(fixture(t, "meta_m20.json"))
+		case "/gmail/v1/users/me/messages/m21":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":{"code":404,"message":"Requested entity was not found."}}`)
+		default:
+			t.Fatalf("unexpected request %s", r.URL)
+		}
+	}))
+	defer api.Close()
+
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listMessages(t, h, map[string]any{"since_history_id": "1"})
+	if err != nil {
+		t.Fatalf("expected the deleted message to be skipped, not to fail the call: %v", err)
+	}
+	var out listMessagesOutput
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 1 || out.Messages[0].ID != "m20" {
+		t.Fatalf("messages %+v, want just m20 (m21 skipped)", out.Messages)
+	}
+	if out.HistoryID != "310" {
+		t.Fatalf("history_id = %q, want %q", out.HistoryID, "310")
+	}
+}
+
+// TestListMessagesSinceHistoryID_TooOld verifies the 404-from-history.list
+// sentinel directly against the connector's own incremental path. It calls
+// listMessagesSinceHistory (unexported, same package) with a *gapi.Client
+// built straight from gapi.New rather than going through the gate: the gate
+// redacts a failed call's error into a plain new error (internal/gate/
+// gate.go's redact step, which strips credentials but, as a side effect,
+// discards any wrapped sentinel's identity), so errors.Is only survives to
+// check here, at the boundary this package actually controls. Downstream
+// code that wants errors.Is(err, ErrHistoryTooOld) through gate.Gate.Invoke
+// depends on that gate behavior changing.
+func TestListMessagesSinceHistoryID_TooOld(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gmail/v1/users/me/history" {
+			t.Fatalf("unexpected request %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, `{"error":{"code":404,"message":"Requested entity was not found."}}`)
+	}))
+	defer api.Close()
+
+	cred := gapi.Credential{ClientID: "cid.apps.googleusercontent.com", ClientSecret: testSecret, RefreshToken: testRefresh}
+	cl, err := gapi.New(cred, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = New().listMessagesSinceHistory(context.Background(), cl, "999999", 20)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrHistoryTooOld) {
+		t.Fatalf("err = %v, want ErrHistoryTooOld in its chain", err)
+	}
+	for _, s := range []string{testSecret, testRefresh, "ya29."} {
+		if strings.Contains(err.Error(), s) {
+			t.Fatalf("error leaks %q: %v", s, err)
+		}
+	}
+}
+
+// TestListMessagesSinceHistoryID_NoSecretLeak mirrors
+// TestSecretsNeverLeakInErrorsOrOutput for the incremental path: a failing
+// history.list call must not surface the access token, refresh token or
+// client secret through the gate either.
+func TestListMessagesSinceHistoryID_NoSecretLeak(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprintf(w, `{"error":{"code":400,"message":"bad request for %s / %s / %s"}}`, tok, testRefresh, testSecret)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	_, err := listMessages(t, h, map[string]any{"since_history_id": "1"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, s := range []string{testSecret, testRefresh, "ya29."} {
+		if strings.Contains(err.Error(), s) {
+			t.Fatalf("error leaks %q: %v", s, err)
+		}
 	}
 }

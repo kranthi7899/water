@@ -3,9 +3,11 @@ package gcal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +126,16 @@ func listEvents(t *testing.T, h *harness, args map[string]any) (gate.Result, err
 
 var basicRange = map[string]any{"time_min": "2026-09-24T00:00:00Z", "time_max": "2026-09-30T00:00:00Z"}
 
+// decodeOutput unpacks Invoke's list_events output shape.
+func decodeOutput(t *testing.T, raw json.RawMessage) listEventsOutput {
+	t.Helper()
+	var out listEventsOutput
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	return out
+}
+
 func TestFunctionDeclaration(t *testing.T) {
 	fn := New().Functions()[0]
 	if fn.Name != "list_events" || fn.Level != twins.R || fn.Risk != connectors.RiskLow || !fn.External {
@@ -137,6 +149,11 @@ func TestFunctionDeclaration(t *testing.T) {
 	}
 }
 
+// TestSchemaValidation covers what the flat JSON-schema layer alone checks:
+// property types and unknown keys. It cannot express "time_min/time_max or
+// sync_token, not both, not neither" (that combination lives in Invoke), so
+// cases with only one of them present are schema-valid here and are covered
+// by TestArgCombinationValidation instead.
 func TestSchemaValidation(t *testing.T) {
 	schema := New().Functions()[0].Schema
 	cases := []struct {
@@ -144,11 +161,14 @@ func TestSchemaValidation(t *testing.T) {
 		args map[string]any
 		ok   bool
 	}{
-		{"missing time_min", map[string]any{"time_max": "b"}, false},
-		{"missing time_max", map[string]any{"time_min": "a"}, false},
+		{"time_max only", map[string]any{"time_max": "b"}, true},
+		{"time_min only", map[string]any{"time_min": "a"}, true},
+		{"sync_token only", map[string]any{"sync_token": "st"}, true},
+		{"neither given", map[string]any{}, true},
 		{"unexpected argument", map[string]any{"time_min": "a", "time_max": "b", "extra": true}, false},
 		{"max wrong type", map[string]any{"time_min": "a", "time_max": "b", "max": "lots"}, false},
 		{"calendar_id wrong type", map[string]any{"time_min": "a", "time_max": "b", "calendar_id": 5}, false},
+		{"sync_token wrong type", map[string]any{"sync_token": 5}, false},
 		{"minimal valid", map[string]any{"time_min": "a", "time_max": "b"}, true},
 		{"full valid", map[string]any{"time_min": "a", "time_max": "b", "calendar_id": "team@acme.com", "max": json.Number("10")}, true},
 	}
@@ -157,6 +177,36 @@ func TestSchemaValidation(t *testing.T) {
 		if (err == nil) != tc.ok {
 			t.Errorf("%s: err=%v, want ok=%v", tc.name, err, tc.ok)
 		}
+	}
+}
+
+// TestArgCombinationValidation covers the time_min/time_max-vs-sync_token
+// combination rule Invoke enforces (the schema itself cannot).
+func TestArgCombinationValidation(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("API reached with an invalid argument combination")
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"neither time window nor sync_token", map[string]any{}},
+		{"only time_min", map[string]any{"time_min": basicRange["time_min"]}},
+		{"only time_max", map[string]any{"time_max": basicRange["time_max"]}},
+		{"both time window and sync_token", map[string]any{
+			"time_min": basicRange["time_min"], "time_max": basicRange["time_max"], "sync_token": "st",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := listEvents(t, h, tc.args); err == nil {
+				t.Fatal("expected a validation error")
+			}
+		})
 	}
 }
 
@@ -211,10 +261,8 @@ func TestNormalizesPaginatesAndMarksExternal(t *testing.T) {
 		t.Fatalf("requests %d, want 2 (nextPageToken followed)", reqs)
 	}
 
-	var events []Event
-	if err := json.Unmarshal(res.Output, &events); err != nil {
-		t.Fatal(err)
-	}
+	out := decodeOutput(t, res.Output)
+	events := out.Events
 	if len(events) != 3 {
 		t.Fatalf("events %d, want 3", len(events))
 	}
@@ -226,6 +274,9 @@ func TestNormalizesPaginatesAndMarksExternal(t *testing.T) {
 	}
 	if events[2].ID != "e3" {
 		t.Fatalf("event2: %+v", events[2])
+	}
+	if out.NextSyncToken != "st-final-page" {
+		t.Fatalf("next_sync_token = %q, want the last page's nextSyncToken (unchanged time_min/time_max path still seeds a cursor)", out.NextSyncToken)
 	}
 
 	if len(res.Records) != 3 {
@@ -280,10 +331,7 @@ func TestMaxCapsResultsAndStopsPaginating(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var events []Event
-	if err := json.Unmarshal(res.Output, &events); err != nil {
-		t.Fatal(err)
-	}
+	events := decodeOutput(t, res.Output).Events
 	if len(events) != 1 {
 		t.Fatalf("events %d, want 1 (max cap)", len(events))
 	}
@@ -337,9 +385,9 @@ func TestUnauthorizedRefreshesOnceThenRetries(t *testing.T) {
 	if ts.n.Load() != 2 {
 		t.Fatalf("token refreshes %d, want 2", ts.n.Load())
 	}
-	var events []Event
-	if err := json.Unmarshal(res.Output, &events); err != nil || len(events) != 1 || events[0].ID != "e3" {
-		t.Fatalf("events %+v %v", events, err)
+	events := decodeOutput(t, res.Output).Events
+	if len(events) != 1 || events[0].ID != "e3" {
+		t.Fatalf("events %+v", events)
 	}
 }
 
@@ -379,9 +427,9 @@ func TestBackoffOn429ThenSucceeds(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("backoff sleeps %d, want 1", n)
 	}
-	var events []Event
-	if err := json.Unmarshal(res.Output, &events); err != nil || len(events) != 1 {
-		t.Fatalf("events %+v %v", events, err)
+	events := decodeOutput(t, res.Output).Events
+	if len(events) != 1 {
+		t.Fatalf("events %+v", events)
 	}
 }
 
@@ -411,5 +459,134 @@ func TestSecretsNeverLeakInErrorsOrOutput(t *testing.T) {
 		if strings.Contains(string(b), s) {
 			t.Fatalf("audit log leaks %q", s)
 		}
+	}
+}
+
+func TestSyncTokenFetchesWithoutTimeWindow(t *testing.T) {
+	ts := newTokenServer(t)
+	single := fixture(t, "sync_token_single.json")
+	var gotQuery url.Values
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(single)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listEvents(t, h, map[string]any{"sync_token": "st-abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery.Get("syncToken") != "st-abc" {
+		t.Fatalf("syncToken = %q, want st-abc", gotQuery.Get("syncToken"))
+	}
+	for _, k := range []string{"timeMin", "timeMax", "singleEvents", "orderBy"} {
+		if gotQuery.Get(k) != "" {
+			t.Fatalf("request included %s=%q alongside syncToken; Google rejects that combination", k, gotQuery.Get(k))
+		}
+	}
+	out := decodeOutput(t, res.Output)
+	if len(out.Events) != 1 || out.Events[0].ID != "e12" {
+		t.Fatalf("events %+v", out.Events)
+	}
+	if out.NextSyncToken != "st-single-next" {
+		t.Fatalf("next_sync_token = %q, want st-single-next", out.NextSyncToken)
+	}
+}
+
+func TestSyncTokenPaginatesViaNextPageToken(t *testing.T) {
+	ts := newTokenServer(t)
+	page1, page2 := fixture(t, "sync_token_page1.json"), fixture(t, "sync_token_page2.json")
+	var reqs int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs++
+		q := r.URL.Query()
+		if q.Get("syncToken") != "st-xyz" {
+			t.Errorf("syncToken = %q, want st-xyz", q.Get("syncToken"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if q.Get("pageToken") == "sp2" {
+			w.Write(page2)
+			return
+		}
+		if q.Get("pageToken") != "" {
+			t.Errorf("unexpected pageToken %q on first page", q.Get("pageToken"))
+		}
+		w.Write(page1)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listEvents(t, h, map[string]any{"sync_token": "st-xyz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqs != 2 {
+		t.Fatalf("requests %d, want 2 (nextPageToken followed)", reqs)
+	}
+	out := decodeOutput(t, res.Output)
+	if len(out.Events) != 2 {
+		t.Fatalf("events %d, want 2", len(out.Events))
+	}
+	if out.Events[1].ID != "e11" || out.Events[1].Status != "cancelled" {
+		t.Fatalf("cancelled event: %+v", out.Events[1])
+	}
+	// next_sync_token comes only from the last page, per Google's contract
+	// (intermediate pages don't carry it).
+	if out.NextSyncToken != "st-incremental-next" {
+		t.Fatalf("next_sync_token = %q, want st-incremental-next", out.NextSyncToken)
+	}
+	var cancelledRecord *store.Event
+	for _, r := range res.Records {
+		if ev := r.(*store.Event); ev.SourceID == "primary:e11" {
+			cancelledRecord = ev
+		}
+	}
+	if cancelledRecord == nil || cancelledRecord.Status != "cancelled" {
+		t.Fatalf("cancelled event did not normalize into a store.Event with Status=cancelled: %+v", cancelledRecord)
+	}
+}
+
+func TestSyncTokenExpiredReturnsSentinel(t *testing.T) {
+	ts := newTokenServer(t)
+	const staleToken = "st-stale-and-secret-looking"
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGone)
+		fmt.Fprintf(w, `{"error":{"code":410,"message":"Sync token is no longer valid, a full sync is required."}}`)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	_, err := listEvents(t, h, map[string]any{"sync_token": staleToken})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), ErrSyncTokenExpired.Error()) {
+		t.Fatalf("got %v, want it to carry %q", err, ErrSyncTokenExpired.Error())
+	}
+	if strings.Contains(err.Error(), staleToken) {
+		t.Fatalf("error leaks the sync token: %v", err)
+	}
+	b, rerr := os.ReadFile(h.log.Path())
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if strings.Contains(string(b), staleToken) {
+		t.Fatal("audit log leaks the sync token")
+	}
+}
+
+// TestSyncTokenExpiredIsErrorsIsCompatible checks ErrSyncTokenExpired
+// directly against what Invoke returns, bypassing the gate: the gate's own
+// error path (gate.go) currently rebuilds a plain error from the message
+// string rather than preserving %w chains, so errors.Is only holds at the
+// connector boundary today. ErrSyncTokenExpired is still a package-level
+// sentinel var precisely so that boundary, and any future gate fix, gets
+// errors.Is for free.
+func TestSyncTokenExpiredIsErrorsIsCompatible(t *testing.T) {
+	if !errors.Is(ErrSyncTokenExpired, ErrSyncTokenExpired) {
+		t.Fatal("ErrSyncTokenExpired is not errors.Is-compatible with itself")
+	}
+	wrapped := fmt.Errorf("gcal: %w", ErrSyncTokenExpired)
+	if !errors.Is(wrapped, ErrSyncTokenExpired) {
+		t.Fatal("wrapping ErrSyncTokenExpired with %w broke errors.Is")
 	}
 }

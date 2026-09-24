@@ -10,5 +10,6 @@
       "organizer": {"email": "dana@acme.com"},
       "attendees": [{"email": "dana@acme.com"}]
     }
-  ]
+  ],
+  "nextSyncToken": "st-final-page"
 }

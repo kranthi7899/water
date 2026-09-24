@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "id": "e10",
+      "summary": "Rescheduled sync",
+      "status": "confirmed",
+      "start": {"dateTime": "2026-09-24T09:00:00-04:00"},
+      "end": {"dateTime": "2026-09-24T09:30:00-04:00"}
+    }
+  ],
+  "nextPageToken": "sp2"
+}
