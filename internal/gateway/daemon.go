@@ -294,6 +294,12 @@ func (d *Daemon) handleMeetingStart(w http.ResponseWriter, r *http.Request) {
 // anyone near it): the session is escalated to tainted first, before the
 // body is even read, so no failure path can skip it. Only an explicit
 // /v1/turns request is ever an instruction to the twin.
+//
+// Body: {"channel": "mic"|"system", "text": "...", "at": RFC3339}. at is
+// optional: when the speech began, with a zone (UTC recommended). It orders
+// the transcript and is clamped to [session start, now + 5s]. Help's and
+// cues' "recent" windows go by when the daemon received the segment, not by
+// at, so posting a long utterance late does not hide it.
 func (d *Daemon) handleMeetingSegment(w http.ResponseWriter, r *http.Request) {
 	d.escalateTaint(true)
 	var body struct {

@@ -93,12 +93,15 @@ func TestCuesOnlyLooksAtTheRecentWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	now := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Minute)
+	clock := now.Add(-10 * time.Minute)
+	useClock(m, &clock)
 	s, err := m.Start(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
-	old := now.Add(-2 * time.Minute)
+	clock = old // it arrived two minutes ago
 	if err := m.AddSegment(ctx, s.ID, Segment{At: old, Channel: Mic, Text: "the kafka budget came up earlier"}); err != nil {
 		t.Fatal(err)
 	}

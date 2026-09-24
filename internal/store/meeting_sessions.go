@@ -24,9 +24,14 @@ type MeetingSessionRow struct {
 // every segment is external by construction (the column is pinned to 1).
 type MeetingSegmentRow struct {
 	SessionID string
-	At        time.Time
-	Channel   string
-	Text      string
+	// At is when the speech began (the client's timestamp); it orders the
+	// transcript.
+	At time.Time
+	// ReceivedAt is when the daemon stored the segment; ListMeetingSegments'
+	// since bound applies to it. Zero on insert means At.
+	ReceivedAt time.Time
+	Channel    string
+	Text       string
 }
 
 func (s *Store) InsertMeetingSession(ctx context.Context, r MeetingSessionRow) error {
@@ -76,9 +81,13 @@ func (s *Store) EndMeetingSession(ctx context.Context, id string, at time.Time) 
 // slip between the check and the write. It returns ErrMeetingEnded for a
 // stopped session and ErrNotFound for an unknown one.
 func (s *Store) InsertMeetingSegment(ctx context.Context, r MeetingSegmentRow) error {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO meeting_segments (session_id, at, channel, text, external)
-		SELECT ?, ?, ?, ?, 1 WHERE EXISTS (SELECT 1 FROM meeting_sessions WHERE id = ? AND ended_at IS NULL)`,
-		r.SessionID, r.At.UnixNano(), r.Channel, r.Text, r.SessionID)
+	received := r.ReceivedAt
+	if received.IsZero() {
+		received = r.At
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO meeting_segments (session_id, at, received_at, channel, text, external)
+		SELECT ?, ?, ?, ?, ?, 1 WHERE EXISTS (SELECT 1 FROM meeting_sessions WHERE id = ? AND ended_at IS NULL)`,
+		r.SessionID, r.At.UnixNano(), received.UnixNano(), r.Channel, r.Text, r.SessionID)
 	if err != nil {
 		return err
 	}
@@ -91,27 +100,28 @@ func (s *Store) InsertMeetingSegment(ctx context.Context, r MeetingSegmentRow) e
 	return ErrMeetingEnded
 }
 
-// ListMeetingSegments returns a session's segments at or after since (zero
-// means all), oldest first.
+// ListMeetingSegments returns a session's segments received at or after
+// since (zero means all), ordered by when their speech began.
 func (s *Store) ListMeetingSegments(ctx context.Context, sessionID string, since time.Time) ([]MeetingSegmentRow, error) {
 	var from int64
 	if !since.IsZero() {
 		from = since.UnixNano()
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT at, channel, text FROM meeting_segments
-		WHERE session_id = ? AND at >= ? ORDER BY at, id`, sessionID, from)
+	rows, err := s.db.QueryContext(ctx, `SELECT at, COALESCE(received_at, at), channel, text FROM meeting_segments
+		WHERE session_id = ? AND COALESCE(received_at, at) >= ? ORDER BY at, id`, sessionID, from)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []MeetingSegmentRow
 	for rows.Next() {
-		var at int64
+		var at, received int64
 		r := MeetingSegmentRow{SessionID: sessionID}
-		if err := rows.Scan(&at, &r.Channel, &r.Text); err != nil {
+		if err := rows.Scan(&at, &received, &r.Channel, &r.Text); err != nil {
 			return nil, err
 		}
 		r.At = time.Unix(0, at).UTC()
+		r.ReceivedAt = time.Unix(0, received).UTC()
 		out = append(out, r)
 	}
 	return out, rows.Err()
