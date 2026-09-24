@@ -3,9 +3,29 @@ package nervous
 import (
 	"context"
 
+	"water/internal/nervous/speak"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 )
+
+// speakableFilter wraps emit so that, on the voice channel only, every
+// EventSentence's text passes through speak.Speakable before delivery
+// (Design §8.4: "every sentence event is passed through Speakable... no cap
+// per sentence" — the reply itself is never truncated here, only Lint,
+// called separately once the full reply is known, can flag it as
+// overlength). Every other event kind (delta, done, error, ...) passes
+// through unchanged, since deltas are for on-screen display, not speech.
+func speakableFilter(ch runtime.Channel, emit func(runtime.Event)) func(runtime.Event) {
+	if ch != runtime.ChannelVoice {
+		return emit
+	}
+	return func(ev runtime.Event) {
+		if ev.Kind == runtime.EventSentence {
+			ev.Text = speak.Speakable(ev.Text, speak.Options{})
+		}
+		emit(ev)
+	}
+}
 
 // answerMain hands the turn to the head chef: the existing warm-session
 // model path (runtime.ModelTurn), or, on a brief cache miss, the one
@@ -23,7 +43,7 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 	// if it hasn't, via the same sync.Once so it's never emitted twice.
 	ackTimer.Stop()
 	fireAck()
-	emitMain := n.turns.Emitter(id, turn.OwnerMain, emit)
+	emitMain := speakableFilter(t.Channel, n.turns.Emitter(id, turn.OwnerMain, emit))
 
 	if briefCacheMiss {
 		text, err := runtime.ComputeAndCacheBrief(ctx, env)
@@ -33,6 +53,7 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 			return
 		}
 		runtime.DeliverText(t.Channel, text, emitMain)
+		n.lintVoiceReply(t.Channel, text)
 		emitMain(runtime.Event{Kind: runtime.EventDone, Text: text})
 		_ = n.turns.Done(id, turn.StateDone)
 		return
@@ -50,6 +71,23 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 		_ = n.turns.Done(id, turn.StateDone)
 		return
 	}
+	n.lintVoiceReply(t.Channel, resp.Text)
 	emitMain(runtime.Event{Kind: runtime.EventDone, Text: resp.Text})
 	_ = n.turns.Done(id, turn.StateDone)
+}
+
+// lintVoiceReply runs speak.Lint over a completed main-path reply's full raw
+// text, on the voice channel only, and hands any warnings to
+// Config.OnVoiceLint. The reply itself is never truncated here (Design
+// §8.4) — Lint only reports, via the "overlength" tag, when it ran long.
+// Storing warnings in a route_log row is R-14's job; this just makes them
+// available.
+func (n *Nervous) lintVoiceReply(ch runtime.Channel, raw string) {
+	if ch != runtime.ChannelVoice || n.cfg.OnVoiceLint == nil {
+		return
+	}
+	warnings := speak.Lint(raw, n.cfg.Style.Voice(), n.cfg.Style.MaxChars(string(runtime.ChannelVoice)))
+	if len(warnings) > 0 {
+		n.cfg.OnVoiceLint(warnings)
+	}
 }

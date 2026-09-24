@@ -10,6 +10,7 @@ import (
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
 	"water/internal/nervous/slots"
+	"water/internal/nervous/speak"
 	"water/internal/nervous/tmpl"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
@@ -46,6 +47,13 @@ type Config struct {
 	// Tasks lets control.stop reach the daemon's in-flight-turn bookkeeping.
 	// Nil is fine (reflex's cancelTasksHandler treats it as "0 running").
 	Tasks reflex.TaskControl
+
+	// OnVoiceLint receives the main path's speak.Lint warnings for a voice
+	// turn, if any. Storing them in the route_log row is R-14's job; this
+	// hook (mirroring runtime.Env.OnTaint's existing shape) exists now so
+	// R-14 can wire it up without this package changing again. Nil is fine
+	// (no warning is ever silently required to go anywhere).
+	OnVoiceLint func(warnings []string)
 
 	Tier0Enabled bool
 	MainEnabled  bool
@@ -259,6 +267,16 @@ func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runti
 	emitQuick := n.turns.Emitter(id, turn.OwnerQuick, emit)
 
 	text := n.cfg.Style.Render(result, string(t.Channel))
+	if t.Channel == runtime.ChannelVoice {
+		// The one-voice contract (Design §8.4): a quick answer's rendered
+		// text is capped and normalized exactly like the main path's, using
+		// the same style-declared voice caps, before it ever reaches the
+		// sentence splitter.
+		text = speak.Speakable(text, speak.Options{
+			MaxListItems: n.cfg.Style.MaxListItems(string(runtime.ChannelVoice)),
+			MaxChars:     n.cfg.Style.MaxChars(string(runtime.ChannelVoice)),
+		})
+	}
 	runtime.DeliverText(t.Channel, text, emitQuick)
 	if env.OnTaint != nil {
 		env.OnTaint(result.Tainted)
