@@ -37,3 +37,16 @@ Distinguish from `budget_request` (money going out) and `inbound_decision`
 is set above `budget_request`'s: an unanswered or mishandled investor ask
 tends to cost more in relationship terms than a routine spend, even before
 either card's actual content is known.
+
+A richer, HubSpot-backed variant of this same type id lives at
+`twins/ceo-demo/decisions/investor_request.yaml`, loaded only by the
+`--demo` (`WATER_DEMO=1`) manifest (`twins/ceo-demo/twin.yaml`, id
+`ceo-demo`): it adds an `investor_deal` need against the fake `hubspot`
+connector plus an `internal://investor_request.compute_deal_health`
+computation, so the demo path has a real, richly-sourced example card
+that isn't `budget_request` (see docs/demo.md). It is a separate file, not
+an edit of this one, because `decisions/*.yaml` is validated against
+whichever manifest loads it (`internal/decisions.LoadRegistry`) — a
+`hubspot.list_deals` need here would stop the real, non-demo daemon from
+starting, since `hubspot` is not (and must not become) a connector in
+`twins/ceo/twin.yaml`.

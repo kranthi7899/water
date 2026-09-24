@@ -1,0 +1,54 @@
+# The CEO twin's DEMO manifest — loaded only with `water daemon --demo` (or
+# WATER_DEMO=1). This is a showcase surface, not a real integration: github,
+# linear and hubspot below are internal/connectors/fake's in-memory, canned,
+# clearly-fictional data sources (internal/connectors/fake/{github,linear,
+# hubspot}.go). No network call, no OAuth, no API key exists for any of the
+# three. See docs/demo.md and docs/EVOLUTION_PLAN.md's demo-slice log entry.
+#
+# Everything else here matches twins/ceo/twin.yaml exactly: the daemon's
+# actual behavior (Google connectors, usage caps, models) is unchanged by
+# --demo except for the three fake connectors added below.
+id: ceo-demo
+name: CEO twin (demo)
+
+usage:
+  window: 5h
+  model_calls: 200
+  auto_model_calls: 40
+
+models:
+  fast: haiku
+  strong: ""
+
+connectors:
+  - name: gcal
+    functions:
+      - {name: list_events, level: R, rate: {max: 120, per: 1h}}
+  - name: gmail
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+      - {name: get_message, level: R, rate: {max: 120, per: 1h}}
+  - name: gdrive
+    functions:
+      - {name: search_files, level: R, rate: {max: 60, per: 1h}}
+      - {name: read_file, level: R, rate: {max: 60, per: 1h}}
+  # --- demo-only fake connectors below; see internal/connectors/fake ---
+  - name: github
+    functions:
+      - {name: list_prs, level: R, rate: {max: 60, per: 1h}}
+      - {name: list_issues, level: R, rate: {max: 60, per: 1h}}
+  - name: linear
+    functions:
+      - {name: list_issues, level: R, rate: {max: 60, per: 1h}}
+  - name: hubspot
+    functions:
+      - {name: list_deals, level: R, rate: {max: 60, per: 1h}}
+      - {name: list_contacts, level: R, rate: {max: 60, per: 1h}}
+
+# Same as production: only functions that read (never draft or act) may run
+# unattended in the background sync. The fake connectors are not on this
+# list — they are model- or CEO-initiated (`water ask`) and decision-card
+# fetches only, never a background poll of fake data.
+auto_allowlist:
+  - gcal.list_events
+  - gmail.list_messages

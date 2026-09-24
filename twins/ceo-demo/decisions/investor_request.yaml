@@ -1,0 +1,61 @@
+id: investor_request
+title: Investor request
+trigger: >-
+  An investor asks for something — an update, a meeting, information, a
+  commitment, a follow-up — that needs a CEO decision on how or whether to
+  respond.
+needs:
+  - name: investor_history
+    fetch: gmail.list_messages
+    kind: lookup
+    args: {query: "from:{sender}"}
+  - name: related_documents
+    fetch: gdrive.search_files
+    kind: research
+    args: {query: "{keywords}"}
+  - name: investor_deal
+    fetch: hubspot.list_deals
+    kind: lookup
+    args: {query: "{keywords}"}
+  - name: deal_health
+    fetch: internal://investor_request.compute_deal_health
+    kind: computation
+default_rule: >-
+  No auto-approval: every investor request routes to the CEO with whatever
+  correspondence history, related documents and CRM deal status were found.
+  Investor relationships are too high-stakes for a threshold rule.
+staged_actions:
+  - gmail.send_message
+severity_weight: 3
+---
+DEMO VARIANT — see docs/EVOLUTION_PLAN.md's demo-slice log entry and
+docs/demo.md. This file lives under twins/ceo-demo/decisions/, loaded only
+by the `--demo` (or WATER_DEMO=1) manifest (id: ceo-demo). The type id
+(`investor_request`) is deliberately the same as the real, shipped
+twins/ceo/decisions/investor_request.yaml — they are never loaded together
+(each twin id has exactly one decisions/ directory), so there is no
+duplicate-id conflict.
+
+Why a separate file rather than editing the real one in place: a
+decisions/*.yaml file is validated against whatever manifest loads it
+(`internal/decisions.LoadRegistry`), and `hubspot.list_deals` only exists in
+the demo manifest. Adding it to the file at the real path would make the
+production (non-demo) daemon fail to start — decisions/registry.go's
+loader rejects a needs[].fetch naming a function absent from the active
+manifest, by design (docs/slices/C.md). Keeping the HubSpot need in this
+demo-only copy is what lets `water daemon` (no flag) keep loading exactly
+what it does today while `water daemon --demo` gets the richer card.
+
+`investor_deal` searches HubSpot deals by the same {keywords} extracted
+from the triggering item's subject as `related_documents` already does
+(internal/decisions/record.go's `keywords`) — e.g. an investor email whose
+subject mentions "Meridian" or "Series B" matches the seeded "Meridian
+Ventures — Series B follow-on discussion" deal
+(internal/connectors/fake/hubspot.go). `deal_health`
+(internal://investor_request.compute_deal_health,
+internal/decisions/investor_request.go) reads investor_deal's resolved
+records in code — never a model guess — and computes the deal's dollar
+amount, its pipeline stage (store.Transaction has no dedicated stage field,
+so Normalize repurposes Account for it; see hubspot.go's Normalize
+comment), and days until its close date. A card is `ready` only when every
+need above resolved; no fetch failing silently produces a number here.
