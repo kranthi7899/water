@@ -5,21 +5,20 @@ import (
 	"errors"
 	"testing"
 
-	"water/internal/agent"
 	"water/internal/backend"
-	"water/internal/memory"
-	"water/internal/orchestrator"
-	"water/internal/persona"
-	"water/internal/roles"
+	"water/internal/runtime"
+	"water/internal/twins"
 )
 
 // Guard 1 — metered-leak. With a fake registry where a METERED backend is
-// registered FIRST and a non-metered one is also available, no node may ever
-// obtain the metered backend under default config.
+// registered FIRST and a non-metered one is also available, backend.Select
+// must never hand the twin's turn loop the metered one under default config,
+// and RunTurn must never call it either.
 func TestGuard_MeteredLeak(t *testing.T) {
 	metered := backend.NewFake("fake-api")
 	metered.Avail = backend.Availability{Installed: true, Authed: true, Metered: true, Detail: "fake metered"}
 	sub := backend.NewFake("fake-sub")
+	sub.Reply = func(req backend.Request) string { return "ok" }
 
 	reg := backend.NewRegistry()
 	reg.Register(metered) // registered first on purpose
@@ -33,33 +32,22 @@ func TestGuard_MeteredLeak(t *testing.T) {
 		t.Fatalf("selected %s, want the non-metered backend", sel.Backend.Name())
 	}
 
-	mem, _ := memory.NewMarkdown(memory.Options{Root: t.TempDir()})
-	reg2, err := roles.Load(persona.NewEmbedded(standardTree()), mem)
+	m, err := twins.Parse([]byte("id: t\nname: T\nusage: {window: 1h, model_calls: 5}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &orchestrator.Graph{Nodes: map[string]orchestrator.Node{}}
-	var delegates []string
-	for _, r := range reg2.Delegates() {
-		delegates = append(delegates, r.Slug)
-	}
-	env := agent.Env{Backend: sel.Backend}
-	for _, r := range reg2.All() {
-		g.Nodes[r.Slug] = agent.Node(r, env, delegates)
-	}
-	g.Router = &orchestrator.CEOFanoutRouter{CEO: "ceo", Delegates: delegates}
-	st := orchestrator.NewState("", "test brief", reg2.OrchestratorSlugs())
-	if err := (&orchestrator.Executor{MaxParallel: 4}).Run(context.Background(), g, st); err != nil {
-		t.Fatal(err)
-	}
+	env := runtime.Env{Manifest: m, Backend: sel.Backend}
+	var deltas []string
+	runtime.RunTurn(context.Background(), env, runtime.Turn{Channel: runtime.ChannelCLI, Prompt: "hello"}, func(e runtime.Event) {
+		if e.Kind == runtime.EventDelta {
+			deltas = append(deltas, e.Text)
+		}
+	})
 	if metered.Calls() != 0 {
 		t.Fatalf("metered backend received %d calls; want 0", metered.Calls())
 	}
-	if sub.Calls() != 5 { // ceo decompose + 3 delegates + ceo synthesis
-		t.Fatalf("subscription backend received %d calls; want 5", sub.Calls())
-	}
-	if _, ok := st.FinalOutput(); !ok {
-		t.Fatal("FinalOutput not written")
+	if sub.Calls() != 1 {
+		t.Fatalf("subscription backend received %d calls; want 1", sub.Calls())
 	}
 }
 

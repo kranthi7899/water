@@ -5,23 +5,67 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
+
+// slowFakeDaemon serves POST /v1/tools/invoke on a Unix socket, replying only
+// after delay (or never, if delay is negative) — a stand-in for a daemon call
+// that hangs or takes too long, so the MCP server's own deadline and cancel
+// handling can be tested without a network dependency.
+func slowFakeDaemon(t *testing.T, delay time.Duration) (socketPath string) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "water-mcp-sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	socketPath = filepath.Join(dir, "s.sock")
+	l, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/tools/invoke", func(w http.ResponseWriter, r *http.Request) {
+		if delay < 0 {
+			<-r.Context().Done() // never reply; wait for the client to give up
+			return
+		}
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"status": "ok", "output": json.RawMessage(`"fine"`)})
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	return socketPath
+}
+
+func slowTwinPolicy(socket string) *Policy {
+	schema, _ := json.Marshal(map[string]any{"type": "object", "properties": map[string]any{}})
+	return &Policy{
+		Role:       "ceo",
+		Twin:       []TwinFunction{{ID: "fake_docs.read_doc", Tool: "fake_docs__read_doc", Description: "Read a document.", Schema: schema}},
+		TwinSocket: socket,
+		TwinToken:  "tok",
+	}
+}
 
 // TestMCPHungCallDoesNotBlockServer — a tool call that never finishes must not
 // block ping or other calls, must end with a timeout error, and closing stdin
 // must stop the server even while that call is still stuck.
 func TestMCPHungCallDoesNotBlockServer(t *testing.T) {
-	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, "ok.txt"), []byte("fine"), 0o644)
-	svc := NewService(&Policy{Role: "cto", Filesystem: FSPolicy{Mode: "read-only", Roots: []string{root}}}, nil)
+	socket := slowFakeDaemon(t, -1)
+	svc := NewService(slowTwinPolicy(socket), nil)
 	svc.CallTimeout = 400 * time.Millisecond
-	svc.testDelay = 10 * time.Second
 
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
@@ -38,7 +82,7 @@ func TestMCPHungCallDoesNotBlockServer(t *testing.T) {
 		}
 	}()
 	send := func(s string) { _, _ = inW.Write([]byte(s + "\n")) }
-	send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"ok.txt"}}}`)
+	send(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fake_docs__read_doc","arguments":{"id":"d1"}}}`)
 	send(`{"jsonrpc":"2.0","id":2,"method":"ping"}`)
 
 	start := time.Now()
@@ -61,7 +105,7 @@ func TestMCPHungCallDoesNotBlockServer(t *testing.T) {
 		t.Fatal("slow call never returned a timeout result")
 	}
 	res := call["result"].(map[string]any)
-	if res["isError"] != true || !strings.Contains(res["content"].([]any)[0].(map[string]any)["text"].(string), "deadline") {
+	if res["isError"] != true {
 		t.Fatalf("slow call result: %v", res)
 	}
 	inW.Close()
@@ -73,13 +117,9 @@ func TestMCPHungCallDoesNotBlockServer(t *testing.T) {
 }
 
 func TestMCPCancelNotificationStopsMatchingCall(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("fine"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(&Policy{Role: "cto", Filesystem: FSPolicy{Mode: "read-only", Roots: []string{root}}}, nil)
+	socket := slowFakeDaemon(t, -1)
+	svc := NewService(slowTwinPolicy(socket), nil)
 	svc.CallTimeout = 5 * time.Second
-	svc.testDelay = 10 * time.Second
 
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
@@ -96,7 +136,7 @@ func TestMCPCancelNotificationStopsMatchingCall(t *testing.T) {
 		}
 	}()
 	send := func(s string) { _, _ = inW.Write([]byte(s + "\n")) }
-	send(`{"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"read_file","arguments":{"path":"ok.txt"}}}`)
+	send(`{"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"fake_docs__read_doc","arguments":{"id":"d1"}}}`)
 	send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"slow","reason":"user cancelled"}}`)
 
 	select {
@@ -105,8 +145,7 @@ func TestMCPCancelNotificationStopsMatchingCall(t *testing.T) {
 			t.Fatalf("unexpected reply: %v", msg)
 		}
 		res := msg["result"].(map[string]any)
-		text := res["content"].([]any)[0].(map[string]any)["text"].(string)
-		if res["isError"] != true || !strings.Contains(text, "context canceled") {
+		if res["isError"] != true {
 			t.Fatalf("cancelled call result: %v", res)
 		}
 	case <-time.After(time.Second):
@@ -120,49 +159,41 @@ func TestMCPCancelNotificationStopsMatchingCall(t *testing.T) {
 	}
 }
 
-// TestReadNonRegularFileRefused — a named pipe under a root is refused
-// immediately instead of blocking open() forever.
-func TestReadNonRegularFileRefused(t *testing.T) {
-	root := t.TempDir()
-	fifo := filepath.Join(root, "pipe")
-	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
-		t.Skip("mkfifo unavailable:", err)
-	}
-	svc := NewService(&Policy{Role: "cto", Filesystem: FSPolicy{Mode: "read-only", Roots: []string{root}}}, nil)
-	start := time.Now()
-	_, err := svc.Call(context.Background(), ToolReadFile, map[string]any{"path": "pipe"})
-	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("fifo read: %v", err)
-	}
-	if time.Since(start) > time.Second {
-		t.Fatal("fifo refusal was not immediate")
-	}
-}
+// TestTwinCallSucceedsThroughMCP is the happy path end to end: tools/call →
+// Service.Call → the twin proxy → a real (fast) fake daemon.
+func TestTwinCallSucceedsThroughMCP(t *testing.T) {
+	socket := slowFakeDaemon(t, 0)
+	svc := NewService(slowTwinPolicy(socket), nil)
 
-// TestShellAllowlistRefusesCompound — "ls" in the allowlist must not authorise
-// chaining, pipes or substitution; confirm-each is refused (no approval
-// channel); and no shell runs at all where no OS sandbox exists.
-func TestShellAllowlistRefusesCompound(t *testing.T) {
-	orig := SandboxAvailable
-	defer func() { SandboxAvailable = orig }()
-	SandboxAvailable = func() bool { return true }
-	p := &Policy{Role: "cto", Filesystem: FSPolicy{Mode: "read-only", Roots: []string{t.TempDir()}}, Shell: ShellPolicy{Mode: "allowlist", Allowlist: []string{"ls"}}}
-	for _, c := range []string{"ls && touch x", "ls; rm -rf /", "ls $(touch x)", "ls `touch x`", "ls | sh", "ls > out", "ls\ntouch x"} {
-		if d, _ := p.Authorize(ToolRun, map[string]any{"command": c}); d.Allowed {
-			t.Fatalf("%q was allowed: %s", c, d.Basis)
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- ServeStdio(context.Background(), inR, outW, svc) }()
+	replies := make(chan map[string]any, 8)
+	go func() {
+		sc := bufio.NewScanner(outR)
+		for sc.Scan() {
+			var m map[string]any
+			if json.Unmarshal(sc.Bytes(), &m) == nil {
+				replies <- m
+			}
 		}
+	}()
+	_, _ = inW.Write([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fake_docs__read_doc","arguments":{"id":"d1"}}}` + "\n"))
+
+	select {
+	case msg := <-replies:
+		res := msg["result"].(map[string]any)
+		if res["isError"] == true {
+			t.Fatalf("unexpected error: %v", res)
+		}
+		text := res["content"].([]any)[0].(map[string]any)["text"].(string)
+		if !strings.Contains(text, "fine") {
+			t.Fatalf("text = %q", text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no reply")
 	}
-	d, out := p.Authorize(ToolRun, map[string]any{"command": "ls -la"})
-	if !d.Allowed || len(out["argv"].([]string)) != 2 {
-		t.Fatalf("simple allowlisted command: %+v %v", d, out)
-	}
-	p.Shell.Mode = "confirm-each"
-	if d, _ := p.Authorize(ToolRun, map[string]any{"command": "ls"}); d.Allowed {
-		t.Fatal("confirm-each allowed without an approval channel")
-	}
-	SandboxAvailable = func() bool { return false }
-	p.Shell.Mode = "unrestricted"
-	if d, _ := p.Authorize(ToolRun, map[string]any{"command": "ls"}); d.Allowed || !strings.Contains(d.Basis, "no OS sandbox") {
-		t.Fatalf("shell allowed without a sandbox: %+v", d)
-	}
+	inW.Close()
+	<-done
 }

@@ -76,12 +76,10 @@ func ServeStdio(ctx context.Context, in io.Reader, out io.Writer, svc *Service) 
 	if callTimeout <= 0 {
 		callTimeout = DefaultCallTimeout
 	}
-	// A human may reasonably need longer than the normal tool deadline to
-	// review a write or command. The MCP child waits on the private approval
-	// bridge, not stdin, so this does not stall other requests.
-	if svc.Policy != nil && svc.Policy.ApprovalSocket != "" && callTimeout < 5*time.Minute {
-		callTimeout = 5 * time.Minute
-	}
+	// A twin call either runs immediately or is queued for later approval —
+	// the daemon never blocks this call waiting on a human decision — so one
+	// deadline suffices; there is no local-write/local-command variant that
+	// needs a longer allowance.
 	var cmu sync.Mutex
 	calls := map[string]context.CancelFunc{}
 	cancelCall := func(id string) {

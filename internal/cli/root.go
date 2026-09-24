@@ -5,28 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"water/internal/backend"
 	"water/internal/config"
-	"water/internal/surface"
 )
 
 // Execute runs the command tree and returns a process exit code.
-func Execute(embedded, themes fs.FS, args []string) int {
-	app := NewApp(embedded, themes)
+func Execute(args []string) int {
+	app := NewApp()
 	root := app.rootCmd()
 	root.SetArgs(args)
 	if err := root.Execute(); err != nil {
 		var ee *exitError
 		if errors.As(err, &ee) {
-			fmt.Fprintln(os.Stderr, surface.StyleErr.Render("error:"), ee.err)
+			fmt.Fprintln(os.Stderr, styleErr.Render("error:"), ee.err)
 			return ee.code
 		}
-		fmt.Fprintln(os.Stderr, surface.StyleErr.Render("error:"), err)
+		fmt.Fprintln(os.Stderr, styleErr.Render("error:"), err)
 		return ExitError
 	}
 	return ExitOK
@@ -40,17 +38,17 @@ func (a *App) rootCmd() *cobra.Command {
 			}
 		},
 		Use:   "water",
-		Short: "A council of role-agents on your existing subscription.",
-		Long: surface.StyleDim.Render(surface.Banner) + `
-water hosts role-agents (a singleton CEO plus COO, CTO and Design), each with a
-private persona and private memory, orchestrated through a native state graph,
-running on the Claude or ChatGPT subscription CLIs you already pay for.`,
+		Short: "A CEO digital twin on your existing Claude subscription.",
+		Long: styleDim.Render("water") + `
+water is a digital twin for one role: the CEO. It understands the role's
+responsibilities and environment, reads and prepares work through connectors,
+and acts only through an approval-gated daemon — running on the Claude
+subscription you already pay for.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// No subcommand: like `claude`, bare `water` is the chat interface.
-			// Unconfigured → onboard (which ends in the agent picker); no
-			// terminal → help.
+			// Unconfigured → onboard; no terminal → help.
 			if _, err := os.Stat(config.Path()); errors.Is(err, os.ErrNotExist) {
 				if !isTTY(os.Stdin) && !a.flags.yes {
 					fmt.Fprintln(os.Stderr, "water is not configured. Run `water onboard` (add --yes for automation).")
@@ -65,9 +63,7 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 		},
 	}
 	pf := root.PersistentFlags()
-	pf.StringVar(&a.flags.agentsDir, "agents-dir", "", "overlay a local agents directory (dev)")
 	pf.StringVar(&a.flags.traceDir, "trace", "", "trace directory override (dev)")
-	_ = pf.MarkHidden("agents-dir")
 	_ = pf.MarkHidden("trace")
 	pf.StringVarP(&a.flags.output, "output", "o", "text", "output format: text|json")
 	pf.BoolVar(&a.flags.jsonOut, "json", false, "shorthand for --output json")
@@ -80,9 +76,8 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 	pf.BoolVar(&a.flags.debug, "debug", false, "log every model subprocess: real flags (prompt text elided), pid, duration, exit, last stderr line")
 
 	root.AddCommand(
-		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(), a.runCmd(), a.orchestrateCmd(), a.buildSiteCmd(),
-		a.diagnoseCmd(), a.dashboardCmd(), a.memoryCmd(), a.personaCmd(), a.experienceCmd(),
-		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(), a.replayCmd(), a.debugCmd(), a.skillsCmd(),
+		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(),
+		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(),
 		a.daemonCmd(), a.auditCmd(), a.askCmd(), a.approveCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true

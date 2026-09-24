@@ -6,17 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"water/internal/backend"
 	"water/internal/config"
-	"water/internal/memory"
-	"water/internal/orchestrator"
-	"water/internal/surface"
-	"water/internal/theme"
+	"water/internal/gateway"
 	"water/internal/voice"
 )
 
@@ -29,7 +24,7 @@ type check struct {
 func (a *App) doctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Deep diagnostics: backends, auth, metered-leak warnings, roles",
+		Short: "Deep diagnostics: backends, auth, metered-leak warnings, the twin and daemon",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := context.Background()
@@ -48,7 +43,6 @@ func (a *App) doctorCmd() *cobra.Command {
 			}
 			a.configureBackends(cfg)
 
-			// Backends.
 			for _, b := range backend.Default.All() {
 				av := b.Available(ctx)
 				st := "warn"
@@ -83,93 +77,21 @@ func (a *App) doctorCmd() *cobra.Command {
 				add("credential leak", "ok", "no metered API keys exported in this environment")
 			}
 
-			// Roles.
-			reg, err := a.roleRegistry()
-			if err != nil {
-				add("roles", "fail", err.Error())
+			// The twin's manifest and connectors.
+			if deps, err := buildTwinDeps(); err != nil {
+				add("twin", "fail", err.Error())
 			} else {
-				orch := reg.Orchestrator()
-				blank := 0
-				for _, r := range reg.All() {
-					if r.Blank() {
-						blank++
-					}
-				}
-				add("roles", "ok", fmt.Sprintf("%d discovered from %s; orchestrator %s; %d persona(s) unwritten", len(reg.All()), reg.Source(), orch.Slug, blank))
-				if _, ok := orchestrator.NewRouter(cfg.Orchestration.Router, orch.Slug, nil); !ok {
-					add("router", "fail", fmt.Sprintf("%q is not a registered router (%v)", cfg.Orchestration.Router, orchestrator.RouterNames()))
-				} else {
-					add("router", "ok", cfg.Orchestration.Router)
-				}
-				// Memory bounds per role.
-				if mp, err := a.memoryProvider(); err == nil {
-					if sz, ok := mp.(memory.Sizer); ok {
-						for _, r := range reg.All() {
-							n, b, err := sz.Size(r.Slug)
-							switch {
-							case err != nil:
-								add("memory "+r.Slug, "fail", err.Error())
-							case n > cfg.Memory.MaxEntries || b > cfg.Memory.MaxBytes:
-								add("memory "+r.Slug, "fail", fmt.Sprintf("%d entries / %d bytes exceeds bounds — `water memory %s prune`", n, b, r.Slug))
-							default:
-								add("memory "+r.Slug, "ok", fmt.Sprintf("%d entries / %d bytes (max %d / %d)", n, b, cfg.Memory.MaxEntries, cfg.Memory.MaxBytes))
-							}
-						}
-					}
-				}
+				add("twin", "ok", fmt.Sprintf("%s: %d function(s) across %d connector(s)", deps.manifest.ID, len(deps.manifest.FunctionIDs()), len(deps.manifest.Connectors)))
+				deps.Close()
 			}
 
-			// Trace dir writable.
-			if err := os.MkdirAll(cfg.Telemetry.TraceDir, 0o755); err != nil {
-				add("traces", "fail", err.Error())
-			} else if f, err := os.CreateTemp(cfg.Telemetry.TraceDir, ".probe-*"); err != nil {
-				add("traces", "fail", err.Error())
+			// The daemon.
+			paths := gateway.Paths{Home: config.Home()}
+			if _, err := os.Stat(paths.SocketPath()); err == nil {
+				add("daemon", "ok", "socket present at "+paths.SocketPath())
 			} else {
-				f.Close()
-				os.Remove(f.Name())
-				add("traces", "ok", cfg.Telemetry.TraceDir+" (local only; nothing leaves this machine)")
+				add("daemon", "warn", "not running; start it with `water daemon`")
 			}
-
-			// Checkpoints dir.
-			if cfg.Orchestration.Checkpointer == "file" {
-				if err := os.MkdirAll(cfg.Orchestration.CheckpointDir, 0o755); err != nil {
-					add("checkpoints", "fail", err.Error())
-				} else {
-					add("checkpoints", "ok", cfg.Orchestration.CheckpointDir)
-				}
-			} else {
-				add("checkpoints", "warn", "checkpointer is noop; runs cannot be resumed")
-			}
-
-			// Identity keyring + local agents dir.
-			switch {
-			case a.keys() != nil:
-				add("keyring", "ok", filepath.Join(config.Home(), "keyring")+" (persona signatures enforced for --agents-dir)")
-			case a.localAgentsDir() != "":
-				add("keyring", "warn", "no keyring yet; persona files are hash-checked but not signed (created on first `water persona edit`)")
-			default:
-				add("keyring", "ok", "not needed (personas are embedded)")
-			}
-
-			// Tools.
-			switch {
-			case !cfg.Tools.Enabled:
-				add("tools", "ok", "disabled (tools.enabled=false); every role invokes nothing")
-			case len(cfg.RootList()) == 0:
-				add("tools", "warn", "tools.enabled but tools.roots is empty; roles with a tools block can read nothing")
-			default:
-				add("tools", "ok", fmt.Sprintf("read roots: %s (roles: cto, design read-only; no shell)", strings.Join(cfg.RootList(), ", ")))
-			}
-
-			// Themes.
-			if names := theme.Names(a.themes); len(names) == 0 {
-				add("themes", "fail", "no themes embedded")
-			} else {
-				add("themes", "ok", fmt.Sprintf("%s · terminal colour profile %s", strings.Join(names, ", "), theme.EnvProfile()))
-			}
-
-			// Sessions.
-			add("sessions", "ok", fmt.Sprintf("%s (keep %d, max age %s, pinned exempt)", filepath.Join(config.Home(), "sessions"), cfg.Sessions.Keep, cfg.Sessions.MaxAge))
 
 			// Voice.
 			if vp, verr := a.voiceProvider(cfg, "ceo"); verr != nil {
@@ -177,23 +99,9 @@ func (a *App) doctorCmd() *cobra.Command {
 			} else if !vp.Available() {
 				add("voice", "warn", voice.Absence(vp))
 			} else {
-				detail := vp.Name() + " (speak only; listen is a documented no-op)"
-				if cfg.Voice.Provider == "os" {
-					var parts []string
-					for _, r := range []string{"ceo", "coo", "cto", "design"} {
-						v := voice.NewOSFor(r, cfg.Voice.VoiceFor(r)).Voice()
-						if v == "" {
-							v = "system default"
-						}
-						parts = append(parts, r+"="+v)
-						if o := cfg.Voice.VoiceFor(r); voice.OverrideIgnored(o) {
-							add("voice", "warn", fmt.Sprintf("voice.%s_voice %q is not installed; using %s", r, o, v))
-						}
-					}
-					detail += " · " + strings.Join(parts, ", ")
-				}
-				add("voice", "ok", detail)
+				add("voice", "ok", vp.Name()+" (speak only; listen is a documented no-op)")
 			}
+
 			if cfg.Onboard.VerifiedAt != "" {
 				add("onboard", "ok", "verified round trip at "+cfg.Onboard.VerifiedAt)
 			} else {
@@ -215,14 +123,14 @@ func (a *App) printChecks(checks []check) error {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"checks": checks, "ok": !failed})
 	} else {
 		for _, c := range checks {
-			mark := surface.StyleOK.Render("✓")
+			mark := styleOK.Render("✓")
 			switch c.Status {
 			case "warn":
-				mark = surface.StyleWarn.Render("!")
+				mark = styleWarn.Render("!")
 			case "fail":
-				mark = surface.StyleErr.Render("×")
+				mark = styleErr.Render("×")
 			}
-			fmt.Printf("  %s %-24s %s\n", mark, c.Name, surface.StyleDim.Render(c.Detail))
+			fmt.Printf("  %s %-24s %s\n", mark, c.Name, styleDim.Render(c.Detail))
 		}
 	}
 	if failed {

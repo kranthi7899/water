@@ -9,7 +9,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"water/internal/config"
-	"water/internal/surface"
 )
 
 func (a *App) configCmd() *cobra.Command {
@@ -50,12 +49,12 @@ func (a *App) configCmd() *cobra.Command {
 				}
 				return json.NewEncoder(os.Stdout).Encode(map[string]any{"file": cfg.FilePath, "file_exists": cfg.FileExists, "values": rows})
 			}
-			fmt.Printf("%s %s\n", surface.StyleDim.Render("file"), cfg.FilePath)
+			fmt.Printf("%s %s\n", styleDim.Render("file"), cfg.FilePath)
 			for _, k := range config.Keys() {
 				layer := cfg.Provenance[k]
-				ls := surface.StyleDim.Render(layer)
+				ls := styleDim.Render(layer)
 				if layer != config.LayerDefault {
-					ls = surface.StyleAccent.Render(layer)
+					ls = styleAccent.Render(layer)
 				}
 				fmt.Printf("  %-28s %-22s %s\n", k, flat[k], ls)
 			}

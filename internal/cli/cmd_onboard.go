@@ -13,7 +13,6 @@ import (
 	"water/internal/auth"
 	"water/internal/backend"
 	"water/internal/config"
-	"water/internal/surface"
 )
 
 func (a *App) onboardCmd() *cobra.Command {
@@ -62,7 +61,7 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	}
 	probe()
 	if !a.jsonMode() {
-		fmt.Fprintln(os.Stderr, surface.StyleDim.Render(surface.Banner))
+		fmt.Fprintln(os.Stderr, styleDim.Render("water — a CEO digital twin"))
 		a.printBackends(rep)
 	}
 
@@ -84,7 +83,7 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 		if interactive && !auth.Confirm(os.Stdin, os.Stderr, fmt.Sprintf("  %s is installed but not logged in. Sign in now (%s)?", name, plan.Note), a.flags.yes) {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "\n  %s %s\n\n", surface.StyleDim.Render("running"), joinCmd(plan.Command))
+		fmt.Fprintf(os.Stderr, "\n  %s %s\n\n", styleDim.Render("running"), joinCmd(plan.Command))
 		if _, lerr := auth.Login(ctx, nil, name, headless); lerr != nil {
 			rep.Warnings = append(rep.Warnings, lerr.Error())
 			continue
@@ -117,12 +116,12 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 
 	// The gate: one clean real round trip.
 	if !a.jsonMode() {
-		fmt.Fprintf(os.Stderr, "\n  %s verifying %s with a real round trip…", surface.StyleDim.Render("check"), rep.Selected)
+		fmt.Fprintf(os.Stderr, "\n  %s verifying %s with a real round trip…", styleDim.Render("check"), rep.Selected)
 	}
 	resp, verr := auth.VerifyRoundTrip(ctx, sel.Backend, 2*time.Minute)
 	if verr != nil {
 		if !a.jsonMode() {
-			fmt.Fprintln(os.Stderr, " "+surface.StyleErr.Render("failed"))
+			fmt.Fprintln(os.Stderr, " "+styleErr.Render("failed"))
 		}
 		if a.jsonMode() {
 			_ = json.NewEncoder(os.Stdout).Encode(rep)
@@ -131,7 +130,7 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	}
 	rep.Verified, rep.VerifyText = true, resp.Text
 	if !a.jsonMode() {
-		fmt.Fprintf(os.Stderr, " %s (%s, %s)\n", surface.StyleOK.Render("ok"), resp.Duration.Round(time.Millisecond), surface.StyleDim.Render("0 metered"))
+		fmt.Fprintf(os.Stderr, " %s (%s, %s)\n", styleOK.Render("ok"), resp.Duration.Round(time.Millisecond), styleDim.Render("0 metered"))
 	}
 
 	set := map[string]string{"backend.preferred": rep.Selected, "backend.allow_metered": "false", "onboard.verified_at": time.Now().UTC().Format(time.RFC3339)}
@@ -146,12 +145,12 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	if a.jsonMode() {
 		return json.NewEncoder(os.Stdout).Encode(rep)
 	}
-	fmt.Fprintf(os.Stderr, "\n  %s %s\n", surface.StyleDim.Render("selected"), surface.StyleAccent.Render(rep.Selected))
-	fmt.Fprintf(os.Stderr, "  %s %s\n", surface.StyleDim.Render("config  "), rep.Config)
+	fmt.Fprintf(os.Stderr, "\n  %s %s\n", styleDim.Render("selected"), styleAccent.Render(rep.Selected))
+	fmt.Fprintf(os.Stderr, "  %s %s\n", styleDim.Render("config  "), rep.Config)
 	for _, w := range rep.Warnings {
-		fmt.Fprintf(os.Stderr, "\n  %s %s\n", surface.StyleWarn.Render("warning"), w)
+		fmt.Fprintf(os.Stderr, "\n  %s %s\n", styleWarn.Render("warning"), w)
 	}
-	fmt.Fprintf(os.Stderr, "\n  %s\n", surface.StyleDim.Render("next: water chat · water orchestrate \"<brief>\" · water status"))
+	fmt.Fprintf(os.Stderr, "\n  %s\n", styleDim.Render("next: water daemon · water chat · water ask \"<prompt>\" · water status"))
 	if interactive && !noPicker && isTTY(os.Stdout) {
 		a.cfg = nil
 		return a.runChat(ctx)
@@ -162,13 +161,13 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 func (a *App) printBackends(rep onboardReport) {
 	for _, name := range backend.Default.Names() {
 		av := rep.Backends[name]
-		mark := surface.StyleDim.Render("○")
+		mark := styleDim.Render("○")
 		if av.Usable() && !av.Metered {
-			mark = surface.StyleAccent.Render("●")
+			mark = styleAccent.Render("●")
 		} else if av.Usable() {
-			mark = surface.StyleWarn.Render("$")
+			mark = styleWarn.Render("$")
 		}
-		fmt.Fprintf(os.Stderr, "  %s %-20s %s\n", mark, name, surface.StyleDim.Render(av.Detail))
+		fmt.Fprintf(os.Stderr, "  %s %-20s %s\n", mark, name, styleDim.Render(av.Detail))
 	}
 }
 

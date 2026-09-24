@@ -4,17 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
-	"os/exec"
-	"path"
 	"runtime"
 
 	"github.com/spf13/cobra"
 
-	"water/internal/dashboard"
-	"water/internal/identity"
-	"water/internal/roles"
 	"water/internal/voice"
 )
 
@@ -34,17 +28,16 @@ func (a *App) versionCmd() *cobra.Command {
 }
 
 func (a *App) voiceCmd() *cobra.Command {
-	var role string
 	c := &cobra.Command{
 		Use:   "voice [text]",
-		Short: "Speak text in a role's voice (test the voice path)",
+		Short: "Speak text in the CEO twin's voice (test the voice path)",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.config()
 			if err != nil {
 				return err
 			}
-			vp, err := a.voiceProvider(cfg, role)
+			vp, err := a.voiceProvider(cfg, "ceo")
 			if err != nil {
 				return exitWith(ExitUsage, err)
 			}
@@ -58,86 +51,5 @@ func (a *App) voiceCmd() *cobra.Command {
 			return vp.Speak(context.Background(), text)
 		},
 	}
-	c.Flags().StringVar(&role, "role", "ceo", "speak as this role (ceo, coo, cto, design)")
 	return c
-}
-
-func (a *App) dashboardCmd() *cobra.Command {
-	var addr string
-	var noOpen bool
-	c := &cobra.Command{
-		Use:   "dashboard",
-		Short: "Read-only local web view of roles, runs, diagnostics and tool invocations",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			cfg, err := a.config()
-			if err != nil {
-				return err
-			}
-			reg, _ := a.roleRegistry()
-			var key []byte
-			if k := a.keys(); k != nil {
-				key = k.Key
-			}
-			fileStatus := func(r *roles.Role) []identity.FileStatus {
-				var out []identity.FileStatus
-				fsys := a.source().FS()
-				for _, n := range []string{"soul.md", "experience.md", "reasoning.md"} {
-					b, err := fs.ReadFile(fsys, path.Join(r.Dir, n))
-					if err != nil {
-						continue
-					}
-					out = append(out, identity.Status(n, b, r.RoleID, key, false))
-				}
-				if r.Persona != nil {
-					for _, sk := range r.Persona.Skills {
-						b, err := fs.ReadFile(fsys, path.Join(sk.Dir, "SKILL.md"))
-						if err != nil {
-							continue
-						}
-						out = append(out, identity.Status(path.Join("skills", sk.Slug, "SKILL.md"), b, r.RoleID, key, false))
-					}
-				}
-				return out
-			}
-			backendFor := func(slug string) string {
-				if reg == nil {
-					return ""
-				}
-				if r, ok := reg.Get(slug); ok && r.Backend != "" {
-					return r.Backend + " (role.yaml)"
-				}
-				return cfg.Backend.Preferred
-			}
-			srv, err := dashboard.New(cfg.Telemetry.TraceDir, cfg.Orchestration.CheckpointDir, reg, fileStatus, backendFor)
-			if err != nil {
-				return err
-			}
-			url, err := srv.Serve(addr)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "dashboard (read-only) at %s — ctrl+c to stop\n", url)
-			if !noOpen {
-				openBrowser(url)
-			}
-			select {}
-		},
-	}
-	c.Flags().StringVar(&addr, "addr", "127.0.0.1:0", "listen address (loopback by default)")
-	c.Flags().BoolVar(&noOpen, "no-open", false, "do not open a browser")
-	return c
-}
-
-func openBrowser(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		cmd = exec.Command("xdg-open", url)
-	default:
-		return
-	}
-	_ = cmd.Start()
 }
