@@ -10,8 +10,8 @@ final class VoiceController {
     enum State { case idle, listening, finishing }
     private(set) var state: State = .idle
 
-    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
-    private let engine = AVAudioEngine()
+    private let mic = MicTap()
+    private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var transcript = ""
@@ -50,7 +50,7 @@ final class VoiceController {
     private func begin() {
         stopSpeaking()
         state = .finishing // guard against a double press while prompts are up
-        requestPermissions { [weak self] problem in
+        SpeechPermissions.request(retry: "press the voice hotkey again") { [weak self] problem in
             guard let self else { return }
             if let problem {
                 self.state = .idle
@@ -61,61 +61,24 @@ final class VoiceController {
         }
     }
 
-    /// Asks for Speech Recognition, then Microphone, each only if the user
-    /// hasn't decided yet. Calls back on the main thread with nil when both
-    /// are granted, else a message saying exactly where to fix it.
-    private func requestPermissions(_ done: @escaping (String?) -> Void) {
-        let main: (String?) -> Void = { m in DispatchQueue.main.async { done(m) } }
-        let speechDenied = "Speech Recognition access is off for Water. Turn it on in System Settings > Privacy & Security > Speech Recognition, then press the voice hotkey again."
-        let micDenied = "Microphone access is off for Water. Turn it on in System Settings > Privacy & Security > Microphone, then press the voice hotkey again."
-
-        let afterSpeech: () -> Void = {
-            switch AVCaptureDevice.authorizationStatus(for: .audio) {
-            case .authorized: main(nil)
-            case .notDetermined:
-                AVCaptureDevice.requestAccess(for: .audio) { ok in main(ok ? nil : micDenied) }
-            default: main(micDenied)
-            }
-        }
-        switch SFSpeechRecognizer.authorizationStatus() {
-        case .authorized: afterSpeech()
-        case .notDetermined:
-            SFSpeechRecognizer.requestAuthorization { st in
-                if st == .authorized { afterSpeech() } else { main(speechDenied) }
-            }
-        default: main(speechDenied)
-        }
-    }
-
     // MARK: capture
 
     private func startCapture() {
-        guard let recognizer, recognizer.isAvailable else {
-            return fail("Speech recognition isn't available right now.")
+        let recognizer: SFSpeechRecognizer
+        switch SpeechPermissions.onDeviceRecognizer() {
+        case .success(let r): recognizer = r
+        case .failure(let e): return fail(e.message)
         }
-        guard recognizer.supportsOnDeviceRecognition else {
-            return fail("On-device speech recognition isn't available on this Mac for English, and Water never sends audio off-device. Turn on Dictation in System Settings > Keyboard (let the English model download), then try again.")
-        }
+        self.recognizer = recognizer
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.requiresOnDeviceRecognition = true
         req.shouldReportPartialResults = true
         req.taskHint = .dictation
 
-        let input = engine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            return fail("No microphone input is available.")
-        }
-        input.removeTap(onBus: 0)
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            req.append(buffer)
-        }
-        engine.prepare()
         do {
-            try engine.start()
+            try mic.start { buffer in req.append(buffer) }
         } catch {
-            input.removeTap(onBus: 0)
-            return fail("Couldn't start the microphone: \(error.localizedDescription)")
+            return fail(error.localizedDescription)
         }
 
         request = req
@@ -161,8 +124,7 @@ final class VoiceController {
     }
 
     private func teardownAudio() {
-        if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
+        mic.stop()
     }
 
     private func teardown() {

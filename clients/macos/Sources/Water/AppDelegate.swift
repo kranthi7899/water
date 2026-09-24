@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let panel = AskPanelController()
     private let runner = TurnRunner()
     private let voice = VoiceController()
+    private var meeting: MeetingController!
+    private var meetingItem: NSMenuItem!
     private var hotkeys: HotKeyMonitor!
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -16,16 +18,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.onSubmit = { [weak self] text in self?.send(text, channel: .textBar) }
         panel.onClose = { [weak self] in
             guard let self else { return }
-            if self.voice.state == .idle { self.panel.setStatus("") }
+            if self.voice.state == .idle { self.clearStatus() }
         }
         setUpVoice()
+        setUpMeeting()
 
         hotkeys = HotKeyMonitor { [weak self] key in
             guard let self else { return }
-            if key.keyCode == HotKeyConfig.textBar.keyCode && key.modifiers == HotKeyConfig.textBar.modifiers {
-                self.toggleTextBar()
-            } else {
-                self.voice.toggle()
+            switch key {
+            case HotKeyConfig.textBar: self.toggleTextBar()
+            case HotKeyConfig.meeting: self.meeting.toggle()
+            default: self.voice.toggle()
             }
         }
         hotkeys.onTrustChange = { [weak self] _ in self?.refreshAccessibilityItem() }
@@ -43,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if !HotKeyMonitor.isTrusted { explainAccessibilityOnce() }
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        meeting.shutdown()
     }
 
     // MARK: status item
@@ -64,6 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let talk = NSMenuItem(title: "Talk to Water  (\(HotKeyConfig.voice.label))", action: #selector(talkFromMenu), keyEquivalent: "")
         talk.target = self
         menu.addItem(talk)
+        meetingItem = NSMenuItem(title: "", action: #selector(meetingFromMenu), keyEquivalent: "")
+        meetingItem.target = self
+        menu.addItem(meetingItem)
         menu.addItem(.separator())
         accessibilityItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")
         accessibilityItem.target = self
@@ -87,6 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func talkFromMenu() { voice.toggle() }
 
+    @objc private func meetingFromMenu() { meeting.toggle() }
+
     // MARK: text bar
 
     private func toggleTextBar() {
@@ -102,16 +114,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .ack:
                 break
             case .delta:
-                self.panel.setStatus("")
+                self.clearStatus()
                 self.panel.appendReply(e.text ?? "")
             case .sentence:
                 if channel == .voice { self.voice.speak(e.text ?? "") }
             case .approvalRequired:
                 self.panel.appendApproval(id: e.approvalID)
             case .done:
-                self.panel.setStatus("")
+                self.clearStatus()
             case .error:
-                self.panel.setStatus("")
+                self.clearStatus()
                 self.panel.appendError(e.error ?? "the daemon reported an error")
             case .unknown:
                 break
@@ -120,7 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.panel.appendNote(note)
         }, onFinish: { [weak self] err in
             guard let self else { return }
-            self.panel.setStatus("")
+            self.clearStatus()
             if let err {
                 self.panel.appendError(err.localizedDescription)
             }
@@ -145,11 +157,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         voice.onFailure = { [weak self] message in
             guard let self else { return }
-            self.panel.setStatus("")
+            self.clearStatus()
             self.panel.show()
             self.panel.beginReply()
             self.panel.appendError(message)
         }
+    }
+
+    // MARK: meeting
+
+    private func setUpMeeting() {
+        let client = UnixSocketClient(socketPath: runner.client.socketPath)
+        client.readTimeout = 15
+        meeting = MeetingController(daemon: MeetingDaemon(client: client, tokens: runner.tokens))
+        meeting.onStateChange = { [weak self] _ in self?.refreshMeetingIndicator() }
+        meeting.onNote = { [weak self] note in
+            guard let self else { return }
+            self.panel.show()
+            self.panel.appendNote(note)
+        }
+        meeting.onFailure = { [weak self] message in
+            guard let self else { return }
+            self.panel.show()
+            self.panel.beginReply()
+            self.panel.appendError(message)
+        }
+        refreshMeetingIndicator()
+    }
+
+    /// The listening indicator: while a session is live the menu-bar icon
+    /// turns into a red waveform, the menu says so, and the panel's status
+    /// line reads "● Meeting" whenever nothing else is using it.
+    private func refreshMeetingIndicator() {
+        let live = meeting.state != .idle
+        if let button = statusItem.button {
+            let name = live ? "waveform.circle.fill" : "drop.fill"
+            if let img = NSImage(systemSymbolName: name, accessibilityDescription: live ? "Water — capturing a meeting" : "Water") {
+                img.isTemplate = true
+                button.image = img
+                button.title = ""
+            } else {
+                button.title = live ? "●" : "W"
+            }
+            button.contentTintColor = live ? .systemRed : nil
+            button.toolTip = live ? "Water is capturing this meeting (\(HotKeyConfig.meeting.label) to stop)" : nil
+        }
+        let label = HotKeyConfig.meeting.label
+        switch meeting.state {
+        case .idle: meetingItem.title = "Start Meeting Capture  (\(label))"
+        case .starting: meetingItem.title = "Starting Meeting Capture…"
+        case .active: meetingItem.title = "● Capturing Meeting — Stop  (\(label))"
+        case .stopping: meetingItem.title = "Stopping Meeting Capture…"
+        }
+        meetingItem.isEnabled = meeting.state == .idle || meeting.state == .active
+        clearStatus()
+    }
+
+    /// Clears the panel's status line, except for the meeting indicator.
+    private func clearStatus() {
+        panel.setStatus(meeting?.state == .active ? "● Meeting" : "")
     }
 
     // MARK: accessibility
@@ -166,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Turn on Water's global hotkeys"
         alert.informativeText = """
-        To open Water from any app with \(HotKeyConfig.textBar.label) (text) and \(HotKeyConfig.voice.label) (voice), macOS needs you to allow it once:
+        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice) and \(HotKeyConfig.meeting.label) (meeting capture), macOS needs you to allow it once:
 
         1. Open System Settings > Privacy & Security > Accessibility.
         2. Turn on the switch next to "Water". If Water isn't listed, click +, choose Water.app, and turn it on.

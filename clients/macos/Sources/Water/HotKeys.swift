@@ -4,15 +4,19 @@ import ApplicationServices
 // MARK: - Change the hotkeys here.
 //
 // Key codes are hardware virtual key codes (Carbon's kVK_* values):
-// Space = 49, V = 9, W = 13, K = 40. Modifiers must match exactly.
+// Space = 49, V = 9, W = 13, K = 40, M = 46. Modifiers must match exactly.
 enum HotKeyConfig {
     /// Opens the text pop-up bar.
     static let textBar = HotKey(keyCode: 49, modifiers: [.control, .option], label: "⌃⌥Space")
     /// Push-to-talk: press once to start listening, again to send.
     static let voice = HotKey(keyCode: 9, modifiers: [.control, .option], label: "⌃⌥V")
+    /// Starts or stops capturing a meeting (manual only, never automatic).
+    static let meeting = HotKey(keyCode: 46, modifiers: [.control, .option], label: "⌃⌥M")
+
+    static let all = [textBar, voice, meeting]
 }
 
-struct HotKey {
+struct HotKey: Equatable {
     let keyCode: UInt16
     let modifiers: NSEvent.ModifierFlags
     let label: String
@@ -21,9 +25,11 @@ struct HotKey {
         let relevant: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
         return e.keyCode == keyCode && e.modifierFlags.intersection(relevant) == modifiers && !e.isARepeat
     }
+
+    static func == (a: HotKey, b: HotKey) -> Bool { a.keyCode == b.keyCode && a.modifiers == b.modifiers }
 }
 
-/// Watches for the two hotkeys. The global monitor (keys pressed while
+/// Watches for the hotkeys. The global monitor (keys pressed while
 /// another app is frontmost) only receives events once the user has granted
 /// Accessibility access; the local monitor (while Water's own panel is key)
 /// needs no permission.
@@ -51,7 +57,7 @@ final class HotKeyMonitor {
     }
 
     private func match(_ e: NSEvent) -> HotKey? {
-        [HotKeyConfig.textBar, HotKeyConfig.voice].first { $0.matches(e) }
+        HotKeyConfig.all.first { $0.matches(e) }
     }
 
     private func installGlobal() {
