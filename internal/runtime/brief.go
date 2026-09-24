@@ -105,8 +105,11 @@ func computeBriefSignals(ctx context.Context, env Env) (briefSignals, bool, erro
 		tainted = tainted || e.External
 	}
 
+	// Bounded by when each message was sent, not when it was ingested: a
+	// prefetch or model search pulls old mail into the store today, and that
+	// must not read as new (or as needing a reply).
 	since := start.Add(-24 * time.Hour)
-	msgs, err := store.List[store.Message, *store.Message](ctx, env.Store, store.Query{Since: since})
+	msgs, err := store.MessagesInRange(ctx, env.Store, since, time.Time{})
 	if err != nil {
 		return sig, false, fmt.Errorf("brief: messages: %w", err)
 	}
@@ -187,7 +190,7 @@ func renderBriefSignals(s briefSignals) string {
 		b.WriteString("- none\n")
 	}
 	for _, e := range s.Events {
-		fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
+		fmt.Fprintf(&b, "- %s %s\n", e.Clock(), e.Title)
 	}
 
 	fmt.Fprintf(&b, "\nNew messages since yesterday: %d (%d distinct sender(s))\n", s.NewMessages, s.DistinctSenders)

@@ -276,7 +276,7 @@ func StateSummary(ctx context.Context, env Env) (summary string, tainted bool) {
 	} else {
 		fmt.Fprintf(&b, "Today's events: %d\n", len(todays))
 		for _, e := range todays {
-			fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
+			fmt.Fprintf(&b, "- %s %s\n", e.Clock(), e.Title)
 			tainted = tainted || e.External
 		}
 	}

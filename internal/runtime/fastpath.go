@@ -164,7 +164,7 @@ func scheduleAnswer(ctx context.Context, env Env, day string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %d event(s).\n", strings.ToUpper(day[:1])+day[1:], len(todays))
 	for _, e := range todays {
-		fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
+		fmt.Fprintf(&b, "- %s %s\n", e.Clock(), e.Title)
 	}
 	return strings.TrimSpace(b.String())
 }
