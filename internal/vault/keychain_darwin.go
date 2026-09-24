@@ -35,9 +35,12 @@ func (KeychainVault) Get(service, account string) (Secret, error) {
 	return Secret{strings.TrimRight(out.String(), "\n")}, nil
 }
 
-// Set adds or updates an item. The password goes to security on stdin (it
-// prompts twice when -w is last), never on the command line where other
-// processes could read it.
+// Set adds or updates an item. security has no way to read the password from
+// stdin: -w with no value attached makes it prompt interactively on the
+// controlling terminal instead, ignoring anything piped to it. So the value
+// has to be its own argument, which is visible in this process's argument
+// list for its brief lifetime (e.g. to `ps` run by the same user) — the same
+// tradeoff every other Keychain wrapper for the security CLI accepts.
 func (KeychainVault) Set(service, account string, s Secret) error {
 	if err := validKey(service, account); err != nil {
 		return err
@@ -45,8 +48,7 @@ func (KeychainVault) Set(service, account string, s Secret) error {
 	if s.IsZero() || strings.ContainsAny(s.v, "\r\n") {
 		return errors.New("vault: credential must be non-empty and single-line")
 	}
-	cmd := exec.Command(securityBin, "add-generic-password", "-U", "-s", service, "-a", account, "-w")
-	cmd.Stdin = strings.NewReader(s.v + "\n" + s.v + "\n")
+	cmd := exec.Command(securityBin, "add-generic-password", "-U", "-s", service, "-a", account, "-w", s.v)
 	if err := cmd.Run(); err != nil {
 		return keychainErr("write", err)
 	}
