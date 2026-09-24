@@ -1242,7 +1242,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - `reader_test.go`: an `OpenReadOnly` write attempt fails with a readonly or query_only error; `TestReadPoolParallel` runs 16 readers plus 1 writer under `-race` with no `SQLITE_BUSY`;
     - query-helper ordering and dedup tests.
   - Flag: none.
-- [ ] **R-5 Style and renderer core** (`internal/nervous/render/{render.go,style.go,default.go}`, `twins/ceo/style.yaml` with the full `voice:` section).
+- [x] **R-5 Style and renderer core** (`internal/nervous/render/{render.go,style.go,default.go}`, `twins/ceo/style.yaml` with the full `voice:` section).
   - Tests (`render_test.go`):
     - per-channel caps; "and N more"; clarification and warning rendering; brace-containing external titles are inert;
     - strict decoding rejects unknown keys or a missing channel;
