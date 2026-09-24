@@ -169,8 +169,7 @@ func ModelTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) (backe
 	if env.BeginModel != nil {
 		end, err := beginModelNoting(ctx, env.BeginModel, emit)
 		if err != nil {
-			emit(Event{Kind: EventError, Error: err.Error()})
-			return
+			return backend.Response{}, err
 		}
 		defer end()
 	}
