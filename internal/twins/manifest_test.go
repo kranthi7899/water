@@ -54,3 +54,27 @@ func TestParseRejects(t *testing.T) {
 		t.Error("empty id accepted")
 	}
 }
+
+func TestModelTiers(t *testing.T) {
+	m, err := twins.Parse([]byte(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.ModelFor(twins.TierFast); got != "haiku" {
+		t.Fatalf("default fast tier = %q, want haiku", got)
+	}
+	if got := m.ModelFor(twins.TierStrong); got != "" {
+		t.Fatalf("default strong tier = %q, want empty (CLI default)", got)
+	}
+
+	m2, err := twins.Parse([]byte(base + "models: {fast: sonnet, strong: opus}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.ModelFor(twins.TierFast); got != "sonnet" {
+		t.Fatalf("fast tier = %q, want sonnet", got)
+	}
+	if got := m2.ModelFor(twins.TierStrong); got != "opus" {
+		t.Fatalf("strong tier = %q, want opus", got)
+	}
+}

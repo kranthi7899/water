@@ -135,3 +135,11 @@ type Capabilities interface {
 	SupportsAttachments() bool
 	SupportsTools() bool
 }
+
+// Streamer is optionally implemented by backends that can stream a reply as
+// it is generated. onDelta is called with each new chunk of assistant text,
+// in order, before RunStream returns the final Response. A backend without
+// streaming support is simply not a Streamer; callers fall back to Run.
+type Streamer interface {
+	RunStream(ctx context.Context, req Request, onDelta func(string)) (Response, error)
+}

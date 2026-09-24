@@ -205,6 +205,44 @@ func (c *ClaudeSubscription) scratch() string {
 	return os.TempDir()
 }
 
+// setupTools writes the tool-policy and MCP config files for req.Tools, if
+// any, and returns the --mcp-config path, the events log path, and a cleanup
+// func that removes the temporary files. Callers must always invoke cleanup.
+func (c *ClaudeSubscription) setupTools(req Request) (mcpCfg, logPath string, cleanup func(), err error) {
+	cleanup = func() {}
+	if req.Tools == nil || req.Tools.Empty() {
+		return "", "", cleanup, nil
+	}
+	self := c.SelfExe
+	if self == "" {
+		self, _ = os.Executable()
+	}
+	pf, perr := tools.WritePolicyFile(c.scratch(), req.Tools)
+	if perr != nil {
+		return "", "", cleanup, fmt.Errorf("tool policy: %w", perr)
+	}
+	rm := []string{pf}
+	logPath = req.ToolLog
+	if logPath == "" {
+		logPath = strings.TrimSuffix(pf, ".json") + ".events.jsonl"
+		rm = append(rm, logPath)
+	}
+	cfgPath := strings.TrimSuffix(pf, ".json") + ".mcp.json"
+	if werr := os.WriteFile(cfgPath, []byte(tools.MCPConfig(self, pf, logPath)), 0o600); werr != nil {
+		for _, p := range rm {
+			os.Remove(p)
+		}
+		return "", "", cleanup, werr
+	}
+	rm = append(rm, cfgPath)
+	cleanup = func() {
+		for _, p := range rm {
+			os.Remove(p)
+		}
+	}
+	return cfgPath, logPath, cleanup, nil
+}
+
 func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, error) {
 	path, err := exec.LookPath(c.bin())
 	if err != nil {
@@ -217,30 +255,11 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 
 	// Tool policy → MCP server config (Part 5). Files are 0600 and removed
 	// after the call; the log is read back into Response.ToolEvents.
-	var mcpCfg string
-	var logPath string
-	if req.Tools != nil && !req.Tools.Empty() {
-		self := c.SelfExe
-		if self == "" {
-			self, _ = os.Executable()
-		}
-		pf, perr := tools.WritePolicyFile(c.scratch(), req.Tools)
-		if perr != nil {
-			return Response{}, fmt.Errorf("tool policy: %w", perr)
-		}
-		defer os.Remove(pf)
-		logPath = req.ToolLog
-		if logPath == "" {
-			logPath = strings.TrimSuffix(pf, ".json") + ".events.jsonl"
-			defer os.Remove(logPath)
-		}
-		cfgPath := strings.TrimSuffix(pf, ".json") + ".mcp.json"
-		if werr := os.WriteFile(cfgPath, []byte(tools.MCPConfig(self, pf, logPath)), 0o600); werr != nil {
-			return Response{}, werr
-		}
-		defer os.Remove(cfgPath)
-		mcpCfg = cfgPath
+	mcpCfg, logPath, cleanup, err := c.setupTools(req)
+	if err != nil {
+		return Response{}, err
 	}
+	defer cleanup()
 
 	args, err := c.BuildArgs(fs, req, mcpCfg)
 	if err != nil {
@@ -284,6 +303,12 @@ func (c *ClaudeSubscription) Run(ctx context.Context, req Request) (Response, er
 		if res.IsError {
 			if IsRateLimitText(res.Result) || (resp.RateLimit != nil && resp.RateLimit.Status != "" && resp.RateLimit.Status != "allowed") {
 				return resp, fmt.Errorf("%w: %s", ErrRateLimited, firstLine(res.Result))
+			}
+			if req.Model != "" && looksLikeBadModel(res.Result) {
+				warnBadModelOnce(req.Model, res.Result)
+				retry := req
+				retry.Model = ""
+				return c.Run(ctx, retry)
 			}
 			return resp, fmt.Errorf("claude reported an error: %s", firstLine(res.Result))
 		}

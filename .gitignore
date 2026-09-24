@@ -1,5 +1,6 @@
 /bin/
 /dist/
+/water
 /.water-test/
 /.agents-dev/
 *.tmp

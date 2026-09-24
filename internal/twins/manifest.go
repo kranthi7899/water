@@ -71,15 +71,46 @@ type Usage struct {
 	AutoModelCalls int      `yaml:"auto_model_calls"`
 }
 
+// Models names which model string backs each tier. Fast serves the
+// conversation plane; Strong serves packet and playbook work. An empty string
+// means the CLI's own default model.
+type Models struct {
+	Fast   string `yaml:"fast"`
+	Strong string `yaml:"strong"`
+}
+
+// Tier names a model tier.
+type Tier string
+
+const (
+	TierFast   Tier = "fast"
+	TierStrong Tier = "strong"
+)
+
+// defaultFastModel is used when a manifest omits models.fast.
+const defaultFastModel = "haiku"
+
 type Manifest struct {
 	ID            string      `yaml:"id"`
 	Name          string      `yaml:"name"`
 	Usage         Usage       `yaml:"usage"`
+	Models        Models      `yaml:"models"`
 	Connectors    []Connector `yaml:"connectors"`
 	AutoAllowlist []string    `yaml:"auto_allowlist"`
 
 	functions map[string]Function
 	auto      map[string]bool
+}
+
+// ModelFor resolves the model string to request for a tier. "" (the CLI's
+// default) is a valid, deliberate choice for the strong tier.
+func (m *Manifest) ModelFor(t Tier) string {
+	switch t {
+	case TierStrong:
+		return m.Models.Strong
+	default:
+		return m.Models.Fast
+	}
 }
 
 // Load reads twins/<id>/twin.yaml from fsys (the embedded repo root).
@@ -112,6 +143,9 @@ func Parse(b []byte) (*Manifest, error) {
 	}
 	if m.Usage.Window <= 0 || m.Usage.ModelCalls <= 0 || m.Usage.AutoModelCalls < 0 || m.Usage.AutoModelCalls > m.Usage.ModelCalls {
 		return nil, fmt.Errorf("manifest: usage needs a positive window and model_calls, and auto_model_calls within model_calls")
+	}
+	if m.Models.Fast == "" {
+		m.Models.Fast = defaultFastModel
 	}
 	m.functions = map[string]Function{}
 	seenConn := map[string]bool{}

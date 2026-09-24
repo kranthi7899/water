@@ -9,6 +9,12 @@ usage:
   model_calls: 200
   auto_model_calls: 40
 
+# fast serves the conversation plane; strong serves packet/playbook work.
+# "" for strong means the claude CLI's own default model.
+models:
+  fast: haiku
+  strong: ""
+
 connectors:
   - name: fake_calendar
     functions:
