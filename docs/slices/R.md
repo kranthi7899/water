@@ -117,7 +117,7 @@ This plan replaces the earlier R1/R2/R3 split with **one build**, following the 
 - **Write intents.** Create or move an event, reply to or send to a person. They produce proposals that go through the same envelope path the model's tool calls use, then the approval queue with a read-back. **Nothing executes without approval.**
 - **Voice approval binding** (`router.voice_approve.enabled`, **off** by default): a bare yes or no within 60 s of a read-back on the voice channel decides that envelope with that hash, using a risk-tier mapping.
 - **Promotion loop** (`router.promotion.enabled`, **off** by default): candidate detection, a model-drafted intent file, validation, owner approval, a learned overlay, and demotion through a per-intent breaker.
-- **Route log** (migration `0009_router.sql`) with owner, voice/partial, acknowledgement-latency, lint, tool-usage and action columns. Also possible-miss detection, `water route report`, `water route candidates`, `GET /v1/router`, and a `router` line in `water status`.
+- **Route log** (migration `0010_router.sql`) with owner, voice/partial, acknowledgement-latency, lint, tool-usage and action columns. Also possible-miss detection, `water route report`, `water route candidates`, `GET /v1/router`, and a `router` line in `water status`.
 - Per-tier config flags, timeouts and circuit breakers.
 - The `Decider` interface with a null implementation.
 - `docs/functiongemma.md` covering the Gemma terms. `water model pull functiongemma` is a command the owner runs explicitly.
@@ -199,7 +199,7 @@ internal/store/route_log.go        RouteRow, InsertRoute, MarkPossibleMiss, List
 internal/store/intent_state.go     SetIntentState, ListIntentStates
 internal/store/reader.go           OpenReadOnly
 internal/store/queries_router.go   LatestMessages, MessagesFrom, CountMessagesSince, Senders, NextEvent, CursorUpdatedAt
-internal/store/migrations/0009_router.sql   (number chosen at commit time; see Risks)
+internal/store/migrations/0010_router.sql   (number chosen at commit time; see Risks)
 internal/tools/quick.go            QuickFunction, QuickToolName, Policy.quickByTool, Service.callQuick
 internal/gateway/router.go         /v1/router, /v1/route/report, /v1/route/candidates, /v1/voice/profile,
                                    /v1/turns/{id}/partial, /v1/intents/{reload,draft}
@@ -1001,7 +1001,7 @@ Rules, first match wins:
 
 In summary, `low` and `medium` allow a spoken yes, and `high`, empty or unknown require a tap. A spoken no is always allowed.
 
-#### 14. Route log (migration `0009_router.sql`; the number is chosen at commit time, see Risks)
+#### 14. Route log (migration `0010_router.sql`; the number is chosen at commit time, see Risks)
 
 ```sql
 -- route_log records every turn's routing decision (Slice R). utterance is
@@ -1234,8 +1234,9 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
 - [x] **R-3 Slot resolvers** (`internal/nervous/slots/{slots.go,date.go,time.go,duration.go,count.go,person.go,text.go}`).
   - Tests: the earlier plan's date (40 or more), time, count and person tables, plus `duration_test.go` (every accepted form, out-of-range rejection) and `spoken_test.go` (`Spoken` for today, tomorrow, a weekday, next week, a time and a part of day, in a fixed PT zone).
   - Flag: none.
-- [x] **R-4 Migration, store helpers, read-only pool** (`internal/store/migrations/0009_router.sql`, `route_log.go`, `intent_state.go`, `reader.go`, `queries_router.go`). Migration number `0008` was free when this task committed, so it was originally `0008_router.sql`.
+- [x] **R-4 Migration, store helpers, read-only pool** (`internal/store/migrations/0010_router.sql`, `route_log.go`, `intent_state.go`, `reader.go`, `queries_router.go`). Migration number `0008` was free when this task committed, so it was originally `0008_router.sql`.
   - **Collision discovered and fixed during R-11's rebase.** The concurrent session landed its own `0008_twin_messages.sql` on `feat/ceo-twin` afterward. `store.migrate`'s version tracking (`schema_migrations(version INTEGER PRIMARY KEY)`) keys purely on the leading number, and `fs.Glob` sorts lexicographically, so `0008_router.sql` (`r` < `t`) ran first, claimed version 8, and `0008_twin_messages.sql` was silently skipped — never creating `twin_messages`, which broke five gateway/store tests (`TestTwinMessages`, `TestScenarioEBudgetQuestionBetweenTwoTwins`, and others) on the shared branch. Exactly the scenario Risk item 3 pre-authorized handling directly: since this migration hadn't reached `feat/ceo-twin` yet (only on the unmerged `slice-r` worktree branch), it was renumbered to `0009_router.sql` rather than expecting the other session's already-landed file to change. Verified: after the rename, both migrations apply and all previously-failing tests pass.
+  - **Second collision, discovered independently while reviewing R-12 (2026-09-24), same root cause.** Between R-11's rebase and R-12's commit, the concurrent session landed a further `0009_meeting_segment_received_at.sql` on `feat/ceo-twin` — whose own comment reads "Numbered 0009 because 0008 is taken on another branch," i.e. that session independently avoided 0008 but had no way to know `slice-r` had already claimed 0009 for `router.sql`. `fs.Glob` sorts `0009_meeting_segment_received_at.sql` before `0009_router.sql` alphabetically, so the latter's `CREATE TABLE`s silently never ran — `internal/store`'s new tests failed with "no such table: route_log"/"no such table: intent_state" the next time the full suite ran (R-12's own commit message claimed "all green," so this must have landed in the gap between R-12's gate run and its commit, or R-12's rate-limit interruption cut its final verification short). Renumbered again to `0010_router.sql`, same rule (still unmerged into `feat/ceo-twin`), verified by rerunning the full `-race` suite. **This is now the second time this exact collision class has hit this migration file** — a signal that the plan's "rebase and rename at commit time" mitigation is necessary but not sufficient against a fast-moving concurrent branch; a later merge-back pass should double check no third collision appeared before `slice-r` actually fast-forwards into `feat/ceo-twin`.
   - **First run `ls internal/store/migrations` after `git rebase feat/ceo-twin`, use the next free number, and record the actual file name in this plan in the same commit.**
   - Tests:
     - `route_log_test.go`: round trip of every column, including JSON and nullable ints; the `PruneRoutes` boundary; `QuickOnlyRoutes` filter; the migration on a fresh DB and on a DB already at the previous head;
@@ -1592,5 +1593,5 @@ These run on every task, automated where possible:
 - `/Users/kranthikoneti/water/internal/tools/policy.go` and `/Users/kranthikoneti/water/internal/tools/service.go` (the `Policy.Quick` / `callQuick` → `/v1/quick/invoke` split)
 - `/Users/kranthikoneti/water/internal/decisions/registry.go` (the `LoadRegistry` and `validateStagedAction`/`plannedActions` precedent; read-only here, parsed by the drift test)
 - `/Users/kranthikoneti/water/internal/cli/twin.go` (startup validation: intents registry, style, read-only store, `decider.Wrap`, learned overlay)
-- `/Users/kranthikoneti/water/internal/store/store.go` and `/Users/kranthikoneti/water/internal/store/migrations/` (`OpenReadOnly` alongside the single-writer pool; `0009_router.sql`)
+- `/Users/kranthikoneti/water/internal/store/store.go` and `/Users/kranthikoneti/water/internal/store/migrations/` (`OpenReadOnly` alongside the single-writer pool; `0010_router.sql`)
 - `/Users/kranthikoneti/water/internal/backend/warmsession.go` (`Prewarm`; the semaphore the sous chef must never take)

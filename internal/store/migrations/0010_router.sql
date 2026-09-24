@@ -1,6 +1,14 @@
 -- route_log records every turn's routing decision (Slice R). utterance is
 -- local-only data; partial transcripts are never stored here, only their
 -- counts and timings.
+--
+-- Numbered 0010: this file was 0008, then 0009 after a first collision with
+-- the concurrent write-function session's 0008_twin_messages.sql, then hit
+-- a second collision (silent, since schema_migrations tracks by numeric
+-- version, not filename — the loser's CREATE TABLE just never runs) with
+-- that same session's later 0009_meeting_segment_received_at.sql. Since
+-- slice-r has not merged into feat/ceo-twin yet, this file is the one that
+-- moves, per docs/slices/R.md's pre-agreed migration-number rule.
 CREATE TABLE route_log (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	turn_id TEXT NOT NULL UNIQUE,
