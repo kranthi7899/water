@@ -44,7 +44,7 @@ func TestStatusWorksWhileTheDaemonHoldsTheAuditLog(t *testing.T) {
 // daemon is running.
 func TestDoctorTwinCheckWorksWhileTheDaemonHoldsTheAuditLog(t *testing.T) {
 	holdAuditLock(t)
-	if c := doctorTwinCheck(realTwinID, "", ""); c.Status != "ok" {
+	if c := doctorTwinCheck(realTwinID, "", "", ""); c.Status != "ok" {
 		t.Fatalf("doctor twin check = %+v while the daemon holds the audit log, want ok", c)
 	}
 }

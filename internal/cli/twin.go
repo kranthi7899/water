@@ -12,9 +12,12 @@ import (
 	"water/internal/backend"
 	"water/internal/connectors"
 	"water/internal/connectors/fake"
+	"water/internal/connectors/github"
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gdrive"
 	"water/internal/connectors/google/gmail"
+	"water/internal/connectors/hubspot"
+	"water/internal/connectors/linear"
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/store"
@@ -92,7 +95,24 @@ func loadCEORoleMD() string {
 // per call, and an empty value only matters if a write function is actually
 // invoked (gmail.readMessageArgs then refuses with a clear error), so
 // manifest-validation-only callers (loadTwinManifest) may pass "".
-func buildCEORegistry(demo bool, mailAddress, signatureName string) (*connectors.Registry, error) {
+//
+// The real (non-demo) twin gets the real github/linear/hubspot connectors
+// instead of the fakes, always registered — the same posture gcal/gmail/
+// gdrive already have, deliberately not gated on vault.Default().Get(...)
+// here: twins/ceo/twin.yaml grants their functions unconditionally (like
+// every other function), so the gate's own ValidateManifest (New's first
+// call) requires a connector to be registered for every non-B function the
+// manifest lists, or daemon startup fails outright. Each real connector's
+// own Invoke already resolves its vault credential lazily and returns a
+// clear "not connected; run `water connect <name> --token ...`" error the
+// instant it's actually called with nothing configured — so an owner who
+// has never set up Linear or HubSpot sees exactly that per-call message,
+// never a startup failure, which is what actually matters here. githubRepo
+// is config's github.repo; github.New reads it once here, not per call, and
+// an empty value only matters if list_prs/list_issues is actually invoked
+// (github.Invoke then refuses with a clear "no repo configured" error), so
+// manifest-validation-only callers (loadTwinManifest) may pass "".
+func buildCEORegistry(demo bool, mailAddress, signatureName, githubRepo string) (*connectors.Registry, error) {
 	gm := gmail.New(mailAddress)
 	gm.SetSignatureName(signatureName)
 	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress)}
@@ -102,6 +122,8 @@ func buildCEORegistry(demo bool, mailAddress, signatureName string) (*connectors
 			fake.NewLinear(fake.DefaultLinearIssues()...),
 			fake.NewHubSpot(fake.DefaultHubSpotDeals(), fake.DefaultHubSpotContacts()),
 		)
+	} else {
+		cs = append(cs, github.New(githubRepo), linear.New(), hubspot.New())
 	}
 	return connectors.NewRegistry(cs...)
 }
@@ -112,7 +134,7 @@ func buildCEORegistry(demo bool, mailAddress, signatureName string) (*connectors
 // one exclusive writer — the running daemon — and taking its lock from a
 // read-only command would both fail while the daemon runs and, in the
 // moment it held the lock, make a (re)starting daemon fail.
-func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName string) (*twins.Manifest, error) {
+func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName, githubRepo string) (*twins.Manifest, error) {
 	m, err := twins.Load(fsys, id)
 	if err != nil {
 		return nil, fmt.Errorf("twin manifest: %w", err)
@@ -120,7 +142,7 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName string) (*twins
 	if _, err := decisions.LoadRegistry(fsys, m); err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
-	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName)
+	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName, githubRepo)
 	if err != nil {
 		return nil, err
 	}
@@ -133,8 +155,8 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName string) (*twins
 // buildTwinDeps opens the store and the anchored, hash-chained audit log at
 // their default ~/.water locations and wires the gate over them. Callers must
 // Close() the result. id is realTwinID or demoTwinID (see (*App).twinID).
-func buildTwinDeps(id, mailAddress, signatureName string) (*twinDeps, error) {
-	return buildTwinDepsFS(water.TwinsFS(), id, mailAddress, signatureName)
+func buildTwinDeps(id, mailAddress, signatureName, githubRepo string) (*twinDeps, error) {
+	return buildTwinDepsFS(water.TwinsFS(), id, mailAddress, signatureName, githubRepo)
 }
 
 // buildTwinDepsFS is buildTwinDeps parameterized over the twins filesystem,
@@ -143,7 +165,7 @@ func buildTwinDeps(id, mailAddress, signatureName string) (*twinDeps, error) {
 // directory. The manifest and the decision registry are both validated
 // before anything else opens, so a bad file of either kind fails loudly here
 // and never gets as far as touching the real store or audit log.
-func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName string) (*twinDeps, error) {
+func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo string) (*twinDeps, error) {
 	m, err := twins.Load(fsys, id)
 	if err != nil {
 		return nil, fmt.Errorf("twin manifest: %w", err)
@@ -169,7 +191,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName string) (*twinDe
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 	q := approvals.NewQueue(st, log)
-	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName)
+	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName, githubRepo)
 	if err != nil {
 		log.Close()
 		st.Close()

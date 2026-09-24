@@ -6,6 +6,8 @@ import (
 	"testing/fstest"
 
 	"water"
+	"water/internal/connectors/fake"
+	"water/internal/connectors/github"
 	"water/internal/twins"
 )
 
@@ -30,7 +32,7 @@ func TestBuildTwinDepsFSFailsLoudlyOnBadDecisionsFile(t *testing.T) {
 		// parse, not be silently ignored or treated as an empty id.
 		"twins/ceo/decisions/broken.yaml": &fstest.MapFile{Data: []byte("id: [not, a, string]\ntitle: Broken\n")},
 	}
-	_, err := buildTwinDepsFS(fsys, realTwinID, "", "")
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "", "")
 	if err == nil {
 		t.Fatal("buildTwinDepsFS: expected an error from a malformed decision-type file, got nil")
 	}
@@ -57,7 +59,7 @@ default_rule: never auto-approve
 severity_weight: 1
 `)},
 	}
-	_, err := buildTwinDepsFS(fsys, realTwinID, "", "")
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "", "")
 	if err == nil {
 		t.Fatal("buildTwinDepsFS: expected an error naming an unlisted function, got nil")
 	}
@@ -99,27 +101,36 @@ func TestTwinIDDefaultsToRealAndDemoFlagOrEnvSelectsDemo(t *testing.T) {
 // did before the demo slice; the demo manifest must load too, since it is
 // additive.
 func TestLoadTwinManifestRealAndDemoBothValidate(t *testing.T) {
-	if _, err := loadTwinManifest(water.TwinsFS(), realTwinID, "", ""); err != nil {
+	if _, err := loadTwinManifest(water.TwinsFS(), realTwinID, "", "", ""); err != nil {
 		t.Fatalf("real (non-demo) twin manifest must still load unchanged: %v", err)
 	}
-	if _, err := loadTwinManifest(water.TwinsFS(), demoTwinID, "", ""); err != nil {
+	if _, err := loadTwinManifest(water.TwinsFS(), demoTwinID, "", "", ""); err != nil {
 		t.Fatalf("demo twin manifest must load: %v", err)
 	}
 }
 
-// TestDemoManifestAddsFakeConnectorsRealDoesNot is the other half of the
-// regression guard: the fake GitHub/Linear/HubSpot functions exist only in
-// the demo manifest, all at level R (read-only), and the real manifest
-// never gains them just because the demo manifest now exists alongside it.
-func TestDemoManifestAddsFakeConnectorsRealDoesNot(t *testing.T) {
+// TestRealAndDemoManifestsBothGrantGitHubLinearHubSpot checks both twins'
+// manifests grant the same github/linear/hubspot function ids at level R.
+// This changed from the original demo-slice regression guard ("the real
+// manifest must never grant these") once this slice added real, read-only
+// github/linear/hubspot connectors (internal/connectors/{github,linear,
+// hubspot}) to the real ceo twin: both manifests now legitimately declare
+// the same function ids, backed by different connectors depending on which
+// twin id is loaded — buildCEORegistry wires the real network connectors
+// for realTwinID and the in-memory fakes for demoTwinID (see its own doc
+// comment). TestBuildCEORegistryPicksRealOrFakeGitHubLinearHubSpot below is
+// what actually guards that wiring choice.
+func TestRealAndDemoManifestsBothGrantGitHubLinearHubSpot(t *testing.T) {
+	ghLinearHubspot := []string{"github.list_prs", "github.list_issues", "linear.list_issues", "hubspot.list_deals", "hubspot.list_contacts"}
+
 	real, err := twins.Load(water.TwinsFS(), realTwinID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	demoFake := []string{"github.list_prs", "github.list_issues", "linear.list_issues", "hubspot.list_deals", "hubspot.list_contacts"}
-	for _, id := range demoFake {
-		if _, ok := real.Function(id); ok {
-			t.Fatalf("real ceo manifest must never grant %s", id)
+	for _, id := range ghLinearHubspot {
+		f, ok := real.Function(id)
+		if !ok || f.Level != twins.R {
+			t.Fatalf("real manifest: %s = %+v, ok=%v; want level R", id, f, ok)
 		}
 	}
 
@@ -127,7 +138,7 @@ func TestDemoManifestAddsFakeConnectorsRealDoesNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range demoFake {
+	for _, id := range ghLinearHubspot {
 		f, ok := demo.Function(id)
 		if !ok || f.Level != twins.R {
 			t.Fatalf("demo manifest: %s = %+v, ok=%v; want level R", id, f, ok)
@@ -139,5 +150,39 @@ func TestDemoManifestAddsFakeConnectorsRealDoesNot(t *testing.T) {
 		if _, ok := demo.Function(id); !ok {
 			t.Fatalf("demo manifest dropped a real function it should keep: %s", id)
 		}
+	}
+}
+
+// TestBuildCEORegistryPicksRealOrFakeGitHubLinearHubSpot guards the wiring
+// choice buildCEORegistry makes: demo=false (the real twin) must register
+// the real github/linear/hubspot connectors (internal/connectors/{github,
+// linear,hubspot}), never the in-memory fakes that would silently return
+// canned demo data; demo=true must register the fakes, never a real
+// connector that could attempt a live network call with no configured
+// token. Checked by concrete type, since both sets share the same
+// connector Name()s and function ids by design.
+func TestBuildCEORegistryPicksRealOrFakeGitHubLinearHubSpot(t *testing.T) {
+	real, err := buildCEORegistry(false, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, ok := real.Lookup("github.list_prs")
+	if !ok {
+		t.Fatal("real registry: github.list_prs not found")
+	}
+	if _, isReal := conn.(*github.GitHub); !isReal {
+		t.Fatalf("real registry's github connector is %T, want *github.GitHub", conn)
+	}
+
+	demo, err := buildCEORegistry(true, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, ok = demo.Lookup("github.list_prs")
+	if !ok {
+		t.Fatal("demo registry: github.list_prs not found")
+	}
+	if _, isFake := conn.(*fake.GitHub); !isFake {
+		t.Fatalf("demo registry's github connector is %T, want *fake.GitHub", conn)
 	}
 }

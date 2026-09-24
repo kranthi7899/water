@@ -12,7 +12,10 @@ import (
 	"water"
 	"water/internal/backend"
 	"water/internal/config"
+	"water/internal/connectors/github"
 	"water/internal/connectors/google/gapi"
+	"water/internal/connectors/hubspot"
+	"water/internal/connectors/linear"
 	"water/internal/gateway"
 	"water/internal/vault"
 	"water/internal/voice"
@@ -81,7 +84,7 @@ func (a *App) doctorCmd() *cobra.Command {
 			}
 
 			// The twin's manifest and connectors.
-			checks = append(checks, doctorTwinCheck(a.twinID(), cfg.Agent.MailAddress, cfg.Agent.SignatureName))
+			checks = append(checks, doctorTwinCheck(a.twinID(), cfg.Agent.MailAddress, cfg.Agent.SignatureName, cfg.GitHub.Repo))
 
 			// Google (Calendar/Gmail/Drive): presence only, no network call.
 			if _, err := vault.Default().Get(gapi.Service, gapi.DefaultAccount); err != nil {
@@ -91,6 +94,17 @@ func (a *App) doctorCmd() *cobra.Command {
 					"connected (%s/%s) — this app's OAuth consent screen stays in Testing mode (avoids Google's verification review), so this login expires every 7 days; run `water connect google --client-file ...` again if `water connect google --status` reports invalid_grant",
 					gapi.Service, gapi.DefaultAccount))
 			}
+
+			// GitHub, Linear, HubSpot: presence, and — unlike Google's
+			// presence-only check — a live reachability call when configured,
+			// since these connectors are optional and the owner benefits from
+			// knowing a stored token actually still works, not just that one
+			// is stored.
+			checks = append(checks,
+				doctorTokenCheck(ctx, "github", github.Service, github.Account, github.CheckStatus, "run `water connect github --token <PAT>` (see docs/real-connectors-setup.md)"),
+				doctorTokenCheck(ctx, "linear", linear.Service, linear.Account, linear.CheckStatus, "run `water connect linear --token <KEY>` (see docs/real-connectors-setup.md)"),
+				doctorTokenCheck(ctx, "hubspot", hubspot.Service, hubspot.Account, hubspot.CheckStatus, "run `water connect hubspot --token <TOKEN>` (see docs/real-connectors-setup.md)"),
+			)
 
 			// The daemon.
 			paths := gateway.Paths{Home: config.Home()}
@@ -121,12 +135,27 @@ func (a *App) doctorCmd() *cobra.Command {
 
 // doctorTwinCheck validates id's manifest and connectors read-only (see
 // loadTwinManifest), so it works while the daemon is running.
-func doctorTwinCheck(id, mailAddress, signatureName string) check {
-	m, err := loadTwinManifest(water.TwinsFS(), id, mailAddress, signatureName)
+func doctorTwinCheck(id, mailAddress, signatureName, githubRepo string) check {
+	m, err := loadTwinManifest(water.TwinsFS(), id, mailAddress, signatureName, githubRepo)
 	if err != nil {
 		return check{"twin", "fail", err.Error()}
 	}
 	return check{"twin", "ok", fmt.Sprintf("%s: %d function(s) across %d connector(s)", m.ID, len(m.FunctionIDs()), len(m.Connectors))}
+}
+
+// doctorTokenCheck reports whether a simple bearer/raw-token connector
+// (github, linear, hubspot) is configured and, only when it is, runs its
+// own minimal live call to confirm the stored token still actually
+// authenticates.
+func doctorTokenCheck(ctx context.Context, name, service, account string, checkStatus func(context.Context, vault.Secret) error, connectHint string) check {
+	s, err := vault.Default().Get(service, account)
+	if err != nil {
+		return check{name, "warn", "not connected; " + connectHint}
+	}
+	if err := checkStatus(ctx, s); err != nil {
+		return check{name, "warn", fmt.Sprintf("connected but the live check failed: %v", err)}
+	}
+	return check{name, "ok", fmt.Sprintf("connected and reachable (%s/%s)", service, account)}
 }
 
 func (a *App) printChecks(checks []check) error {

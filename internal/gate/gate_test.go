@@ -18,9 +18,12 @@ import (
 	"water/internal/backend"
 	"water/internal/connectors"
 	"water/internal/connectors/fake"
+	"water/internal/connectors/github"
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gdrive"
 	"water/internal/connectors/google/gmail"
+	"water/internal/connectors/hubspot"
+	"water/internal/connectors/linear"
 	"water/internal/gate"
 	"water/internal/gate/permit"
 	"water/internal/store"
@@ -165,7 +168,7 @@ func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"))
+	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"), github.New("owner/repo"), linear.New(), hubspot.New())
 	if err != nil {
 		t.Fatal(err)
 	}
