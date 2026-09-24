@@ -1,0 +1,38 @@
+{
+  "id": "m-nested",
+  "threadId": "t-nested",
+  "snippet": "Confirmed for Q3....",
+  "internalDate": "1758623400000",
+  "payload": {
+    "mimeType": "multipart/mixed",
+    "headers": [
+      {"name": "From", "value": "Dana Lee <dana@acme.com>"},
+      {"name": "To", "value": "ceo@water.dev, assistant@water.dev"},
+      {"name": "Subject", "value": "Q3 numbers"},
+      {"name": "Date", "value": "Tue, 23 Sep 2026 09:30:00 -0400"}
+    ],
+    "parts": [
+      {
+        "mimeType": "multipart/alternative",
+        "headers": [],
+        "parts": [
+          {
+            "mimeType": "text/plain",
+            "headers": [{"name": "Content-Type", "value": "text/plain; charset=UTF-8"}],
+            "body": {"data": "Q29uZmlybWVkIGZvciBRMy4=", "size": 17}
+          },
+          {
+            "mimeType": "text/html",
+            "headers": [{"name": "Content-Type", "value": "text/html; charset=UTF-8"}],
+            "body": {"data": "PHA-U2VlIGF0dGFjaGVkIGZvciA8Yj5RMzwvYj4uPC9wPg==", "size": 34}
+          }
+        ]
+      },
+      {
+        "mimeType": "application/pdf",
+        "headers": [{"name": "Content-Type", "value": "application/pdf"}, {"name": "Content-Disposition", "value": "attachment; filename=\"q3.pdf\""}],
+        "body": {"attachmentId": "att-1", "size": 7}
+      }
+    ]
+  }
+}

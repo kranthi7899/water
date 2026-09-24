@@ -1,0 +1,25 @@
+{
+  "items": [
+    {
+      "id": "e1",
+      "summary": "Board sync",
+      "description": "Quarterly review of KPIs, headcount plans and the runway model for the next two quarters, plus a walkthrough of the updated board deck and open questions from last time, written long enough that the two hundred eighty character excerpt cap actually has something real to cut down to size when the test checks it.",
+      "location": "HQ Room 4",
+      "status": "confirmed",
+      "htmlLink": "https://calendar.google.com/event?eid=e1",
+      "start": {"dateTime": "2026-09-24T09:00:00-04:00"},
+      "end": {"dateTime": "2026-09-24T10:00:00-04:00"},
+      "organizer": {"email": "ceo@water.dev"},
+      "attendees": [{"email": "dana@acme.com"}, {"email": "ceo@water.dev"}]
+    },
+    {
+      "id": "e2",
+      "summary": "All-day offsite",
+      "status": "confirmed",
+      "htmlLink": "https://calendar.google.com/event?eid=e2",
+      "start": {"date": "2026-09-25"},
+      "end": {"date": "2026-09-26"}
+    }
+  ],
+  "nextPageToken": "p2"
+}

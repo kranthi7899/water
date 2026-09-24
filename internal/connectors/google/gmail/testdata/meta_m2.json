@@ -1,0 +1,14 @@
+{
+  "id": "m2",
+  "threadId": "t2",
+  "snippet": "Lunch on Thursday?",
+  "internalDate": "1758623500000",
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "sam@acme.com"},
+      {"name": "To", "value": "ceo@water.dev, assistant@water.dev"},
+      {"name": "Subject", "value": "Lunch"},
+      {"name": "Date", "value": "Tue, 23 Sep 2026 09:31:40 -0400"}
+    ]
+  }
+}

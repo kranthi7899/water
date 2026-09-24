@@ -1,0 +1,14 @@
+{
+  "id": "m3",
+  "threadId": "t3",
+  "snippet": "Reminder: board deck due Friday.",
+  "internalDate": "1758623600000",
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "board-admin@acme.com"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "Board deck"},
+      {"name": "Date", "value": "Tue, 23 Sep 2026 09:33:20 -0400"}
+    ]
+  }
+}

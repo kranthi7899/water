@@ -1,0 +1,7 @@
+{
+  "nextPageToken": "PAGE2",
+  "files": [
+    {"id":"f1","name":"Q3 Budget","mimeType":"application/vnd.google-apps.spreadsheet","owners":[{"displayName":"Dana","emailAddress":"dana@acme.com"}],"modifiedTime":"2026-09-20T10:00:00Z","webViewLink":"https://drive.google.com/file/f1","trashed":false},
+    {"id":"f2","name":"Roadmap","mimeType":"application/vnd.google-apps.document","owners":[{"displayName":"Sam","emailAddress":"sam@acme.com"}],"modifiedTime":"2026-09-19T09:00:00Z","webViewLink":"https://drive.google.com/file/f2","trashed":false}
+  ]
+}
