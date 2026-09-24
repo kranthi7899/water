@@ -1,3 +1,19 @@
+> **Status (2026-09-24): the write increment planned in §1 is implemented.**
+> `gmail.draft_message`/`gmail.send_message` (levels D/A) and
+> `gcal.create_event`/`gcal.move_event` (level A) are real, granted in
+> `twins/ceo/twin.yaml`, and read back by `internal/approvals/readback.go`
+> exactly as this doc anticipated (§1's worked example). `gapi.Scopes()`
+> grew to the five scopes this doc names, dropping
+> `ScopeCalendarEventsReadonly` for `ScopeCalendarEvents` as predicted. §2's
+> P2 decision (auto mode stays strict) needed no code change, confirmed by
+> test. See `docs/EVOLUTION_PLAN.md`'s dated entry for the idempotency
+> design (`gapi.PostJSON`'s single-attempt-plus-401-retry contract,
+> `gapi.ErrSendOutcomeUnknown`), the agent-identity design (the CEO's real
+> Gmail account gains a verified "Send mail as" alias, config's
+> `agent.mail_address`), the new `internal/agentmail` inbound-triage
+> watcher, and what still needs the owner. §3 (scenario harness) and §4
+> (CEO environment section) remain open, not addressed by this increment.
+
 # Slice C planning: write functions, the P2 decision, a scenario harness, the CEO environment section
 
 Companion to `docs/slices/C.md` (the decision-registry/generic-frame spec).
