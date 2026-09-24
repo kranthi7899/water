@@ -55,6 +55,7 @@ type globalFlags struct {
 	allowMetered bool
 	debug        bool
 	demo         bool
+	twin         string
 }
 
 // App holds lazily-built shared state for one invocation.

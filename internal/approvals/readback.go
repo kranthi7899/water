@@ -32,7 +32,22 @@ func summary(e Envelope, full bool) string {
 	}
 	var s string
 	var used []string
-	switch shortName(e.Action) {
+	switch actionKey(e.Action) {
+	case "twinlink.send_message":
+		// Another twin is another party's agent, outside this daemon: the
+		// read-back says so, and names the twin, the kind of message and
+		// the full text, never a short name that could read as an email.
+		s = fmt.Sprintf("Send a %s to twin '%s' (another party's agent, outside this daemon), subject '%s'",
+			lim(p["type"], 20), lim(p["to_twin"], 64), lim(p["subject"], 80))
+		if v, ok := p["in_reply_to"]; ok && text(v) != "" {
+			s += ", answering their request " + lim(v, 40)
+		}
+		body := ". Message: '%s'."
+		if !full {
+			body = ". Message begins: '%s'."
+		}
+		s += fmt.Sprintf(body, lim(p["payload"], 80))
+		used = []string{"to_twin", "type", "subject", "in_reply_to", "payload"}
 	case "send_email":
 		body := "Body: '%s'."
 		if !full {
@@ -112,7 +127,9 @@ func rest(p map[string]any, used []string, lim func(any, int) string, sep string
 }
 
 func prompt(action string) string {
-	switch shortName(action) {
+	switch actionKey(action) {
+	case "twinlink.send_message":
+		return "Say yes to send it to the other twin or no to cancel."
 	case "send_email", "send_message":
 		return "Say yes to send or no to cancel."
 	case "draft_message", "draft_for_review":
@@ -141,6 +158,16 @@ func recipients(e Envelope) string {
 		return "nobody"
 	}
 	return strings.Join(to, ", ")
+}
+
+// actionKey is what a read-back is chosen by: the full id for a twinlink
+// action (its send_message must never be read back as an email), the short
+// function name for everything else.
+func actionKey(action string) string {
+	if strings.HasPrefix(action, "twinlink.") {
+		return action
+	}
+	return shortName(action)
 }
 
 func shortName(action string) string {

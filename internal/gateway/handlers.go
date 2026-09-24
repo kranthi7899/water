@@ -13,6 +13,7 @@ import (
 	"water/internal/gate"
 	"water/internal/meetings"
 	"water/internal/runtime"
+	"water/internal/twinlink"
 )
 
 // DecisionResult is what POST /v1/approvals/{id}/decision returns: the
@@ -203,7 +204,7 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		// failed; either that or an unknown outcome must never read as
 		// "not executed", which would invite a second, duplicate request.
 		writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: res.Output != nil, Output: res.Output,
-			Error: ierr.Error(), OutcomeUnknown: errors.Is(ierr, gapi.ErrSendOutcomeUnknown)})
+			Error: ierr.Error(), OutcomeUnknown: errors.Is(ierr, gapi.ErrSendOutcomeUnknown) || errors.Is(ierr, twinlink.ErrOutcomeUnknown)})
 		return
 	}
 	writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: true, Output: res.Output})

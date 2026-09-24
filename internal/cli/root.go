@@ -75,12 +75,13 @@ subscription you already pay for.`,
 	pf.BoolVar(&a.flags.voice, "voice", false, "speak replies aloud (uses configured voice provider)")
 	pf.BoolVar(&a.flags.debug, "debug", false, "log every model subprocess: real flags (prompt text elided), pid, duration, exit, last stderr line")
 	pf.BoolVar(&a.flags.demo, "demo", false, "load the demo twin (twins/ceo-demo): adds fake, in-memory GitHub/Linear/HubSpot connectors and a richer investor_request card for showcasing the twin without real credentials for those services (same as WATER_DEMO=1); never the default")
+	pf.StringVar(&a.flags.twin, "twin", "", "load twins/<id> instead of the CEO twin (same as WATER_TWIN=<id>); used to run a second twin, e.g. twins/counterparty, as its own daemon under its own WATER_HOME")
 
 	root.AddCommand(
 		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(),
 		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(),
 		a.daemonCmd(), a.auditCmd(), a.askCmd(), a.approveCmd(),
-		a.connectCmd(), a.decisionsCmd(),
+		a.connectCmd(), a.decisionsCmd(), a.twinCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root

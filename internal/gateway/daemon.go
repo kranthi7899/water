@@ -28,6 +28,7 @@ import (
 	"water/internal/runtime"
 	"water/internal/store"
 	"water/internal/tools"
+	"water/internal/twinlink"
 	"water/internal/twins"
 )
 
@@ -165,6 +166,12 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))
 	mux.Handle("POST /v1/meetings/{id}/stop", d.auth(d.handleMeetingStop))
 	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
+	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))
+	mux.Handle("POST /v1/twinlink/outbox", d.auth(d.handleTwinOutbox))
+	// Inbound twin messages are authenticated by a peer token only (a
+	// clients.json entry named "twin:<id>"), never a client token; see
+	// peerAuth.
+	mux.Handle("POST "+twinlink.ReceivePath, d.peerAuth(d.handleTwinReceive))
 	// /v1/tools/invoke is authenticated separately (a per-turn token, not a
 	// client token): it is called by the MCP bridge subprocess, not a client.
 	mux.HandleFunc("POST /v1/tools/invoke", d.handleToolInvoke)
@@ -178,8 +185,15 @@ func (d *Daemon) auth(h http.HandlerFunc) http.Handler {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)
 			return
 		}
-		if _, ok := d.cfg.Clients.Valid(tok); !ok {
+		name, ok := d.cfg.Clients.Valid(tok)
+		if !ok {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		if isPeerClient(name) {
+			// Another twin's token may only deliver a message (peerAuth);
+			// it can never act as one of this CEO's own clients.
+			http.Error(w, "a peer twin's token may only deliver twin messages", http.StatusForbidden)
 			return
 		}
 		h(w, r)

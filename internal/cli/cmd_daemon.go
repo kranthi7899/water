@@ -167,7 +167,13 @@ func (a *App) runDaemon(ctx context.Context) error {
 		BriefReadyAfter: cfg.Brief.ReadyAfter,
 		AgentMail:       agentWatcher.Tick,
 	})
-	go refresher.Run(sigCtx)
+	// A twin whose manifest grants no Google reads at all (Slice E's
+	// counterparty) has nothing to sync: running the refresher would only
+	// log a gate denial every tick, since on a shared machine the CEO's own
+	// Google credential is in the same Keychain.
+	if _, ok := deps.manifest.Function("gcal.list_events"); ok {
+		go refresher.Run(sigCtx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(l) }()

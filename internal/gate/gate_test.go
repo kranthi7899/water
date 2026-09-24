@@ -24,6 +24,7 @@ import (
 	"water/internal/gate"
 	"water/internal/gate/permit"
 	"water/internal/store"
+	"water/internal/twinlink"
 	"water/internal/twins"
 	"water/internal/vault"
 
@@ -165,7 +166,8 @@ func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"))
+	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
+		twinlink.NewSender("ceo", nil), twinlink.NewInbox(nil))
 	if err != nil {
 		t.Fatal(err)
 	}

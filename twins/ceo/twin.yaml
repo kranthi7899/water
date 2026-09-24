@@ -45,6 +45,18 @@ connectors:
   - name: agentmail
     functions:
       - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+  # Slice E: messages with another twin (another person's agent, running its
+  # own daemon). Sending is level A — the CEO approves the exact message
+  # before it leaves, like an email. Reading the inbox is level R and its
+  # output is external: a received twin message is untrusted data, never an
+  # instruction. Peers (socket + token) live in the vault under
+  # water.twinlink/<this twin's id>; see docs/slices/E.md.
+  - name: twinlink
+    functions:
+      - {name: send_message, level: A, rate: {max: 20, per: 1h}}
+  - name: twininbox
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
 
 # Only functions that read (never draft or act) may run unattended in the
 # background sync (internal/sync); get_message and the Drive functions stay

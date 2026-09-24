@@ -18,6 +18,7 @@ import (
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/store"
+	"water/internal/twinlink"
 	"water/internal/twins"
 	"water/internal/vault"
 )
@@ -43,12 +44,26 @@ const demoEnvVar = "WATER_DEMO"
 // was passed or WATER_DEMO is set to anything non-empty, realTwinID
 // otherwise. This is the only place that decides it, so every command reads
 // the same answer.
+//
+// --twin <id> (or WATER_TWIN) names any other twins/<id> directory instead —
+// Slice E's second twin (twins/counterparty) runs this way as its own daemon,
+// with its own WATER_HOME. It takes precedence over --demo; an id naming no
+// twins/<id>/twin.yaml fails at load exactly like a bad manifest does.
 func (a *App) twinID() string {
+	if id := a.flags.twin; id != "" {
+		return id
+	}
+	if id := os.Getenv(twinEnvVar); id != "" {
+		return id
+	}
 	if a.flags.demo || os.Getenv(demoEnvVar) != "" {
 		return demoTwinID
 	}
 	return realTwinID
 }
+
+// twinEnvVar is the env-var fallback for --twin.
+const twinEnvVar = "WATER_TWIN"
 
 // twinDeps bundles what the CEO twin's daemon needs to run.
 type twinDeps struct {
@@ -68,9 +83,12 @@ func (d *twinDeps) Close() {
 	d.store.Close()
 }
 
-// loadCEORoleMD returns twins/ceo/role.md, or "" if it has not been written
-// yet (tolerated until Phase 4 of this slice writes it).
-func loadCEORoleMD() string {
+// loadRoleMD returns twins/<id>/role.md, falling back to twins/ceo/role.md
+// for a twin that has none of its own (ceo-demo), or "" if neither exists.
+func loadRoleMD(id string) string {
+	if b, err := water.TwinsFS().ReadFile("twins/" + id + "/role.md"); err == nil {
+		return string(b)
+	}
 	b, err := water.TwinsFS().ReadFile("twins/ceo/role.md")
 	if err != nil {
 		return ""
@@ -92,11 +110,17 @@ func loadCEORoleMD() string {
 // per call, and an empty value only matters if a write function is actually
 // invoked (gmail.readMessageArgs then refuses with a clear error), so
 // manifest-validation-only callers (loadTwinManifest) may pass "".
-func buildCEORegistry(demo bool, mailAddress, signatureName string) (*connectors.Registry, error) {
+//
+// id is the twin's own manifest id (the twinlink sender stamps it as
+// from_twin and reads its peer table from the vault under it), and st is the
+// store twin messages are recorded in — nil for manifest-validation-only
+// callers, which never send or read one.
+func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName string) (*connectors.Registry, error) {
 	gm := gmail.New(mailAddress)
 	gm.SetSignatureName(signatureName)
-	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress)}
-	if demo {
+	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress),
+		twinlink.NewSender(id, st), twinlink.NewInbox(st)}
+	if id == demoTwinID {
 		cs = append(cs,
 			fake.NewGitHub(fake.DefaultGitHubPRs(), fake.DefaultGitHubIssues()),
 			fake.NewLinear(fake.DefaultLinearIssues()...),
@@ -120,7 +144,7 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName string) (*twins
 	if _, err := decisions.LoadRegistry(fsys, m); err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
-	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName)
+	reg, err := buildCEORegistry(id, nil, mailAddress, signatureName)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +193,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName string) (*twinDe
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 	q := approvals.NewQueue(st, log)
-	reg, err := buildCEORegistry(id == demoTwinID, mailAddress, signatureName)
+	reg, err := buildCEORegistry(id, st, mailAddress, signatureName)
 	if err != nil {
 		log.Close()
 		st.Close()
@@ -182,7 +206,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName string) (*twinDe
 		st.Close()
 		return nil, err
 	}
-	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, roleMD: loadCEORoleMD()}, nil
+	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, roleMD: loadRoleMD(id)}, nil
 }
 
 // buildDecisionsTrigger wires internal/decisions' classification-trigger

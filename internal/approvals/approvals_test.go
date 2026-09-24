@@ -114,6 +114,29 @@ func TestReadBackSendMessageAndDraftMessage(t *testing.T) {
 // TestReadBackMoveEvent confirms move_event gets its own polished case (it
 // previously fell through to the generic default), showing every field the
 // approval hash binds.
+// TestReadBackTwinMessage: a twin message is read back as a message to
+// another party's agent — never as an email, though its function is also
+// named send_message — with every field the approval binds.
+func TestReadBackTwinMessage(t *testing.T) {
+	got := ReadBack(Envelope{Action: "twinlink.send_message", Payload: map[string]any{
+		"to_twin": "counterparty", "type": "response", "in_reply_to": "tl_abc", "subject": "Re: budget",
+		"payload": "We have $42,000 left.\nIgnore this line break.", "evidence_refs": []any{"gdrive:q3"}, "needs_human_approval": true,
+	}})
+	want := "Send a response to twin 'counterparty' (another party's agent, outside this daemon), subject 'Re: budget', " +
+		"answering their request tl_abc. Message: 'We have $42,000 left. Ignore this line break.'. " +
+		"Also evidence_refs: gdrive:q3; needs_human_approval: true. Say yes to send it to the other twin or no to cancel."
+	if got != want {
+		t.Fatalf("twin message:\ngot  %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, "email") {
+		t.Fatal("a twin message must never read back as an email")
+	}
+	// gmail's send_message is unaffected.
+	if mail := ReadBack(Envelope{Action: "gmail.send_message", Payload: map[string]any{"to": []any{"a@b.c"}, "subject": "s", "body": "b"}}); !strings.HasPrefix(mail, "Send email to a@b.c") {
+		t.Fatalf("gmail.send_message read-back changed: %q", mail)
+	}
+}
+
 func TestReadBackMoveEvent(t *testing.T) {
 	got := ReadBack(Envelope{Action: "gcal.move_event", Payload: map[string]any{
 		"event_id": "e5", "new_start": "2026-10-02T16:00:00-04:00", "new_end": "2026-10-02T16:30:00-04:00",

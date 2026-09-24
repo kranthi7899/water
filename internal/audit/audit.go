@@ -32,6 +32,9 @@ const (
 	KindExecute  Kind = "execute"
 	// KindPropose records a new envelope entering the approval queue.
 	KindPropose Kind = "propose"
+	// KindReceive records an inbound message from another twin being
+	// recorded as untrusted data (Slice E). It is never an execution.
+	KindReceive Kind = "receive"
 )
 
 // Record is what a caller logs. Args are never logged, only ArgsHash.
