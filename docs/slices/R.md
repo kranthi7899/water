@@ -1224,7 +1224,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
   - Where the sha256 pin lives.
   - The eval gate required before Tier 1 can be enabled.
   - Flag: none (docs).
-- [ ] **R-2 Template matcher** (`internal/nervous/tmpl/{tmpl.go,parse.go,match.go}`).
+- [x] **R-2 Template matcher** (`internal/nervous/tmpl/{tmpl.go,parse.go,match.go}`).
   - Implements the grammar, normalization with raw spans, the anchored backtracking match, specificity, the step budget, `LiteralVocabulary` and the template-final `text` rule.
   - Tests (`tmpl_test.go`):
     - the earlier plan's grammar table, parse errors, specificity ordering, budget exhaustion and `BenchmarkMatch`;
