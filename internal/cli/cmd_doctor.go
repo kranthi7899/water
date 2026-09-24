@@ -81,7 +81,7 @@ func (a *App) doctorCmd() *cobra.Command {
 			}
 
 			// The twin's manifest and connectors.
-			checks = append(checks, doctorTwinCheck(a.twinID()))
+			checks = append(checks, doctorTwinCheck(a.twinID(), cfg.Agent.MailAddress))
 
 			// Google (Calendar/Gmail/Drive): presence only, no network call.
 			if _, err := vault.Default().Get(gapi.Service, gapi.DefaultAccount); err != nil {
@@ -121,8 +121,8 @@ func (a *App) doctorCmd() *cobra.Command {
 
 // doctorTwinCheck validates id's manifest and connectors read-only (see
 // loadTwinManifest), so it works while the daemon is running.
-func doctorTwinCheck(id string) check {
-	m, err := loadTwinManifest(water.TwinsFS(), id)
+func doctorTwinCheck(id, mailAddress string) check {
+	m, err := loadTwinManifest(water.TwinsFS(), id, mailAddress)
 	if err != nil {
 		return check{"twin", "fail", err.Error()}
 	}

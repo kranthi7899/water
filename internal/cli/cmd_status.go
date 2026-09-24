@@ -27,7 +27,7 @@ func (a *App) statusCmd() *cobra.Command {
 			}
 			// Read-only: never the audit log's writer lock, which the
 			// running daemon holds (see loadTwinManifest).
-			m, err := loadTwinManifest(water.TwinsFS(), a.twinID())
+			m, err := loadTwinManifest(water.TwinsFS(), a.twinID(), cfg.Agent.MailAddress)
 			if err != nil {
 				return err
 			}

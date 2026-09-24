@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"water"
+	"water/internal/agentmail"
 	"water/internal/approvals"
 	"water/internal/audit"
 	"water/internal/backend"
@@ -164,7 +165,7 @@ func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg, err := connectors.NewRegistry(gcal.New(), gmail.New(), gdrive.New())
+	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"))
 	if err != nil {
 		t.Fatal(err)
 	}
