@@ -3,3 +3,4 @@
 /.water-test/
 /.agents-dev/
 *.tmp
+/.claude/worktrees/
