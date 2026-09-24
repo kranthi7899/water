@@ -137,8 +137,8 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	if err := config.Save(set); err != nil {
 		return err
 	}
-	for _, d := range []string{config.MemoryDir(), cfg.Telemetry.TraceDir, cfg.Orchestration.CheckpointDir} {
-		_ = os.MkdirAll(d, 0o755)
+	if err := os.MkdirAll(config.MemoryDir(), 0o755); err != nil {
+		return err
 	}
 	rep.Written = true
 

@@ -136,6 +136,22 @@ water daemon uninstall
 Every client below talks to the running daemon over its Unix socket. **None of them falls back
 to running in-process** — if the daemon isn't up, they say so and name the command to start one.
 
+### `water connect google`
+
+Connects the CEO's real Calendar, Gmail and Drive (read-only) so the twin answers from real
+data instead of the in-memory fakes. One-time setup, about 10 minutes — see
+[`docs/google-setup.md`](docs/google-setup.md) for the exact GCP-console clicks.
+
+```sh
+water connect google --client-file ~/Downloads/client_secret.json
+water connect google --status     # forces a live token refresh
+water connect google --revoke     # revokes at Google and forgets the credential
+```
+
+Once connected, `water daemon` also runs a small background sync (today's calendar and the
+last day of mail, every 10 minutes by default — `sync.interval_minutes`) so the fast paths below
+usually have fresh data without waiting on a conversation to trigger it.
+
 ### `water ask "<text>"`
 
 Streams one turn to stdout. This is the scriptable, one-shot path — a macOS Shortcut or a cron
@@ -185,7 +201,7 @@ why, and your subscription budget. Add `--no-probe` to skip checking the backend
 
 ```
 twin      ceo (CEO twin)
-functions fake_calendar.list_events, fake_calendar.create_event, fake_mail.list_messages, ...
+functions gcal.list_events, gmail.list_messages, gmail.get_message, gdrive.search_files, ...
 backend   claude-subscription first available non-metered backend
 budget    claude-subscription: 5h window 26% used (resets 12:00) · 7d window 56% used
 config    /Users/you/.water/config.yaml
@@ -202,7 +218,8 @@ round trip passed. Start here when something's wrong.
   ✓ backend claude-subscription  subscription login (max, you@example.com)
   ✓ selection                    claude-subscription (first available non-metered backend)
   ✓ credential leak              no metered API keys exported in this environment
-  ✓ twin                         ceo: 6 function(s) across 3 connector(s)
+  ✓ twin                         ceo: 5 function(s) across 3 connector(s)
+  ✓ google                       connected (water.google/ceo)
   ! daemon                       not running; start it with `water daemon`
   ✓ voice                        os (speak only; listen is a documented no-op)
   ✓ onboard                      verified round trip at 2026-09-15T22:06:36Z

@@ -1,11 +1,11 @@
 package voice
 
-// Free per-role voices for the OS provider. The engine is the same system TTS
-// for every role, so this cannot make speech expressive; it makes roles
-// distinguishable by ear at zero cost. macOS Premium/Enhanced voices (a free
-// download under System Settings → Accessibility → Spoken Content) sound far
-// less robotic, so each role prefers one of those when installed and falls
-// back to a voice that ships with every Mac.
+// The OS provider's preferred voice for the CEO twin. The engine is the
+// system TTS, so this cannot make speech expressive; it just prefers a less
+// robotic installed voice when one is present. macOS Premium/Enhanced voices
+// (a free download under System Settings → Accessibility → Spoken Content)
+// sound far less robotic, so this prefers one of those when installed and
+// falls back to a voice that ships with every Mac.
 
 import (
 	"os/exec"
@@ -26,18 +26,10 @@ type OSProfile struct {
 }
 
 func OSProfileFor(role string) OSProfile {
-	switch role {
-	case "ceo":
+	if role == "ceo" {
 		return OSProfile{[]string{"Jamie (Premium)", "Jamie (Enhanced)", "Evan (Premium)", "Evan (Enhanced)", "Daniel (Enhanced)", "Daniel"}, 172, "en+m3"}
-	case "coo":
-		return OSProfile{[]string{"Ava (Premium)", "Ava (Enhanced)", "Samantha (Enhanced)", "Samantha"}, 185, "en+f3"}
-	case "cto":
-		return OSProfile{[]string{"Nathan (Premium)", "Nathan (Enhanced)", "Tom (Enhanced)", "Rishi (Enhanced)", "Rishi"}, 190, "en+m1"}
-	case "design":
-		return OSProfile{[]string{"Zoe (Premium)", "Zoe (Enhanced)", "Serena (Premium)", "Serena (Enhanced)", "Moira (Enhanced)", "Moira"}, 180, "en+f4"}
-	default:
-		return OSProfile{}
 	}
+	return OSProfile{}
 }
 
 // NewOSFor returns the OS provider speaking as role. override (from

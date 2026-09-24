@@ -24,27 +24,21 @@ const openAISpeechEndpoint = "https://api.openai.com/v1/audio/speech"
 
 var ErrMeteredVoiceDisabled = errors.New("expressive OpenAI voice is disabled: set voice.allow_metered: true explicitly")
 
-// RoleProfile gives each Water role a durable sonic identity without asking a
-// model to invent one. Voice labels are built-in OpenAI voices, not claims to
-// imitate a real person.
+// RoleProfile gives the CEO twin a durable sonic identity without asking a
+// model to invent one. The voice label is a built-in OpenAI voice, not a
+// claim to imitate a real person.
 type RoleProfile struct {
 	Voice        string
 	Instructions string
 }
 
+// ProfileFor returns the CEO voice profile. Water only ever speaks as "ceo";
+// any other role gets a neutral fallback.
 func ProfileFor(role string) RoleProfile {
-	switch role {
-	case "ceo":
+	if role == "ceo" {
 		return RoleProfile{"marin", "Composed, confident and measured. Deliver decisions clearly, with restrained warmth and deliberate pacing."}
-	case "coo":
-		return RoleProfile{"cedar", "Grounded, calm and operational. Speak clearly and efficiently, emphasizing sequence and practical next steps."}
-	case "cto":
-		return RoleProfile{"ash", "Precise, analytical and matter-of-fact. Keep a steady pace and make uncertainty audible without sounding hesitant."}
-	case "design":
-		return RoleProfile{"coral", "Warm, vivid and thoughtful. Speak with clarity and humane energy, without becoming theatrical."}
-	default:
-		return RoleProfile{"marin", "Clear, natural, measured speech."}
 	}
+	return RoleProfile{"marin", "Clear, natural, measured speech."}
 }
 
 // OpenAIOptions contains no implicit credentials. APIKey is expected to come

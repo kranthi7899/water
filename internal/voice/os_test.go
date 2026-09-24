@@ -32,19 +32,12 @@ func TestOSDegradesWithClearMessage(t *testing.T) {
 	}
 }
 
-func TestOSRolesResolveDistinctInstalledVoices(t *testing.T) {
+func TestOSRoleResolvesInstalledVoice(t *testing.T) {
 	installed := []string{"Daniel", "Samantha", "Rishi", "Moira", "Ava (Premium)"}
-	got := map[string]string{}
-	for _, r := range []string{"ceo", "coo", "cto", "design"} {
-		o := &OS{bin: "/usr/bin/say"}
-		o.voice = pickVoice("", OSProfileFor(r).Voices, installed)
-		got[r] = o.voice
-	}
-	want := map[string]string{"ceo": "Daniel", "coo": "Ava (Premium)", "cto": "Rishi", "design": "Moira"}
-	for r, v := range want {
-		if got[r] != v {
-			t.Fatalf("%s voice = %q, want %q (all: %v)", r, got[r], v, got)
-		}
+	o := &OS{bin: "/usr/bin/say"}
+	o.voice = pickVoice("", OSProfileFor("ceo").Voices, installed)
+	if o.voice != "Daniel" {
+		t.Fatalf("ceo voice = %q, want Daniel", o.voice)
 	}
 	if v := pickVoice("samantha", OSProfileFor("ceo").Voices, installed); v != "Samantha" {
 		t.Fatalf("installed override ignored: %q", v)
@@ -54,6 +47,9 @@ func TestOSRolesResolveDistinctInstalledVoices(t *testing.T) {
 	}
 	if v := pickVoice("", OSProfileFor("ceo").Voices, nil); v != "" {
 		t.Fatalf("no installed voices must mean system default, got %q", v)
+	}
+	if v := OSProfileFor("coo").Voices; v != nil {
+		t.Fatalf("non-ceo role should have no voice table, got %v", v)
 	}
 }
 
