@@ -51,9 +51,18 @@ const (
 	EventDelta            EventKind = "delta"
 	EventSentence         EventKind = "sentence"
 	EventApprovalRequired EventKind = "approval_required"
-	EventDone             EventKind = "done"
-	EventError            EventKind = "error"
+	// EventQueued is informational: this turn is waiting for another turn
+	// (from any client or channel) to finish its model call, since only one
+	// runs at a time. It is sent at most once, after ack and before any
+	// delta; clients that do not know it can ignore it.
+	EventQueued EventKind = "queued"
+	EventDone   EventKind = "done"
+	EventError  EventKind = "error"
 )
+
+// queuedAfter is how long BeginModel may block before RunTurn tells the
+// client the turn is queued behind another one.
+const queuedAfter = 250 * time.Millisecond
 
 // Event is one step of a turn.
 //
@@ -156,7 +165,7 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 	// Live state (today's events, the pending count) changes between turns,
 	// so it travels with each turn's message instead.
 	if env.BeginModel != nil {
-		end, err := env.BeginModel(ctx)
+		end, err := beginModelNoting(ctx, env.BeginModel, emit)
 		if err != nil {
 			emit(Event{Kind: EventError, Error: err.Error()})
 			return
@@ -202,6 +211,25 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 		}
 	}
 	emit(Event{Kind: EventDone, Text: resp.Text})
+}
+
+// beginModelNoting calls begin and, if it is still waiting for the model
+// slot after queuedAfter, emits one EventQueued so the client can tell a
+// queued turn from a hung one. The event is emitted from a timer goroutine
+// while this goroutine is blocked in begin, and beginModelNoting waits for
+// that emit to finish before returning, so emit is never called
+// concurrently by this turn.
+func beginModelNoting(ctx context.Context, begin func(context.Context) (func(), error), emit func(Event)) (func(), error) {
+	emitted := make(chan struct{})
+	timer := time.AfterFunc(queuedAfter, func() {
+		defer close(emitted)
+		emit(Event{Kind: EventQueued, Text: "waiting for the previous turn to finish"})
+	})
+	end, err := begin(ctx)
+	if !timer.Stop() {
+		<-emitted
+	}
+	return end, err
 }
 
 // streamCold is stream without the warm session, for calls whose system

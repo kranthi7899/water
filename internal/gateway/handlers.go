@@ -64,10 +64,18 @@ func viewOf(e approvals.Envelope) ApprovalView {
 	return ApprovalView{Envelope: e, ReadBack: approvals.ReadBack(e), Summary: approvals.Summary(e)}
 }
 
-// handleTurn streams one turn as NDJSON: ack, delta*, sentence*,
+// handleTurn streams one turn as NDJSON: ack, queued?, delta*, sentence*,
 // approval_required*, then done or error. The turn's origin is always P0
 // (the CEO's immediate request); taint is computed from what the assembled
 // context pulled in.
+//
+// Every channel and every client shares one model conversation (the warm
+// session) and one in-flight model turn. A turn that arrives while another
+// is running waits for it; if that wait passes a short threshold it gets one
+// informational "queued" event, then nothing until the slot frees (bounded
+// by the running turn's own timeout). A client wanting barge-in cancels its
+// own earlier stream (closing the connection ends that turn). Clients must
+// ignore event kinds they do not know.
 //
 // channel is one of "cli", "voice" or "text-bar" (case-insensitive; empty
 // means cli, for older callers). Anything else is a 400 before the stream

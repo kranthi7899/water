@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"water/internal/backend"
 	"water/internal/store"
@@ -41,6 +42,48 @@ func TestRunTurnTaintsFromTheSummaryTheModelSees(t *testing.T) {
 	}
 	if !taintedWhenSent {
 		t.Fatal("the model saw external content while the session was still clean")
+	}
+}
+
+// TestRunTurnAnnouncesQueuedWait: a turn stuck behind another turn's model
+// call tells the client once ("queued", after ack, before any delta), and a
+// turn that gets the slot at once sends no such event.
+func TestRunTurnAnnouncesQueuedWait(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wait  time.Duration
+		wantQ int
+	}{{"immediate", 0, 0}, {"queued", 3 * queuedAfter, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ctx := testEnv(t)
+			env.Backend = backend.NewFake("fake")
+			env.BeginModel = func(context.Context) (func(), error) {
+				time.Sleep(tc.wait)
+				return func() {}, nil
+			}
+			var events []Event
+			RunTurn(ctx, env, Turn{Channel: ChannelCLI, Prompt: "tell me something"}, func(e Event) { events = append(events, e) })
+			q, firstDelta := 0, -1
+			for i, e := range events {
+				switch e.Kind {
+				case EventQueued:
+					q++
+					if firstDelta >= 0 || i == 0 {
+						t.Fatalf("queued at %d must follow ack and precede deltas: %+v", i, events)
+					}
+				case EventDelta:
+					if firstDelta < 0 {
+						firstDelta = i
+					}
+				}
+			}
+			if q != tc.wantQ {
+				t.Fatalf("queued events = %d, want %d: %+v", q, tc.wantQ, events)
+			}
+			if last := events[len(events)-1]; last.Kind != EventDone {
+				t.Fatalf("stream ended with %+v, want done", last)
+			}
+		})
 	}
 }
 
