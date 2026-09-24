@@ -242,26 +242,12 @@ func TestNegativesExcludesPositiveAndWrite(t *testing.T) {
 	}
 }
 
-// ---- legacy baseline ----
-
-func TestLegacyBaseline(t *testing.T) {
-	fx := DefaultFixture()
-	tier := newLegacyTier(t, fx)
-	cases, err := LoadCEOEval()
-	if err != nil {
-		t.Fatalf("LoadCEOEval: %v", err)
-	}
-
-	r := Run(context.Background(), tier, fx, cases)
-	r.Tier = "legacy-fastpath"
-
-	// Informational only: old FastPath predates the escalate_words/
-	// multi_clause eligibility gate this slice adds, so it is not held to
-	// that bar. Its answering some reasoning/multi-clause cases is a real
-	// (if unsurprising) finding about the system it's being replaced by,
-	// not a bug in this test.
-	t.Logf("legacy FastPath answered %d reasoning/multi-clause cases (informational; it has no reasoning/multi-clause eligibility gate)", r.ReasoningAnswered)
-
-	t.Logf("legacy baseline: N=%d positives=%d negatives=%d hitRate=%.3f intentAcc=%.3f falseAcceptRate=%.3f wilson95=%.3f escalationRate=%.3f reasoningAnswered=%d p50=%s p95=%s",
-		r.N, r.Positives, r.Negatives, r.HitRate, r.IntentAcc, r.FalseAcceptRate, r.Wilson95Upper, r.EscalationRate, r.ReasoningAnswered, r.P50, r.P95)
-}
+// The legacy baseline (legacyTier wrapping internal/runtime.FastPath) was a
+// one-time measurement, taken in R-7 before internal/runtime.FastPath
+// existed as deleted code, specifically so Tier 0's own acceptance
+// criterion ("hit rate at least the legacy baseline plus 20 points") would
+// have a real number to compare against. That number is recorded
+// permanently in docs/slices/R.md's "Baseline" section. Task R-12 deletes
+// FastPath itself (its replacement, Tier 0, is what this eval harness now
+// measures instead), so legacy.go and this test are gone with it — there is
+// nothing left to re-measure, and the recorded numbers don't change.

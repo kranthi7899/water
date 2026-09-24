@@ -129,6 +129,12 @@ type Env struct {
 	// mail or events still marks the session tainted for the tool calls that
 	// follow it. The daemon wires this to escalateTaint.
 	OnTaint func(tainted bool)
+	// StyleBlock, when set, is appended to the system prompt (see
+	// RoleSystem) so the head chef's own prose follows the same tone and
+	// voice rules the quick tiers' renderer uses. It's set once per twin at
+	// startup (internal/nervous/render.Style.PromptBlock()), so it stays
+	// byte-identical across turns like the rest of the system prompt.
+	StyleBlock string
 }
 
 func (e Env) now() time.Time {
@@ -147,19 +153,15 @@ func (e Env) timeout() time.Duration {
 
 const placeholderRole = "You are the CEO's digital twin. twins/ceo/role.md has not been written yet in this checkout; answer conservatively and say so if asked about responsibilities you have not been told about."
 
-// RunTurn assembles context, tries a fast path, and otherwise streams a
-// model reply, delivering every step to emit in order. It never returns an
-// error: failures are reported as an EventError so the caller's stream always
-// ends cleanly with either "done" or "error".
-func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
-	emit(Event{Kind: EventAck})
-
-	if text, ok := FastPath(ctx, env, turn.Prompt); ok {
-		deliverText(turn.Channel, text, emit)
-		emit(Event{Kind: EventDone, Text: text})
-		return
-	}
-
+// ModelTurn is one turn served by the head chef: it builds the system
+// prompt and current-state summary, streams a reply through the backend,
+// and returns the assembled response. It makes no fast-path attempt (that
+// now lives in internal/nervous's Tier 0, ahead of this call) and emits no
+// ack or done event — the caller decides how to frame those, since a turn
+// reaching here may already have gone through a quick-tier attempt the
+// caller alone knows about. A returned error means no usable reply; the
+// caller decides how to surface that (an EventError, in every caller today).
+func ModelTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) (backend.Response, error) {
 	// The system prompt is the role alone, so it stays byte-identical from
 	// turn to turn and the warm session keeps its process and conversation.
 	// Live state (today's events, the pending count) changes between turns,
@@ -202,13 +204,30 @@ func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
 
 	resp, err := stream(ctx, env, req, onDelta)
 	if err != nil {
-		emit(Event{Kind: EventError, Error: err.Error()})
-		return
+		return resp, err
 	}
 	if turn.Channel == ChannelVoice {
 		for _, s := range splitter.Flush() {
 			emit(Event{Kind: EventSentence, Text: s})
 		}
+	}
+	return resp, nil
+}
+
+// RunTurn is a transitional compatibility wrapper: it reproduces the old
+// ack+reply+done event shape, but with no keyword fast path — every turn
+// goes straight to ModelTurn. It exists only because internal/gateway's
+// handleTurn still calls it directly; task R-15 rewires that call to
+// internal/nervous's Handle (which tries Tier 0 first and falls back to
+// this same ModelTurn), at which point this wrapper is removed. It never
+// returns an error: failures are reported as an EventError so the caller's
+// stream always ends cleanly with either "done" or "error".
+func RunTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) {
+	emit(Event{Kind: EventAck})
+	resp, err := ModelTurn(ctx, env, turn, emit)
+	if err != nil {
+		emit(Event{Kind: EventError, Error: err.Error()})
+		return
 	}
 	emit(Event{Kind: EventDone, Text: resp.Text})
 }
@@ -257,7 +276,12 @@ func stream(ctx context.Context, env Env, req backend.Request, onDelta func(stri
 	return resp, err
 }
 
-func deliverText(ch Channel, text string, emit func(Event)) {
+// DeliverText delivers a complete, already-final piece of text as a single
+// delta, splitting it into sentence events on the voice channel too. It's
+// used by both the RunTurn compatibility wrapper's caller and (from a later
+// task on) internal/nervous, for a quick tier's answer or a computed brief:
+// text that exists all at once, unlike a model's streamed reply.
+func DeliverText(ch Channel, text string, emit func(Event)) {
 	emit(Event{Kind: EventDelta, Text: text})
 	if ch != ChannelVoice {
 		return
@@ -274,10 +298,14 @@ func deliverText(ch Channel, text string, emit func(Event)) {
 // RoleSystem is the twin's system prompt: role.md (or a placeholder until it
 // exists), and nothing that changes between turns.
 func RoleSystem(env Env) string {
+	role := placeholderRole
 	if strings.TrimSpace(env.RoleMD) != "" {
-		return env.RoleMD
+		role = env.RoleMD
 	}
-	return placeholderRole
+	if strings.TrimSpace(env.StyleBlock) == "" {
+		return role
+	}
+	return role + "\n\n## Style\n" + env.StyleBlock
 }
 
 // TurnPrompt is one turn's user message: the current state (see

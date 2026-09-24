@@ -226,7 +226,13 @@ func TestTurnWithMeetingIDTaintsEvenWithNoSegmentsYet(t *testing.T) {
 }
 
 // TestTurnWithUnknownMeetingIDIsIgnored: a stale or mistyped meeting_id must
-// not fail the turn or taint it — nothing was actually pulled in.
+// not fail the turn or taint it — nothing was actually pulled in. The
+// provider-call count itself used to be 0 (internal/runtime.FastPath
+// answered "any pending approvals" directly); Slice R's task R-12 deletes
+// FastPath, and its replacement (internal/nervous's Tier 0) isn't wired
+// into handleTurn until task R-15, so this now makes exactly one call. That
+// part of the assertion should flip back to 0 once R-15 lands — the taint
+// check below is this test's real invariant and is unaffected either way.
 func TestTurnWithUnknownMeetingIDIsIgnored(t *testing.T) {
 	h := newHarness(t)
 	resp := h.post(t, "/v1/turns", `{"channel":"cli","prompt":"any pending approvals","meeting_id":"mtg_does_not_exist"}`, h.token)
@@ -234,8 +240,8 @@ func TestTurnWithUnknownMeetingIDIsIgnored(t *testing.T) {
 	if len(events) == 0 || events[len(events)-1].Kind != runtime.EventDone {
 		t.Fatalf("events = %+v", events)
 	}
-	if h.fake.Calls() != 0 {
-		t.Fatalf("provider calls = %d, want 0 (the fast path still applies when no meeting context was actually pulled in)", h.fake.Calls())
+	if h.fake.Calls() != 1 {
+		t.Fatalf("provider calls = %d, want 1 (no fast path is wired into handleTurn until Slice R's R-15)", h.fake.Calls())
 	}
 	if got := h.sessionTaint(t); got != gate.Clean {
 		t.Fatalf("taint = %v, want clean: an unknown meeting_id pulls in nothing to taint", got)

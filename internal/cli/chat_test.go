@@ -119,6 +119,13 @@ func TestChatCommandQuitAndClear(t *testing.T) {
 	}
 }
 
+// TestChatTurnFastPathMakesNoProviderCalls used to prove
+// internal/runtime.FastPath answered "any pending approvals" with zero
+// model calls. Slice R's task R-12 deletes FastPath (its replacement,
+// internal/nervous's Tier 0, is not wired into the daemon's turn path until
+// task R-15) — until then, every turn goes through RunTurn's
+// ModelTurn-only compatibility path, so this now makes exactly one call.
+// This assertion should flip back to 0 once R-15 lands.
 func TestChatTurnFastPathMakesNoProviderCalls(t *testing.T) {
 	fb := backend.NewFake("fake")
 	startTestDaemon(t, fb)
@@ -130,7 +137,7 @@ func TestChatTurnFastPathMakesNoProviderCalls(t *testing.T) {
 	if err := app.chatTurn(context.Background(), client, "any pending approvals", false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if fb.Calls() != 0 {
-		t.Fatalf("fast path made %d provider calls", fb.Calls())
+	if fb.Calls() != 1 {
+		t.Fatalf("provider calls = %d, want 1 (no fast path is wired into the daemon until Slice R's R-15)", fb.Calls())
 	}
 }

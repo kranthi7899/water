@@ -276,6 +276,13 @@ func TestTurnStreamsDeltasBeforeDone(t *testing.T) {
 	}
 }
 
+// TestFastPathTurnMakesZeroProviderCalls used to prove
+// internal/runtime.FastPath answered "any pending approvals" with zero
+// model calls. Slice R's task R-12 deletes FastPath (its replacement,
+// internal/nervous's Tier 0, is not wired into handleTurn until task R-15)
+// — until then, every turn goes through RunTurn's ModelTurn-only
+// compatibility path, so this now makes exactly one call. This assertion
+// should flip back to 0 once R-15 lands.
 func TestFastPathTurnMakesZeroProviderCalls(t *testing.T) {
 	h := newHarness(t)
 	resp := h.post(t, "/v1/turns", `{"channel":"cli","prompt":"any pending approvals"}`, h.token)
@@ -283,8 +290,8 @@ func TestFastPathTurnMakesZeroProviderCalls(t *testing.T) {
 	if len(events) == 0 || events[len(events)-1].Kind != runtime.EventDone {
 		t.Fatalf("events = %+v", events)
 	}
-	if h.fake.Calls() != 0 {
-		t.Fatalf("fast path made %d provider calls", h.fake.Calls())
+	if h.fake.Calls() != 1 {
+		t.Fatalf("provider calls = %d, want 1 (no fast path is wired into handleTurn until Slice R's R-15)", h.fake.Calls())
 	}
 }
 

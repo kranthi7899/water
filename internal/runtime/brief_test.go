@@ -111,13 +111,14 @@ func TestComputeAndCacheBriefConcurrentCallersShareOneComputation(t *testing.T) 
 	}
 }
 
-// TestBriefAnswerPropagatesTaintForExternalMessages checks that a fast-path
-// brief answer escalates taint (via Env.OnTaint) exactly when its signals
-// include an External record, same rule as StateSummary.
+// TestBriefAnswerPropagatesTaintForExternalMessages checks that reading back
+// a just-cached brief (CachedBrief) reports taint exactly when its signals
+// included an External record, same rule as StateSummary. Calling env.OnTaint
+// itself is internal/nervous's job now (Handle does it after a Tier 0/quick
+// answer), not this package's — this test covers the taint computation
+// CachedBrief hands that caller.
 func TestBriefAnswerPropagatesTaintForExternalMessages(t *testing.T) {
 	env, ctx := testEnv(t)
-	var taintCalled, gotTaint bool
-	env.OnTaint = func(tainted bool) { taintCalled, gotTaint = true, tainted }
 
 	msg := &store.Message{
 		Meta:    store.Meta{Source: "gmail", SourceID: "m1", External: true, CreatedAt: env.now().Add(-time.Hour)},
@@ -129,13 +130,18 @@ func TestBriefAnswerPropagatesTaintForExternalMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := FastPath(ctx, env, "what's my morning brief"); !ok {
-		t.Fatal("expected a fast-path match")
+	if _, err := ComputeAndCacheBrief(ctx, env); err != nil {
+		t.Fatal(err)
 	}
-	if !taintCalled {
-		t.Fatal("OnTaint was never called")
+	day := startOfDay(env.now()).Format("2006-01-02")
+	_, tainted, ok, err := CachedBrief(ctx, env, day)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !gotTaint {
+	if !ok {
+		t.Fatal("expected a cached brief")
+	}
+	if !tainted {
 		t.Fatal("taint should be true: an External message was in the brief's signals")
 	}
 }
@@ -253,16 +259,19 @@ func TestBriefSaysWhenDecisionCardsAreUnavailable(t *testing.T) {
 
 func TestBriefAnswerNoTaintWhenNothingExternal(t *testing.T) {
 	env, ctx := testEnv(t)
-	var taintCalled, gotTaint bool
-	env.OnTaint = func(tainted bool) { taintCalled, gotTaint = true, tainted }
 
-	if _, ok := FastPath(ctx, env, "what's my morning brief"); !ok {
-		t.Fatal("expected a fast-path match")
+	if _, err := ComputeAndCacheBrief(ctx, env); err != nil {
+		t.Fatal(err)
 	}
-	if !taintCalled {
-		t.Fatal("OnTaint was never called")
+	day := startOfDay(env.now()).Format("2006-01-02")
+	_, tainted, ok, err := CachedBrief(ctx, env, day)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if gotTaint {
+	if !ok {
+		t.Fatal("expected a cached brief")
+	}
+	if tainted {
 		t.Fatal("taint should be false: nothing in the signals is External")
 	}
 }
@@ -297,8 +306,8 @@ func TestBriefIncludesAgentMailSignalAndTaintsIt(t *testing.T) {
 	fk := backend.NewFake("fake")
 	fk.Reply = func(backend.Request) string { return "ok" }
 	env.Backend = fk
-	if _, ok := FastPath(ctx, env, "what's my morning brief"); !ok {
-		t.Fatal("expected a fast-path match")
+	if _, err := ComputeAndCacheBrief(ctx, env); err != nil {
+		t.Fatal(err)
 	}
 	reqs := fk.Requests()
 	if len(reqs) != 1 || !strings.Contains(reqs[0].Prompt, "Your weekly digest") {

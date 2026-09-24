@@ -46,8 +46,9 @@ func brokenApprovals(t *testing.T) *approvals.Queue {
 }
 
 // TestBriefAnswerFailsClosedOnSignalError: a cached brief may be built from
-// external mail; if the fast path cannot recompute its signals, it must
-// still escalate the session rather than serve it un-tainted.
+// external mail; if CachedBrief cannot recompute its signals, it must still
+// report tainted rather than serve it un-tainted (Design §11.4/Risk 7 — the
+// caller, internal/nervous's Handle, escalates the session on that bit).
 func TestBriefAnswerFailsClosedOnSignalError(t *testing.T) {
 	env, ctx := testEnv(t)
 	day := startOfDay(env.now()).Format("2006-01-02")
@@ -55,22 +56,23 @@ func TestBriefAnswerFailsClosedOnSignalError(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.Approvals = brokenApprovals(t)
-	var called, got bool
-	env.OnTaint = func(tainted bool) { called, got = true, tainted }
 
-	text, ok := FastPath(ctx, env, "is my morning brief ready")
-	if !ok || text != "cached brief" {
-		t.Fatalf("FastPath = %q, %v; want the cached brief", text, ok)
+	text, tainted, ok, err := CachedBrief(ctx, env, day)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !called || !got {
-		t.Fatalf("OnTaint called=%v tainted=%v; want called with true when signals fail", called, got)
+	if !ok || text != "cached brief" {
+		t.Fatalf("CachedBrief = %q, %v; want the cached brief", text, ok)
+	}
+	if !tainted {
+		t.Fatal("tainted should be true when today's signals can't be recomputed")
 	}
 }
 
-// TestCachedBriefFastPathDoesNotRunDecisions: asking for an already-cached
-// brief is a store read, not a decision-trigger run (gate fetches and
-// model calls per card).
-func TestCachedBriefFastPathDoesNotRunDecisions(t *testing.T) {
+// TestCachedBriefDoesNotRunDecisions: reading back an already-cached brief
+// is a store read, not a decision-trigger run (gate fetches and model calls
+// per card).
+func TestCachedBriefDoesNotRunDecisions(t *testing.T) {
 	env, ctx := testEnv(t)
 	cd := &countingDecisions{}
 	env.Decisions = cd
@@ -78,11 +80,12 @@ func TestCachedBriefFastPathDoesNotRunDecisions(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := cd.n.Load()
-	if _, ok := FastPath(ctx, env, "is my morning brief ready"); !ok {
-		t.Fatal("expected a fast-path match")
+	day := startOfDay(env.now()).Format("2006-01-02")
+	if _, _, ok, err := CachedBrief(ctx, env, day); err != nil || !ok {
+		t.Fatalf("CachedBrief = ok=%v err=%v; want a cache hit", ok, err)
 	}
 	if after := cd.n.Load(); after != before {
-		t.Fatalf("cached-brief fast path ran the decision trigger %d time(s)", after-before)
+		t.Fatalf("reading a cached brief ran the decision trigger %d time(s)", after-before)
 	}
 	if before > 1 {
 		t.Fatalf("computing one brief ran the decision trigger %d times, want at most 1", before)
@@ -112,10 +115,10 @@ func TestCachedBriefKeepsItsComputedTaint(t *testing.T) {
 	if _, err := ComputeAndCacheBrief(ctx, env); err != nil {
 		t.Fatal(err)
 	}
-	var got bool
-	env.OnTaint = func(tainted bool) { got = got || tainted }
-	if _, ok := FastPath(ctx, env, "is my morning brief ready"); !ok {
-		t.Fatal("expected a fast-path match")
+	day := startOfDay(env.now()).Format("2006-01-02")
+	_, got, ok, err := CachedBrief(ctx, env, day)
+	if err != nil || !ok {
+		t.Fatalf("CachedBrief = ok=%v err=%v; want a cache hit", ok, err)
 	}
 	if !got {
 		t.Fatal("a cached brief built from an untrusted card did not taint the session")
@@ -151,11 +154,15 @@ func TestRunTurnSystemPromptIsStableAcrossStateChanges(t *testing.T) {
 	fk := backend.NewFake("fake")
 	env.Backend = fk
 
-	RunTurn(ctx, env, Turn{Channel: ChannelCLI, Prompt: "draft a note to dana"}, func(Event) {})
+	if _, err := ModelTurn(ctx, env, Turn{Channel: ChannelCLI, Prompt: "draft a note to dana"}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := env.Approvals.Propose(ctx, approvals.Envelope{Action: "x.y", Payload: map[string]any{"a": 1}, Origin: "p0", Risk: "low"}); err != nil {
 		t.Fatal(err)
 	}
-	RunTurn(ctx, env, Turn{Channel: ChannelCLI, Prompt: "make the subject shorter"}, func(Event) {})
+	if _, err := ModelTurn(ctx, env, Turn{Channel: ChannelCLI, Prompt: "make the subject shorter"}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
 
 	reqs := fk.Requests()
 	if len(reqs) != 2 {
@@ -169,37 +176,22 @@ func TestRunTurnSystemPromptIsStableAcrossStateChanges(t *testing.T) {
 	}
 }
 
-// TestFastPathLeavesActionRequestsToTheModel: prompts that contain a fast
-// path trigger phrase but ask for something else must reach the model.
-func TestFastPathLeavesActionRequestsToTheModel(t *testing.T) {
-	env, ctx := testEnv(t)
-	for _, p := range []string{
-		"Reschedule my meetings with Bob to Friday",
-		"cancel my meetings tomorrow",
-		"Draft a reply about the pending approval from legal",
-		"Summarize my brief for the board deck",
-		"What's on my calendar next week",
-		"what's on my calendar on thursday",
-		"move my 3pm meeting on my calendar to 4",
-		// Open-ended triggers followed by a different subject (review finding).
-		"what's pending on the Acme deal?",
-		"what's on my mind",
-		"what's on my reading list",
-		"whats pending with legal",
-		"what's on my plate for Acme",
-	} {
-		if _, ok := FastPath(ctx, env, p); ok {
-			t.Errorf("FastPath(%q) answered from the fast path; it must fall through to the model", p)
-		}
-	}
-	for _, p := range []string{
-		"what's on my calendar today", "any pending approvals", "what's my morning brief",
-		"do I have any meetings tomorrow", "is my brief ready", "what needs my approval",
-		"what's pending", "so what's pending for me right now?", "what's on my plate today",
-		"what is on my schedule tomorrow",
-	} {
-		if _, ok := FastPath(ctx, env, p); !ok {
-			t.Errorf("FastPath(%q) should still match", p)
-		}
-	}
-}
+// The old TestFastPathLeavesActionRequestsToTheModel (keyword-trigger
+// near-misses vs. matches) tested internal/runtime's deleted FastPath.
+// Its original cases are preserved as internal/nervous/intents/embedded_test.go's
+// TestLegacyFastPathCases (R-9), run against the real Tier 0 registry
+// instead, and its positives/negatives also live in
+// internal/nervous/eval/testdata/ceo_eval.yaml (R-7).
+//
+// A concurrent upstream commit (rebased in during R-12) added five more
+// near-miss cases here after a review finding: FastPath's old substring
+// triggers ("what's on my ...", "what's pending") over-matched an
+// unrelated subject ("what's on my mind", "what's pending on the Acme
+// deal?"). Verified by hand against the real committed intent files rather
+// than re-added as a test, since Tier 0 can't have this bug by
+// construction: matching is anchored (the whole normalized utterance must
+// be consumed, so trailing words like "on the acme deal" can't be silently
+// absorbed) and schedule.on_date's own "what's on ..." template requires
+// the literal word "calendar" or "schedule", which none of these five
+// phrases contain. See twins/ceo/intents/schedule_on_date.yaml and
+// approvals_list.yaml.

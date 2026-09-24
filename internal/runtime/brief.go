@@ -239,20 +239,23 @@ var (
 	briefInFlight = map[string]*briefWait{}
 )
 
-// ComputeAndCacheBrief returns today's morning brief, computing and caching
-// it if nothing is cached yet. Concurrent callers for the same local day
-// share one computation (and one backend call): the first caller in computes
-// and caches; every other caller for that same day blocks on the same result
-// instead of starting its own. This is the sync loop's background precompute
-// and FastPath's on-demand path calling into exactly the same place.
 // CachedBrief reads day's cached brief with no model call and no write:
-// store reads only. It is what Slice R's Tier 0 "brief.today" reflex
-// handler calls, so a request for today's brief never itself triggers a
-// backend call — a cache miss is reported via ok=false, and the caller
-// (the facade, on escalation to the main path) is the one that runs
-// ComputeAndCacheBrief. Any read error, or an unreadable/missing taint
-// record, is reported tainted=true (fail closed), exactly like
-// cachedBriefTainted already does for the existing compute path.
+// store reads only. It is what internal/nervous's Tier 0 "brief.today"
+// reflex handler calls, so a request for today's brief never itself
+// triggers a backend call — a cache miss is reported via ok=false, and the
+// caller (internal/nervous's Handle, on escalation to the main path) is the
+// one that runs ComputeAndCacheBrief.
+//
+// Taint is checked two ways, ORed together, on every call — a cache hit
+// included: the taint recorded when the brief was built (cachedBriefTainted,
+// itself fail-closed on a missing/unreadable record), and a fresh re-read of
+// today's own signals. The fresh re-read matters because it can fail for a
+// reason that has nothing to do with what's in the cached text — the
+// approvals queue going unreadable, say — and a broken signal source means
+// this twin can no longer even verify its own state is safe to answer from
+// untainted, so that counts as tainted too rather than trusting a bit
+// computed once at cache time. This mirrors the pre-Slice-R fast path's
+// briefAnswer, which made exactly this same dual check.
 func CachedBrief(ctx context.Context, env Env, day string) (text string, tainted bool, ok bool, err error) {
 	if env.Store == nil {
 		return "", true, false, errors.New("runtime: brief needs a store")
@@ -264,9 +267,18 @@ func CachedBrief(ctx context.Context, env Env, day string) (text string, tainted
 	if !ok {
 		return "", true, false, nil
 	}
-	return text, cachedBriefTainted(ctx, env, day), true, nil
+	_, sigTainted, sigErr := computeBriefSignals(ctx, env)
+	tainted = cachedBriefTainted(ctx, env, day) || sigTainted || sigErr != nil
+	return text, tainted, true, nil
 }
 
+// ComputeAndCacheBrief returns today's morning brief, computing and caching
+// it if nothing is cached yet. Concurrent callers for the same local day
+// share one computation (and one backend call): the first caller in computes
+// and caches; every other caller for that same day blocks on the same result
+// instead of starting its own. This is the sync loop's background precompute
+// and internal/nervous's on-demand escalation path (a brief.today cache
+// miss) calling into exactly the same place.
 func ComputeAndCacheBrief(ctx context.Context, env Env) (string, error) {
 	if env.Store == nil {
 		return "", errors.New("runtime: brief needs a store")
