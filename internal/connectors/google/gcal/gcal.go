@@ -43,6 +43,10 @@ const (
 type listEventsOutput struct {
 	Events        []Event `json:"events"`
 	NextSyncToken string  `json:"next_sync_token,omitempty"`
+	// Truncated is set when a time_min/time_max listing was cut short (by
+	// max or maxPages). Such an output carries no next_sync_token: a cursor
+	// taken past events that were never returned would skip them for good.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // Event is the compact shape Invoke returns and Normalize consumes.
@@ -117,7 +121,7 @@ func (*Calendar) Functions() []connectors.Function {
 					"time_max":    {Type: "string", Description: "RFC 3339 end of the range (required unless sync_token is set)"},
 					"sync_token":  {Type: "string", Description: "incremental sync cursor from a previous call's next_sync_token; must not be combined with time_min/time_max"},
 					"calendar_id": {Type: "string", Description: `calendar id, default "primary"`},
-					"max":         {Type: "integer", Description: "maximum events to return, capped at 250"},
+					"max":         {Type: "integer", Description: "maximum events to return for a time_min/time_max listing, capped at 250 (a sync_token call always returns every change)"},
 				},
 			},
 		},
@@ -165,17 +169,29 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 	}
 
 	endpoint := gapi.CalendarBase + "/calendars/" + url.PathEscape(calendarID) + "/events"
-	events := make([]Event, 0, max)
+	// Google puts nextSyncToken only on the last page, so a cursor exists
+	// only once every page has been read. With sync_token the output is a
+	// change set that must be ingested whole (a partial delta has no cursor
+	// to resume from, so every tick would refetch the same first page), so
+	// max does not apply there. A time_min/time_max listing is capped at
+	// max and, if cut short, reports truncated with no cursor.
+	var events []Event
 	pageToken := ""
 	nextSyncToken := ""
-	for page := 0; page < maxPages; page++ {
+	truncated := false
+	drained := false
+	for page := 0; page < maxPages && !truncated; page++ {
 		q := url.Values{"maxResults": {strconv.Itoa(max)}}
+		// singleEvents must match between the seeding request and every
+		// syncToken request (Google: other parameters "should be the same as
+		// for the initial synchronization"), or incremental results come back
+		// as recurring-series masters instead of the stored instances. Google
+		// only forbids orderBy/timeMin/timeMax (and a few filters) alongside
+		// syncToken.
+		q.Set("singleEvents", "true")
 		if syncToken != "" {
-			// Google rejects syncToken combined with timeMin/timeMax,
-			// singleEvents or orderBy.
 			q.Set("syncToken", syncToken)
 		} else {
-			q.Set("singleEvents", "true")
 			q.Set("orderBy", "startTime")
 			q.Set("timeMin", timeMin)
 			q.Set("timeMax", timeMax)
@@ -195,21 +211,37 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 			return nil, err
 		}
 		for _, w := range resp.Items {
-			events = append(events, toEvent(w, calendarID))
-			if len(events) >= max {
+			if syncToken == "" && len(events) >= max {
+				truncated = true
 				break
 			}
+			events = append(events, toEvent(w, calendarID))
 		}
-		if resp.NextSyncToken != "" {
-			nextSyncToken = resp.NextSyncToken
-		}
-		if len(events) >= max || resp.NextPageToken == "" {
+		if resp.NextPageToken == "" {
+			drained = true
+			if !truncated {
+				nextSyncToken = resp.NextSyncToken
+			}
 			break
+		}
+		if syncToken == "" && len(events) >= max {
+			// More pages remain but nothing more fits: the listing is cut
+			// short, and a cursor from its final page would skip the rest.
+			truncated = true
 		}
 		pageToken = resp.NextPageToken
 	}
+	if !drained && !truncated {
+		if syncToken != "" {
+			return nil, fmt.Errorf("gcal: more than %d pages of changes since the sync token: %w", maxPages, ErrSyncTokenExpired)
+		}
+		truncated = true
+	}
+	if events == nil {
+		events = []Event{}
+	}
 
-	return json.Marshal(listEventsOutput{Events: events, NextSyncToken: nextSyncToken})
+	return json.Marshal(listEventsOutput{Events: events, NextSyncToken: nextSyncToken, Truncated: truncated})
 }
 
 func toEvent(w wireEvent, calendarID string) Event {

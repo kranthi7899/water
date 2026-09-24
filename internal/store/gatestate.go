@@ -23,11 +23,13 @@ func (s *Store) CountHitsSince(ctx context.Context, key string, since time.Time)
 	return n, err
 }
 
-// PruneHitsBefore deletes hits older than before, keeping the table bounded.
-// Callers run it opportunistically; a missed prune only costs disk space, so
-// its error is safe to ignore.
-func (s *Store) PruneHitsBefore(ctx context.Context, before time.Time) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM rate_hits WHERE at < ?`, before.UnixNano())
+// PruneKeyHitsBefore deletes key's hits at or before before, keeping
+// rate_hits bounded. The gate calls it with the same boundary it counts
+// from (CountHitsSince is strictly after since), so a pruned hit is one the
+// window no longer counts. A missed prune only costs disk space, so its
+// error is safe to ignore.
+func (s *Store) PruneKeyHitsBefore(ctx context.Context, key string, before time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM rate_hits WHERE key = ? AND at <= ?`, key, before.UnixNano())
 	return err
 }
 

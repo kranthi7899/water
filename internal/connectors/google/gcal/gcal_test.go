@@ -480,10 +480,16 @@ func TestSyncTokenFetchesWithoutTimeWindow(t *testing.T) {
 	if gotQuery.Get("syncToken") != "st-abc" {
 		t.Fatalf("syncToken = %q, want st-abc", gotQuery.Get("syncToken"))
 	}
-	for _, k := range []string{"timeMin", "timeMax", "singleEvents", "orderBy"} {
+	for _, k := range []string{"timeMin", "timeMax", "orderBy"} {
 		if gotQuery.Get(k) != "" {
 			t.Fatalf("request included %s=%q alongside syncToken; Google rejects that combination", k, gotQuery.Get(k))
 		}
+	}
+	// singleEvents must match the seeding (time-window) request, or Google
+	// returns recurring-series masters instead of the expanded instances
+	// the seed stored.
+	if gotQuery.Get("singleEvents") != "true" {
+		t.Fatalf("singleEvents = %q alongside syncToken, want true (same as the seed request)", gotQuery.Get("singleEvents"))
 	}
 	out := decodeOutput(t, res.Output)
 	if len(out.Events) != 1 || out.Events[0].ID != "e12" {
@@ -588,5 +594,128 @@ func TestSyncTokenExpiredIsErrorsIsCompatible(t *testing.T) {
 	wrapped := fmt.Errorf("gcal: %w", ErrSyncTokenExpired)
 	if !errors.Is(wrapped, ErrSyncTokenExpired) {
 		t.Fatal("wrapping ErrSyncTokenExpired with %w broke errors.Is")
+	}
+}
+
+// bulkPages serves n pages of perPage generated events each. Only the last
+// page carries nextSyncToken, per Google's contract; earlier pages carry
+// nextPageToken instead.
+func bulkPages(t *testing.T, n, perPage int, finalToken string, check func(url.Values)) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var reqs atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
+		q := r.URL.Query()
+		if check != nil {
+			check(q)
+		}
+		page := 1
+		if pt := q.Get("pageToken"); pt != "" {
+			fmt.Sscanf(pt, "pg%d", &page)
+		}
+		items := make([]map[string]any, 0, perPage)
+		for i := 0; i < perPage; i++ {
+			items = append(items, map[string]any{
+				"id":      fmt.Sprintf("ev%d_%d", page, i),
+				"summary": "bulk",
+				"start":   map[string]string{"dateTime": "2026-09-25T10:00:00Z"},
+				"end":     map[string]string{"dateTime": "2026-09-25T11:00:00Z"},
+			})
+		}
+		resp := map[string]any{"items": items}
+		if page < n {
+			resp["nextPageToken"] = fmt.Sprintf("pg%d", page+1)
+		} else {
+			resp["nextSyncToken"] = finalToken
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(api.Close)
+	return api, &reqs
+}
+
+// TestSyncTokenDrainsEveryPageOfChanges: more than max changes since the
+// stored token must still be drained to the final page, so the output
+// carries that page's nextSyncToken and the cursor moves forward instead of
+// every tick refetching the same first 250 changes forever.
+func TestSyncTokenDrainsEveryPageOfChanges(t *testing.T) {
+	ts := newTokenServer(t)
+	api, reqs := bulkPages(t, 2, 250, "st-after-bulk", func(q url.Values) {
+		if q.Get("syncToken") != "st-old" {
+			t.Errorf("syncToken = %q", q.Get("syncToken"))
+		}
+	})
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listEvents(t, h, map[string]any{"sync_token": "st-old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reqs.Load() != 2 {
+		t.Fatalf("requests %d, want 2 (every page of changes followed)", reqs.Load())
+	}
+	out := decodeOutput(t, res.Output)
+	if out.NextSyncToken != "st-after-bulk" {
+		t.Fatalf("next_sync_token = %q, want st-after-bulk from the final page", out.NextSyncToken)
+	}
+	if len(out.Events) != 500 || len(res.Records) != 500 {
+		t.Fatalf("events %d / records %d, want all 500 changes ingested", len(out.Events), len(res.Records))
+	}
+	if out.Truncated {
+		t.Fatal("a fully drained change set is not truncated")
+	}
+}
+
+// TestSyncTokenTooManyPagesForcesResync: a change set longer than maxPages
+// cannot be resumed (there is no cursor until the last page), so Invoke
+// reports it as needing a full resync instead of silently returning a
+// partial delta with no cursor.
+func TestSyncTokenTooManyPagesForcesResync(t *testing.T) {
+	ts := newTokenServer(t)
+	api, _ := bulkPages(t, maxPages+1, 1, "never-reached", nil)
+	conn := NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
+	h := newHarness(t, conn)
+	_, err := listEvents(t, h, map[string]any{"sync_token": "st-old"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, ErrSyncTokenExpired) {
+		t.Fatalf("err = %v, want ErrSyncTokenExpired in its chain so sync re-seeds", err)
+	}
+}
+
+// TestTimeRangeFollowsPagesToSeedCursor: a windowed call with more events
+// than fit in one page still reaches the final page and seeds a cursor.
+func TestTimeRangeFollowsPagesToSeedCursor(t *testing.T) {
+	ts := newTokenServer(t)
+	api, reqs := bulkPages(t, 2, 100, "st-seed", nil)
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listEvents(t, h, basicRange)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := decodeOutput(t, res.Output)
+	if reqs.Load() != 2 || len(out.Events) != 200 || out.NextSyncToken != "st-seed" || out.Truncated {
+		t.Fatalf("reqs %d events %d token %q truncated %v", reqs.Load(), len(out.Events), out.NextSyncToken, out.Truncated)
+	}
+}
+
+// TestTimeRangeTruncatedByMaxSeedsNoCursor: when max cuts a windowed
+// listing short, the output says so and carries no cursor, since resuming
+// from the final page's token would skip the events that were cut.
+func TestTimeRangeTruncatedByMaxSeedsNoCursor(t *testing.T) {
+	ts := newTokenServer(t)
+	api, _ := bulkPages(t, 2, 250, "st-seed", nil)
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listEvents(t, h, basicRange)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := decodeOutput(t, res.Output)
+	if len(out.Events) != defaultMax {
+		t.Fatalf("events %d, want %d (default max)", len(out.Events), defaultMax)
+	}
+	if !out.Truncated || out.NextSyncToken != "" {
+		t.Fatalf("truncated=%v next_sync_token=%q, want truncated with no cursor", out.Truncated, out.NextSyncToken)
 	}
 }

@@ -657,3 +657,227 @@ func TestListMessagesSinceHistoryID_NoSecretLeak(t *testing.T) {
 		}
 	}
 }
+
+// fakeHistory is a stateful history.list + messages.get fake: records are
+// numbered from 1, record i carries message "m<i>" with history id
+// base+i, and history.list honours startHistoryId (exclusive, as Gmail
+// documents it) and paginates perPage records at a time.
+type fakeHistory struct {
+	t        *testing.T
+	base     int
+	n        int
+	perPage  int
+	latest   string
+	labels   map[int][]string // record index -> message labelIds
+	fetched  sync.Map         // message id -> true
+	noFetch  map[string]bool  // message ids that must never be fetched
+	historyN atomic.Int32
+}
+
+func (f *fakeHistory) server() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch {
+		case r.URL.Path == "/gmail/v1/users/me/history":
+			f.historyN.Add(1)
+			start := 0
+			fmt.Sscanf(q.Get("startHistoryId"), "%d", &start)
+			first := 1
+			if pt := q.Get("pageToken"); pt != "" {
+				fmt.Sscanf(pt, "p%d", &first)
+			}
+			type msg struct {
+				ID       string   `json:"id"`
+				ThreadID string   `json:"threadId"`
+				LabelIDs []string `json:"labelIds,omitempty"`
+			}
+			type added struct {
+				Message msg `json:"message"`
+			}
+			type rec struct {
+				ID            string  `json:"id"`
+				MessagesAdded []added `json:"messagesAdded"`
+			}
+			var recs []rec
+			i := first
+			for ; i <= f.n && len(recs) < f.perPage; i++ {
+				if f.base+i <= start {
+					continue
+				}
+				labels := f.labels[i]
+				if labels == nil {
+					labels = []string{"INBOX", "UNREAD"}
+				}
+				recs = append(recs, rec{
+					ID:            fmt.Sprint(f.base + i),
+					MessagesAdded: []added{{Message: msg{ID: fmt.Sprintf("m%d", i), ThreadID: fmt.Sprintf("t%d", i), LabelIDs: labels}}},
+				})
+			}
+			resp := map[string]any{"history": recs, "historyId": f.latest}
+			if i <= f.n {
+				resp["nextPageToken"] = fmt.Sprintf("p%d", i)
+			}
+			json.NewEncoder(w).Encode(resp)
+		case strings.HasPrefix(r.URL.Path, "/gmail/v1/users/me/messages/"):
+			id := strings.TrimPrefix(r.URL.Path, "/gmail/v1/users/me/messages/")
+			if f.noFetch[id] {
+				f.t.Errorf("fetched %s, which history.list labelled as spam/trash/draft", id)
+			}
+			f.fetched.Store(id, true)
+			var idx int
+			fmt.Sscanf(id, "m%d", &idx)
+			fmt.Fprintf(w, `{"id":%q,"threadId":"t%d","snippet":"hi","internalDate":"1758700000000","historyId":%q,"payload":{"headers":[{"name":"From","value":"x@acme.com"}]}}`,
+				id, idx, fmt.Sprint(f.base+idx))
+		default:
+			f.t.Errorf("unexpected request %s", r.URL)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// drainHistory repeatedly calls list_messages with since_history_id,
+// threading each call's history_id into the next exactly as sync.tick does,
+// and returns every message id seen in order plus the final cursor.
+func drainHistory(t *testing.T, h *harness, cursor string, extra map[string]any, calls int) ([]string, string) {
+	t.Helper()
+	var ids []string
+	for i := 0; i < calls; i++ {
+		args := map[string]any{"since_history_id": cursor}
+		for k, v := range extra {
+			args[k] = v
+		}
+		res, err := listMessages(t, h, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out listMessagesOutput
+		if err := json.Unmarshal(res.Output, &out); err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range out.Messages {
+			ids = append(ids, m.ID)
+		}
+		if out.HistoryID != "" {
+			cursor = out.HistoryID
+		}
+	}
+	return ids, cursor
+}
+
+// TestListMessagesSinceHistoryID_MoreThanMaxResumesWhereItStopped proves a
+// backlog bigger than max is drained over successive calls instead of the
+// cursor jumping to the mailbox's latest historyId and silently skipping
+// everything past the cut.
+func TestListMessagesSinceHistoryID_MoreThanMaxResumesWhereItStopped(t *testing.T) {
+	ts := newTokenServer(t)
+	f := &fakeHistory{t: t, base: 100, n: 45, perPage: 100, latest: "9999"}
+	api := f.server()
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+
+	first, cursor := drainHistory(t, h, "100", nil, 1)
+	if len(first) != 20 || first[0] != "m1" || first[19] != "m20" {
+		t.Fatalf("first call returned %v, want m1..m20 (default max 20, oldest first)", first)
+	}
+	if cursor != "120" {
+		t.Fatalf("cursor after a truncated call = %q, want 120 (the last history record actually processed), not the mailbox's latest", cursor)
+	}
+	rest, cursor := drainHistory(t, h, cursor, nil, 2)
+	all := append(first, rest...)
+	if len(all) != 45 {
+		t.Fatalf("drained %d messages over 3 calls, want all 45: %v", len(all), all)
+	}
+	for i, id := range all {
+		if want := fmt.Sprintf("m%d", i+1); id != want {
+			t.Fatalf("message %d = %s, want %s", i, id, want)
+		}
+	}
+	if cursor != "9999" {
+		t.Fatalf("cursor after a complete walk = %q, want the mailbox's latest 9999", cursor)
+	}
+}
+
+// TestListMessagesSinceHistoryID_MaxPagesResumesWhereItStopped covers the
+// other truncation: the page loop giving up at maxPages with a
+// nextPageToken still pending must not advance the cursor past what it
+// actually walked.
+func TestListMessagesSinceHistoryID_MaxPagesResumesWhereItStopped(t *testing.T) {
+	ts := newTokenServer(t)
+	f := &fakeHistory{t: t, base: 100, n: maxPages + 5, perPage: 1, latest: "9999"}
+	api := f.server()
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+
+	extra := map[string]any{"max": json.Number("100")}
+	first, cursor := drainHistory(t, h, "100", extra, 1)
+	if len(first) != maxPages {
+		t.Fatalf("first call returned %d messages, want %d (one per page, maxPages pages)", len(first), maxPages)
+	}
+	if want := fmt.Sprint(100 + maxPages); cursor != want {
+		t.Fatalf("cursor after hitting maxPages = %q, want %s", cursor, want)
+	}
+	rest, cursor := drainHistory(t, h, cursor, extra, 1)
+	if len(first)+len(rest) != maxPages+5 {
+		t.Fatalf("second call returned %v, want the remaining 5", rest)
+	}
+	if cursor != "9999" {
+		t.Fatalf("final cursor %q, want 9999", cursor)
+	}
+}
+
+// TestListMessagesSinceHistoryID_SkipsSpamTrashAndDrafts keeps the
+// incremental path consistent with the query path (messages.list excludes
+// SPAM/TRASH by default): such messages are never fetched, never returned,
+// and do not take one of the max slots.
+func TestListMessagesSinceHistoryID_SkipsSpamTrashAndDrafts(t *testing.T) {
+	ts := newTokenServer(t)
+	f := &fakeHistory{t: t, base: 100, n: 5, perPage: 100, latest: "500",
+		labels:  map[int][]string{1: {"SPAM"}, 2: {"TRASH"}, 3: {"DRAFT"}, 5: {"SENT"}},
+		noFetch: map[string]bool{"m1": true, "m2": true, "m3": true}}
+	api := f.server()
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+
+	ids, cursor := drainHistory(t, h, "100", map[string]any{"max": json.Number("2")}, 1)
+	if len(ids) != 2 || ids[0] != "m4" || ids[1] != "m5" {
+		t.Fatalf("messages %v, want [m4 m5]: spam/trash/draft skipped and not counted against max, SENT kept", ids)
+	}
+	if cursor != "500" {
+		t.Fatalf("cursor %q, want 500 (walk completed)", cursor)
+	}
+}
+
+// TestListDoesNotOverwriteFullBody guards against a list_messages call
+// (which only has the snippet) downgrading a body get_message already
+// stored in full under the same (gmail, id) identity.
+func TestListDoesNotOverwriteFullBody(t *testing.T) {
+	ts := newTokenServer(t)
+	api := gmailAPI(t, map[string][]byte{
+		"/gmail/v1/users/me/messages/m-flat?format=full":     fixture(t, "full_flat_plain.json"),
+		"/gmail/v1/users/me/messages":                        []byte(`{"messages":[{"id":"m-flat","threadId":"t-flat"}]}`),
+		"/gmail/v1/users/me/messages/m-flat?format=metadata": []byte(`{"id":"m-flat","threadId":"t-flat","snippet":"Confirmed","internalDate":"1758700000000","payload":{"headers":[{"name":"Subject","value":"Q3, flat (edited)"}]}}`),
+	})
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+
+	if _, err := getMessage(t, h, map[string]any{"id": "m-flat"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := listMessages(t, h, map[string]any{"query": "from:dana"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get[store.Message](context.Background(), h.st, "gmail", "m-flat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Body != "Confirmed for Q3." {
+		t.Fatalf("body = %q, want the full body get_message stored, not the list snippet", got.Body)
+	}
+	if got.Subject != "Q3, flat (edited)" {
+		t.Fatalf("subject = %q: other fields should still take the newer list values", got.Subject)
+	}
+	if !got.BodyFull {
+		t.Fatal("BodyFull should stay set once a full body has been stored")
+	}
+}

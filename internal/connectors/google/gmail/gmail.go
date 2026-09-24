@@ -123,9 +123,10 @@ type gmailMessage struct {
 // been fetched.
 type idPair struct{ id, thread string }
 
-// listMessagesOutput is list_messages' JSON output: the messages plus the
-// mailbox's latest known history ID, so a caller can persist it as the next
-// incremental-sync cursor (gmail:history_id).
+// listMessagesOutput is list_messages' JSON output: the messages plus a
+// history ID a caller can persist as the next incremental-sync cursor
+// (gmail:history_id). On the incremental path it never lies past a message
+// that was not returned (see listMessagesSinceHistory).
 type listMessagesOutput struct {
 	Messages  []message `json:"messages"`
 	HistoryID string    `json:"history_id,omitempty"`
@@ -215,15 +216,33 @@ func (g *Gmail) listMessagesByQuery(ctx context.Context, cl *gapi.Client, args m
 	return json.Marshal(listMessagesOutput{Messages: out, HistoryID: historyID})
 }
 
+// skipLabels are the labels whose messages the incremental path drops
+// before fetching them: messages.list (the query path this replaces) leaves
+// SPAM and TRASH out by default, and DRAFT autosaves are the CEO's own
+// unsent writing, each save a fresh messageAdded record.
+var skipLabels = map[string]bool{"SPAM": true, "TRASH": true, "DRAFT": true}
+
 // listMessagesSinceHistory serves list_messages when since_history_id is
 // set: it walks users.history.list for messageAdded records instead of
 // searching, then reuses fetchMetadata for each newly-added message ID so
 // the output/record shape matches the query-based path exactly.
+//
+// The returned history_id is the next call's cursor, so it must never move
+// past a message this call did not return. The walk stops once max
+// messages are collected (on a history-record boundary, so a record is
+// never half-consumed and the output may exceed max by the rest of that one
+// record) or after maxPages pages; in either case the cursor is the id of
+// the last history record actually processed, and the next call resumes
+// right after it. Only a walk that reached the end of the history uses the
+// mailbox's latest historyId.
 func (g *Gmail) listMessagesSinceHistory(ctx context.Context, cl *gapi.Client, sinceHistoryID string, max int) (json.RawMessage, error) {
 	var ids []idPair
 	seen := map[string]bool{}
-	historyID := ""
+	latest := ""  // mailbox's current historyId, from history.list itself
+	lastRec := "" // id of the last history record processed
+	complete := false
 	pageToken := ""
+walk:
 	for page := 0; page < maxPages; page++ {
 		q := url.Values{"startHistoryId": {sinceHistoryID}, "historyTypes": {"messageAdded"}}
 		if pageToken != "" {
@@ -231,10 +250,12 @@ func (g *Gmail) listMessagesSinceHistory(ctx context.Context, cl *gapi.Client, s
 		}
 		var resp struct {
 			History []struct {
+				ID            string `json:"id"`
 				MessagesAdded []struct {
 					Message struct {
-						ID       string `json:"id"`
-						ThreadID string `json:"threadId"`
+						ID       string   `json:"id"`
+						ThreadID string   `json:"threadId"`
+						LabelIDs []string `json:"labelIds"`
 					} `json:"message"`
 				} `json:"messagesAdded"`
 			} `json:"history"`
@@ -247,26 +268,34 @@ func (g *Gmail) listMessagesSinceHistory(ctx context.Context, cl *gapi.Client, s
 			}
 			return nil, err
 		}
-		for _, rec := range resp.History {
+		latest = laterHistoryID(latest, resp.HistoryID)
+		for i, rec := range resp.History {
 			for _, a := range rec.MessagesAdded {
-				if a.Message.ID == "" || seen[a.Message.ID] {
+				if a.Message.ID == "" || seen[a.Message.ID] || hasSkipLabel(a.Message.LabelIDs) {
 					continue
 				}
 				seen[a.Message.ID] = true
 				ids = append(ids, idPair{a.Message.ID, a.Message.ThreadID})
 			}
+			lastRec = laterHistoryID(lastRec, rec.ID)
+			if len(ids) >= max {
+				// Complete only if nothing at all is left after this record.
+				complete = i == len(resp.History)-1 && resp.NextPageToken == ""
+				break walk
+			}
 		}
-		historyID = laterHistoryID(historyID, resp.HistoryID)
 		if resp.NextPageToken == "" {
+			complete = true
 			break
 		}
 		pageToken = resp.NextPageToken
 	}
-	if len(ids) > max {
-		ids = ids[:max]
-	}
 
 	out := make([]message, 0, len(ids))
+	historyID := lastRec
+	if complete {
+		historyID = latest
+	}
 	for _, id := range ids {
 		m, mHistoryID, err := fetchMetadata(ctx, cl, id.id)
 		if err != nil {
@@ -282,9 +311,22 @@ func (g *Gmail) listMessagesSinceHistory(ctx context.Context, cl *gapi.Client, s
 			m.ThreadID = id.thread
 		}
 		out = append(out, m)
-		historyID = laterHistoryID(historyID, mHistoryID)
+		if complete {
+			// A message's own historyId can postdate records this walk
+			// never reached, so it may only advance a complete walk's cursor.
+			historyID = laterHistoryID(historyID, mHistoryID)
+		}
 	}
 	return json.Marshal(listMessagesOutput{Messages: out, HistoryID: historyID})
+}
+
+func hasSkipLabel(labels []string) bool {
+	for _, l := range labels {
+		if skipLabels[l] {
+			return true
+		}
+	}
+	return false
 }
 
 func fetchMetadata(ctx context.Context, cl *gapi.Client, id string) (message, string, error) {
@@ -446,7 +488,7 @@ func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) 
 		}
 		out := make([]store.Record, 0, len(lm.Messages))
 		for _, m := range lm.Messages {
-			out = append(out, toRecord(m))
+			out = append(out, toRecord(m, false))
 		}
 		return out, nil
 	case "get_message":
@@ -454,20 +496,24 @@ func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) 
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, err
 		}
-		return []store.Record{toRecord(m)}, nil
+		return []store.Record{toRecord(m, true)}, nil
 	}
 	return nil, nil
 }
 
-func toRecord(m message) store.Record {
+// toRecord builds the stored message. full is true only for get_message,
+// whose Body is the extracted message text; list_messages only has the
+// snippet, and store.Upsert will not let that overwrite a full body.
+func toRecord(m message, full bool) store.Record {
 	return &store.Message{
-		Meta:    store.Meta{Source: connName, SourceID: m.ID, External: true},
-		Channel: "email",
-		Thread:  m.ThreadID,
-		From:    m.From,
-		To:      m.To,
-		Subject: m.Subject,
-		Body:    m.Body,
-		SentAt:  parseInternalDate(m.InternalDate),
+		Meta:     store.Meta{Source: connName, SourceID: m.ID, External: true},
+		Channel:  "email",
+		Thread:   m.ThreadID,
+		From:     m.From,
+		To:       m.To,
+		Subject:  m.Subject,
+		Body:     m.Body,
+		BodyFull: full,
+		SentAt:   parseInternalDate(m.InternalDate),
 	}
 }

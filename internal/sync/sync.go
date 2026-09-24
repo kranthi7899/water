@@ -287,6 +287,11 @@ func (r *Refresher) tick(ctx context.Context, fn, cursorKey, cursorField string,
 		r.cfg.Logf("sync: %s: %v", fn, err)
 		return
 	}
+	if truncated(res.Output) {
+		// The connector cut its output short and withheld a cursor that
+		// would skip what it cut (gcal's windowed seed past max events).
+		r.cfg.Logf("sync: %s: output truncated, cursor %s not advanced", fn, cursorKey)
+	}
 	if r.cfg.Store == nil || cursorField == "" {
 		return
 	}
@@ -310,6 +315,15 @@ func (r *Refresher) loadCursor(ctx context.Context, fn, key string) string {
 		return ""
 	}
 	return v
+}
+
+// truncated reports whether a connector output sets a top-level
+// "truncated": true.
+func truncated(raw json.RawMessage) bool {
+	var m struct {
+		Truncated bool `json:"truncated"`
+	}
+	return json.Unmarshal(raw, &m) == nil && m.Truncated
 }
 
 // stringField reads one top-level string field out of a JSON object, for

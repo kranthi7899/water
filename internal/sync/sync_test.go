@@ -467,3 +467,34 @@ func TestBackgroundBriefPrecomputeFiresOncePastReadyAfter(t *testing.T) {
 		t.Fatalf("brief calls after second past-ready tick = %d, want still 1 (already cached)", briefCalls)
 	}
 }
+
+// TestTruncatedOutputIsLoggedAndKeepsCursor: a connector output flagged
+// truncated (gcal's windowed seed cut short by max) carries no cursor, so
+// the stored cursor stays put, and the tick says so in the log instead of
+// failing silently.
+func TestTruncatedOutputIsLoggedAndKeepsCursor(t *testing.T) {
+	r := newRig(t)
+	r.connect(t)
+	r.incrEvents.setOutput(map[string]any{"events": []any{}, "truncated": true})
+	ref := watersync.New(watersync.Config{
+		Gate: r.g, Vault: r.v, Store: r.st, Service: fake.MailService, Account: fake.MailAccount,
+		EventsFunction: "fake_incr_events.list_events", MailFunction: "fake_mail.list_messages",
+		EventsArgs: cursorArgs, MailArgs: noArgs,
+		EventsExpiredErr: errFakeExpired, MailExpiredErr: errFakeExpired,
+		Logf: r.logf,
+	})
+	ctx := context.Background()
+	ref.RunOnceEvents(ctx)
+	if _, ok, err := r.st.GetCursor(ctx, "gcal:primary:sync_token"); err != nil || ok {
+		t.Fatalf("a truncated output must not set a cursor: ok=%v err=%v", ok, err)
+	}
+	found := false
+	for _, l := range r.logLines() {
+		if strings.Contains(l, "truncated") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no log line reports the truncation: %v", r.logLines())
+	}
+}

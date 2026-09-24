@@ -33,13 +33,17 @@ type Record interface {
 
 type Message struct {
 	Meta
-	Channel string    `db:"channel"`
-	Thread  string    `db:"thread"`
-	From    string    `db:"sender"`
-	To      []string  `db:"recipients"`
-	Subject string    `db:"subject"`
-	Body    string    `db:"body"`
-	SentAt  time.Time `db:"sent_at"`
+	Channel string   `db:"channel"`
+	Thread  string   `db:"thread"`
+	From    string   `db:"sender"`
+	To      []string `db:"recipients"`
+	Subject string   `db:"subject"`
+	Body    string   `db:"body"`
+	// BodyFull marks Body as the message's full text rather than a preview
+	// (e.g. a Gmail snippet). Once a full body is stored, a later upsert
+	// carrying only a preview keeps the full body instead of downgrading it.
+	BodyFull bool      `db:"body_full"`
+	SentAt   time.Time `db:"sent_at"`
 }
 
 type Meeting struct {
@@ -211,6 +215,9 @@ func scanTarget(v reflect.Value) (any, func() error) {
 }
 
 // Upsert inserts r or, when (source, source_id) exists, replaces its fields.
+// One exception: a record type with a body_full column (Message) never has
+// a stored full body replaced by an incoming preview; the other fields
+// still update.
 func (s *Store) Upsert(ctx context.Context, r Record) error {
 	m := r.meta()
 	if m.Source == "" || m.SourceID == "" {
@@ -234,7 +241,17 @@ func (s *Store) Upsert(ctx context.Context, r Record) error {
 			return err
 		}
 		names[i], marks[i], args[i] = c.name, "?", v
-		if c.name != "source" && c.name != "source_id" && c.name != "created_at" {
+		switch c.name {
+		case "source", "source_id", "created_at":
+		case "body":
+			if hasColumn(cols, "body_full") {
+				sets = append(sets, fmt.Sprintf("body = CASE WHEN excluded.body_full = 0 AND %s.body_full = 1 THEN %[1]s.body ELSE excluded.body END", r.Table()))
+				continue
+			}
+			sets = append(sets, "body = excluded.body")
+		case "body_full":
+			sets = append(sets, fmt.Sprintf("body_full = MAX(%s.body_full, excluded.body_full)", r.Table()))
+		default:
 			sets = append(sets, c.name+" = excluded."+c.name)
 		}
 	}
@@ -242,6 +259,15 @@ func (s *Store) Upsert(ctx context.Context, r Record) error {
 		r.Table(), strings.Join(names, ", "), strings.Join(marks, ", "), strings.Join(sets, ", "))
 	_, err := s.db.ExecContext(ctx, q, args...)
 	return err
+}
+
+func hasColumn(cols []column, name string) bool {
+	for _, c := range cols {
+		if c.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Query filters a List. Times bound created_at; zero means unbounded.

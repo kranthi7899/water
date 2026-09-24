@@ -61,3 +61,60 @@ func TestRateAndUsageCapsSurviveARestart(t *testing.T) {
 		t.Fatal("model-call cap did not survive the restart")
 	}
 }
+
+// TestStoreBackedCapsPruneExpiredHits proves rate_hits stays bounded: hits
+// that have left a key's window are deleted as the gate keeps charging that
+// key, while the count inside the window stays exact.
+func TestStoreBackedCapsPruneExpiredHits(t *testing.T) {
+	h := newHarness(t, testManifest)
+	ctx := context.Background()
+	epoch := time.Unix(0, 0)
+	count := func(key string) int {
+		t.Helper()
+		n, err := h.st.CountHitsSince(ctx, key, epoch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	call := gate.Call{Function: "fake_mail.list_messages", Origin: gate.P0, Taint: gate.Clean}
+	for i := 0; i < 2; i++ {
+		if _, err := h.g.Invoke(ctx, call); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if err := h.g.ModelCall(gate.P0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.g.ModelCall(gate.P2); err == nil {
+		t.Fatal("expected the model-call cap to be reached")
+	}
+
+	// Two windows later every earlier hit has expired.
+	h.now = h.now.Add(2 * time.Hour)
+	if _, err := h.g.Invoke(ctx, call); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.g.ModelCall(gate.P2); err != nil {
+		t.Fatal(err)
+	}
+	if n := count("fake_mail.list_messages"); n != 1 {
+		t.Fatalf("rate_hits rows for the function = %d, want 1: expired hits must be pruned", n)
+	}
+	if n := count("model"); n != 1 {
+		t.Fatalf("rate_hits rows for model = %d, want 1: expired hits must be pruned", n)
+	}
+	if n := count("model:auto"); n != 1 {
+		t.Fatalf("rate_hits rows for model:auto = %d, want 1", n)
+	}
+	// The in-window count is still exact: one more call fits (max 2), then
+	// the cap holds.
+	if _, err := h.g.Invoke(ctx, call); err != nil {
+		t.Fatalf("second in-window call refused: %v", err)
+	}
+	if _, err := h.g.Invoke(ctx, call); err == nil {
+		t.Fatal("rate cap no longer enforced after pruning")
+	}
+}
