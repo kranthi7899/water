@@ -23,8 +23,9 @@ Go to <https://console.cloud.google.com/apis/credentials/consent>.
 2. Fill in the app name, your email as the support email, and your email again as the developer contact.
 3. Scopes: skip this screen — water requests scopes itself during `water connect google`.
 4. **Test users**: add your own Google account's email address.
-5. **Publishing status: set it to "In production"**, and **do not click "Submit for verification."**
-   - This matters. A personal ("External") OAuth client left in **Testing** mode has its refresh tokens **expire after 7 days** — water would silently stop working weekly. **In production** (unverified) keeps issuing long-lived refresh tokens; only apps that request sensitive/restricted scopes for *other people* need Google's verification, and this app only reads your own data with your own consent.
+5. **Leave publishing status as "Testing." Do not click "Publish app" or "Submit for verification."**
+   - Gmail and Drive read access are Google's "restricted" scope tier. Publishing to production with those scopes forces a security review (CASA assessment) that can take weeks and, at some tiers, costs money — not worth it for an app only you will ever use. Clicking "Publish app" will show *"Your app requires verification"*; that's expected, just don't submit.
+   - The trade-off for staying in Testing: your refresh token **expires every 7 days**. `water doctor` and `water connect google --status` will tell you when it has (`invalid_grant`); just run `water connect google --client-file ...` again to reconnect. It takes seconds since you're already a test user.
    - Google will show a "Google hasn't verified this app" warning the first time you connect. That's expected for an unverified app — see step 5 below for how to get past it.
 
 ## 4. Create a Desktop OAuth client
@@ -74,6 +75,6 @@ This revokes the refresh token at Google (so it stops working everywhere, not ju
 
 ## Troubleshooting
 
-- **"reconnect: run `water connect google`"** — Google rejected the stored refresh token (`invalid_grant`). This happens if you revoke water's access from <https://myaccount.google.com/permissions>, or if the consent screen was left in Testing mode and the token expired after 7 days (see step 3). Just run `water connect google --client-file ...` again.
+- **"reconnect: run `water connect google`"** — Google rejected the stored refresh token (`invalid_grant`). Expected about once a week, since the app stays in Testing mode (see step 3) and Testing-mode tokens expire after 7 days. It also happens if you revoke water's access from <https://myaccount.google.com/permissions>. Just run `water connect google --client-file ...` again.
 - **"client file is for a Web application client"** — you created the wrong OAuth client type in step 4. Delete it and create a **Desktop app** client instead.
 - **"access not granted for ...; connect again and tick every box"** — one of the three scopes wasn't approved. Reconnect and check every box on the consent screen.

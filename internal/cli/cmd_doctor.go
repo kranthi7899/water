@@ -91,7 +91,9 @@ func (a *App) doctorCmd() *cobra.Command {
 			if _, err := vault.Default().Get(gapi.Service, gapi.DefaultAccount); err != nil {
 				add("google", "warn", "not connected; run `water connect google` (see docs/google-setup.md)")
 			} else {
-				add("google", "ok", fmt.Sprintf("connected (%s/%s)", gapi.Service, gapi.DefaultAccount))
+				add("google", "ok", fmt.Sprintf(
+					"connected (%s/%s) — this app's OAuth consent screen stays in Testing mode (avoids Google's verification review), so this login expires every 7 days; run `water connect google --client-file ...` again if `water connect google --status` reports invalid_grant",
+					gapi.Service, gapi.DefaultAccount))
 			}
 
 			// The daemon.
