@@ -130,7 +130,7 @@ func TestCredential(t *testing.T) {
 			t.Fatalf("credential rendered: %s", out)
 		}
 	}
-	if len(Scopes()) != 3 || Service != "water.google" || DefaultAccount != "ceo" {
+	if len(Scopes()) != 5 || Service != "water.google" || DefaultAccount != "ceo" {
 		t.Fatal("constants")
 	}
 }
@@ -534,7 +534,7 @@ func TestAuthorizeRejects(t *testing.T) {
 			}
 		}, "access_denied", 200},
 		{"no refresh token", func(g *fakeGoogle) { g.noRefresh = true }, "no refresh token", 200},
-		{"scope unticked", func(g *fakeGoogle) { g.scope = ScopeCalendarEventsReadonly }, ScopeGmailReadonly, 200},
+		{"scope unticked", func(g *fakeGoogle) { g.scope = ScopeDriveReadonly }, ScopeGmailReadonly, 200},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

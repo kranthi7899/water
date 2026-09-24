@@ -29,6 +29,7 @@ type Config struct {
 	Sync     SyncConfig     `yaml:"sync"`
 	Brief    BriefConfig    `yaml:"brief"`
 	Meetings MeetingsConfig `yaml:"meetings"`
+	Agent    AgentConfig    `yaml:"agent"`
 }
 
 // SyncConfig configures the daemon's background Google refresh
@@ -63,6 +64,23 @@ type MeetingsConfig struct {
 	// from a live session's recent transcript. Off by default, following
 	// this package's existing plain-bool-flag convention.
 	ProactiveCues bool `yaml:"proactive_cues"`
+}
+
+// AgentConfig configures how outward actions identify themselves as the
+// agent, never the CEO.
+type AgentConfig struct {
+	// MailAddress is the "Send mail as" alias (e.g. water.twin@gmail.com)
+	// the CEO verifies on their real Gmail account through Gmail's own web
+	// UI. gmail.send_message/draft_message set the MIME From: header to
+	// this address; sending still uses the real account's existing OAuth
+	// grant. Empty until the CEO sets it, after creating the alias account.
+	MailAddress string `yaml:"mail_address"`
+	// ForwardTo is the CEO's own real address: internal/agentmail's
+	// inbound-triage watcher forwards a message it judges is meant for the
+	// CEO (not the agent) here, as a level-A gmail.send_message approval.
+	// Empty means such mail is logged but never staged, since there is
+	// nowhere configured to send it.
+	ForwardTo string `yaml:"forward_to"`
 }
 
 // OnboardConfig records the last verified round trip.
@@ -132,6 +150,8 @@ func defaults() map[string]string {
 		"sync.mail_interval_seconds": "60",
 		"brief.ready_after":          "07:00",
 		"meetings.proactive_cues":    "false",
+		"agent.mail_address":         "",
+		"agent.forward_to":           "",
 	}
 }
 
@@ -248,6 +268,8 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Sync.MailIntervalSeconds = atoi("sync.mail_interval_seconds")
 	r.Brief.ReadyAfter = flat["brief.ready_after"]
 	r.Meetings.ProactiveCues = abool("meetings.proactive_cues")
+	r.Agent.MailAddress = flat["agent.mail_address"]
+	r.Agent.ForwardTo = flat["agent.forward_to"]
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -283,6 +305,8 @@ func (r *Resolved) Flat() map[string]string {
 		"sync.mail_interval_seconds": strconv.Itoa(r.Sync.MailIntervalSeconds),
 		"brief.ready_after":          r.Brief.ReadyAfter,
 		"meetings.proactive_cues":    strconv.FormatBool(r.Meetings.ProactiveCues),
+		"agent.mail_address":         r.Agent.MailAddress,
+		"agent.forward_to":           r.Agent.ForwardTo,
 	}
 }
 

@@ -19,14 +19,20 @@ const (
 )
 
 const (
-	ScopeCalendarEventsReadonly = "https://www.googleapis.com/auth/calendar.events.readonly"
-	ScopeGmailReadonly          = "https://www.googleapis.com/auth/gmail.readonly"
-	ScopeDriveReadonly          = "https://www.googleapis.com/auth/drive.readonly"
+	// ScopeCalendarEvents is read-write and supersedes
+	// ScopeCalendarEventsReadonly: once granted, the narrower readonly scope
+	// is redundant (Google grants the broader one), so water requests only
+	// this one and read functions keep working under it.
+	ScopeCalendarEvents = "https://www.googleapis.com/auth/calendar.events"
+	ScopeGmailReadonly  = "https://www.googleapis.com/auth/gmail.readonly"
+	ScopeGmailSend      = "https://www.googleapis.com/auth/gmail.send"
+	ScopeGmailCompose   = "https://www.googleapis.com/auth/gmail.compose"
+	ScopeDriveReadonly  = "https://www.googleapis.com/auth/drive.readonly"
 )
 
 // Scopes returns the scopes water asks for.
 func Scopes() []string {
-	return []string{ScopeCalendarEventsReadonly, ScopeGmailReadonly, ScopeDriveReadonly}
+	return []string{ScopeCalendarEvents, ScopeGmailReadonly, ScopeGmailSend, ScopeGmailCompose, ScopeDriveReadonly}
 }
 
 var (
