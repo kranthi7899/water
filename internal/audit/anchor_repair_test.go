@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -147,5 +148,61 @@ func TestRepairRefusesAnEarlierBreak(t *testing.T) {
 	}
 	if err := Repair(path); err == nil {
 		t.Fatal("expected repair to refuse a break earlier than the final line")
+	}
+}
+
+// TestAnchorRollsForwardAfterACrashBeforeTheAnchorUpdate: Append makes the
+// line durable before it updates the anchor, so a crash between the two
+// leaves the file exactly one validly-chained entry ahead. That is not a
+// tamper signal; Open re-anchors (and records that it did) instead of
+// refusing forever. Anything else still refuses.
+func TestAnchorRollsForwardAfterACrashBeforeTheAnchorUpdate(t *testing.T) {
+	setup := func(t *testing.T) (string, *memAnchor, []Entry) {
+		path := filepath.Join(t.TempDir(), "audit.jsonl")
+		anchor := &memAnchor{}
+		l, err := Open(path, WithAnchor(anchor))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var es []Entry
+		for i := 0; i < 3; i++ {
+			e, err := l.Append(Record{Kind: KindCall, Function: "f", Allowed: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			es = append(es, e)
+		}
+		l.Close()
+		return path, anchor, es
+	}
+
+	path, anchor, es := setup(t)
+	anchor.seq, anchor.hash = es[1].Seq, es[1].Hash // crash before anchoring seq 3
+	l, err := Open(path, WithAnchor(anchor))
+	if err != nil {
+		t.Fatalf("open one entry past the anchor: %v", err)
+	}
+	if _, err := l.Append(Record{Kind: KindCall, Function: "g", Allowed: true}); err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	if n, err := Verify(path); err != nil || anchor.seq != n {
+		t.Fatalf("after roll-forward: verify=%d %v anchor=%+v", n, err, anchor)
+	}
+	lines, _ := readLines(path)
+	if !strings.Contains(strings.Join(lines, "\n"), `"kind":"repair"`) {
+		t.Fatal("the roll-forward was not recorded in the log")
+	}
+
+	path, anchor, es = setup(t)
+	anchor.seq, anchor.hash = es[0].Seq, es[0].Hash // two behind
+	if _, err := Open(path, WithAnchor(anchor)); err == nil {
+		t.Fatal("an anchor two entries behind was accepted")
+	}
+
+	path, anchor, es = setup(t)
+	anchor.seq, anchor.hash = es[1].Seq, "not-the-hash" // one behind, wrong hash
+	if _, err := Open(path, WithAnchor(anchor)); err == nil {
+		t.Fatal("an anchor one behind with the wrong hash was accepted")
 	}
 }

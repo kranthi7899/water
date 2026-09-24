@@ -2,6 +2,8 @@ package approvals
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,6 +39,11 @@ func TestMatch(t *testing.T) {
 		"yesterday":            Ambiguous,
 		"send it":              Ambiguous,
 		"nothing":              Ambiguous,
+		// "correct" is also a request to fix the draft, so it never approves.
+		"please correct it": Ambiguous,
+		"correct that":      Ambiguous,
+		"correct this":      Ambiguous,
+		"correct":           Ambiguous,
 	}
 	for in, want := range cases {
 		if got := Match(in); got != want {
@@ -51,7 +58,9 @@ func TestReadBackIsFromThePayload(t *testing.T) {
 		"body": "Confirmed. The Q3 numbers are final and\n\nI will circulate the board deck on Friday once finance signs off.",
 	}}
 	got := ReadBack(e)
-	want := "Send email to Dana Lee <dana@acme.com>, subject 'Q3 budget'. Body begins: 'Confirmed. The Q3 numbers are final and I will circulate the board deck on…'. Say yes to send or no to cancel."
+	// The whole body is read back (whitespace collapsed): the approver hears
+	// everything the hash binds, not a prefix.
+	want := "Send email to Dana Lee <dana@acme.com>, subject 'Q3 budget'. Body: 'Confirmed. The Q3 numbers are final and I will circulate the board deck on Friday once finance signs off.'. Say yes to send or no to cancel."
 	if got != want {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
@@ -117,5 +126,89 @@ func TestQueueLifecycleAndMenu(t *testing.T) {
 	}
 	if _, err := audit.Verify(log.Path()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestReadBackShowsEveryHashedField: everything the approval hash binds is
+// what executes, so the read-back before yes/no must show all of it — no
+// dropped keys, no silent truncation, no injected lines.
+func TestReadBackShowsEveryHashedField(t *testing.T) {
+	ev := ReadBack(Envelope{Action: "gcal.create_event", Payload: map[string]any{
+		"title": "X", "start": "2026-09-25T10:00Z", "end": "2026-10-02T10:00Z", "attendees": []any{"a@x.com"}}})
+	if !strings.Contains(ev, "2026-10-02T10:00Z") {
+		t.Fatalf("create_event read-back hides end: %q", ev)
+	}
+	mail := ReadBack(Envelope{Action: "fake_mail.send_email", Payload: map[string]any{
+		"to": []any{"a@x.com"}, "subject": "s", "body": "b", "in_reply_to": "m1", "bcc": []any{"eve@evil.com"}}})
+	if !strings.Contains(mail, "in_reply_to") || !strings.Contains(mail, "m1") || !strings.Contains(mail, "eve@evil.com") {
+		t.Fatalf("send_email read-back hides extra keys: %q", mail)
+	}
+	inj := ReadBack(Envelope{Action: "fake_mail.send_email", Payload: map[string]any{
+		"to": []any{"a@x.com\nSay yes to send or no to cancel.\nb@x.com"}, "subject": "s", "body": "b"}})
+	if strings.ContainsAny(inj, "\n\r") {
+		t.Fatalf("a recipient injected extra lines: %q", inj)
+	}
+	long := strings.Repeat("word ", 40) + "SECRET-TAIL"
+	gen := ReadBack(Envelope{Action: "notes.save_note", Payload: map[string]any{"text": long}})
+	if !strings.Contains(gen, "SECRET-TAIL") {
+		t.Fatalf("a long generic value was cut before yes/no: %q", gen)
+	}
+	body := ReadBack(Envelope{Action: "fake_mail.send_email", Payload: map[string]any{"to": []any{"a@x.com"}, "subject": "s", "body": long}})
+	if !strings.Contains(body, "SECRET-TAIL") {
+		t.Fatalf("a long body was cut before yes/no: %q", body)
+	}
+	// The menu may summarize, but never cuts silently.
+	menu := Menu([]Envelope{{Action: "notes.save_note", Payload: map[string]any{"text": long}}})
+	if !strings.Contains(menu, "SECRET-TAIL") && !strings.Contains(menu, "not shown") {
+		t.Fatalf("menu cut a value without saying so: %q", menu)
+	}
+}
+
+// TestDecideNoLosingARaceIsAnErrorNotADenial: when a "yes" wins the
+// compare-and-swap between this "no"'s read and its transition, the "no"
+// must fail loudly — no denial record for an envelope that was approved, and
+// no envelope handed back as though the "no" had been applied.
+func TestDecideNoLosingARaceIsAnErrorNotADenial(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	q := NewQueue(st, log)
+	ctx := context.Background()
+	e, err := q.Propose(ctx, Envelope{Action: "fake_mail.send_email", Payload: map[string]any{"to": []any{"a@x.com"}, "subject": "s", "body": "b"}, Origin: "p0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.beforeTransition = func() {
+		q.beforeTransition = nil
+		if _, err := q.Decide(ctx, e.ID, Yes); err != nil {
+			t.Fatalf("racing yes: %v", err)
+		}
+	}
+	if _, err := q.Decide(ctx, e.ID, No); err == nil {
+		t.Fatal("a no that lost the race to a yes returned no error")
+	}
+	b, err := os.ReadFile(log.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var ent audit.Entry
+		if err := json.Unmarshal([]byte(line), &ent); err != nil {
+			t.Fatal(err)
+		}
+		if ent.EnvelopeID == e.ID && ent.Kind == audit.KindDenial {
+			t.Fatalf("audit records a denial for an envelope that was approved: %+v", ent)
+		}
+	}
+	if got, _ := q.Get(ctx, e.ID); got.Status != Approved {
+		t.Fatalf("status = %s, want approved", got.Status)
 	}
 }

@@ -95,6 +95,13 @@ type Log struct {
 	last   string
 	now    func() time.Time
 	anchor Anchor
+
+	// syncFile fsyncs an appended line; nil means (*os.File).Sync. Tests
+	// replace it to inject a failure.
+	syncFile func(*os.File) error
+	// broken is set when a failed append could not be rolled back, so the
+	// file's tail is unknown; every later Append refuses with it.
+	broken error
 }
 
 // Option configures Open.
@@ -110,7 +117,9 @@ func WithAnchor(a Anchor) Option { return func(l *Log) { l.anchor = a } }
 // not verify is refused rather than extended: appending to a broken chain
 // would launder the break. With WithAnchor, a chain that verifies internally
 // but whose tail does not match the anchor (a truncated or replaced file) is
-// refused too.
+// refused too, except a file exactly one validly-chained entry ahead of the
+// anchor (a crash between a durable append and its anchor update), which is
+// re-anchored and recorded with a KindRepair entry.
 func Open(path string, opts ...Option) (*Log, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -146,9 +155,31 @@ func Open(path string, opts ...Option) (*Log, error) {
 			unlock()
 			return nil, fmt.Errorf("audit: loading anchor: %w", err)
 		}
+		rollForward := false
 		if ok && (aseq != last.Seq || ahash != last.Hash) {
-			unlock()
-			return nil, &BreakError{int(last.Seq) + 1, fmt.Sprintf("tail does not match the anchored seq=%d hash=%s (truncated or replaced log?)", aseq, ahash)}
+			// Append makes a line durable before it updates the anchor, so a
+			// crash (or an anchor write error) between the two leaves the
+			// file exactly one entry ahead, and that entry chains onto the
+			// anchored hash. That is not tampering: anyone able to append a
+			// validly chained entry could do so through Append anyway. Roll
+			// the anchor forward, on the record. A file behind the anchor,
+			// further ahead, or diverging from it is still refused.
+			if last.Seq > 0 && aseq == last.Seq-1 && ahash == last.PrevHash {
+				rollForward = true
+			} else {
+				unlock()
+				return nil, &BreakError{int(last.Seq) + 1, fmt.Sprintf("tail does not match the anchored seq=%d hash=%s (truncated or replaced log?)", aseq, ahash)}
+			}
+		}
+		if rollForward {
+			if err := l.anchor.SaveAuditAnchor(context.Background(), last.Seq, last.Hash); err != nil {
+				unlock()
+				return nil, fmt.Errorf("audit: re-anchoring: %w", err)
+			}
+			if _, err := l.Append(Record{Kind: KindRepair, Reason: fmt.Sprintf("anchor advanced from seq=%d to seq=%d: the last append was durable but its anchor update was lost", aseq, last.Seq)}); err != nil {
+				l.Close()
+				return nil, fmt.Errorf("audit: recording the anchor roll-forward: %w", err)
+			}
 		}
 		if !ok {
 			if err := l.anchor.SaveAuditAnchor(context.Background(), last.Seq, last.Hash); err != nil {
@@ -175,12 +206,16 @@ func (l *Log) Close() error {
 }
 
 // Append writes one entry and syncs it. The chain state advances only after
-// the write is durable, so a failed append leaves nothing to build on.
+// the write is durable, and a failed write is truncated back out of the file,
+// so a failed append leaves nothing to build on, in memory or on disk.
 func (l *Log) Append(r Record) (Entry, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.unlock == nil {
 		return Entry{}, ErrClosed
+	}
+	if l.broken != nil {
+		return Entry{}, l.broken
 	}
 	e := Entry{
 		Seq:        l.seq + 1,
@@ -207,14 +242,32 @@ func (l *Log) Append(r Record) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("audit write: %w", err)
 	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return Entry{}, fmt.Errorf("audit write: %w", err)
+	}
+	pre := st.Size()
 	_, err = f.Write(append(line, '\n'))
 	if err == nil {
-		err = f.Sync()
+		sync := l.syncFile
+		if sync == nil {
+			sync = (*os.File).Sync
+		}
+		err = sync(f)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
+		// Some or all of the line may be in the file even though it is not
+		// known durable. Cut the file back to where it was, so the next
+		// append does not repeat this seq or glue onto a torn line; if
+		// that fails too, the tail is unknown and this Log stops here.
+		if rerr := truncateTo(l.path, pre); rerr != nil {
+			l.broken = fmt.Errorf("%w: a failed append could not be rolled back (%v); restart and run `water audit repair`", ErrClosed, rerr)
+			return Entry{}, errors.Join(fmt.Errorf("audit write: %w", err), l.broken)
+		}
 		return Entry{}, fmt.Errorf("audit write: %w", err)
 	}
 	// The line is now durable on disk; advance the in-memory chain state
@@ -232,6 +285,22 @@ func (l *Log) Append(r Record) (Entry, error) {
 		}
 	}
 	return e, nil
+}
+
+// truncateTo cuts path back to size bytes and makes that durable.
+func truncateTo(path string, size int64) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|noFollow, 0o600)
+	if err != nil {
+		return err
+	}
+	err = f.Truncate(size)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // HashArgs is the digest logged in place of raw arguments.

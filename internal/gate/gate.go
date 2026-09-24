@@ -175,7 +175,7 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 		return refuse(deny("arguments are not canonical JSON"))
 	}
 
-	conn, spec, level, needEnvelope, err := g.authorize(c)
+	conn, spec, level, claim, err := g.authorize(c)
 	if err != nil {
 		return refuse(err)
 	}
@@ -191,7 +191,7 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 		}
 	}
 	basis := "level " + string(level)
-	if needEnvelope {
+	if claim {
 		if _, err := g.cfg.Approvals.Claim(ctx, c.EnvelopeID, c.Function, argsHash); err != nil {
 			return refuse(deny("envelope %s: %v", c.EnvelopeID, err))
 		}
@@ -249,7 +249,13 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 	return res, nil
 }
 
-// authorize applies every static rule. It has no side effects.
+// authorize applies every static rule. It has no side effects. Its bool
+// result says whether Invoke must claim c.EnvelopeID: always when the level
+// and taint require an envelope, and also whenever the caller presents one at
+// all. An approved envelope is consumed exactly once against its action and
+// payload hash whatever taint the executing call carries (the daemon runs an
+// approved S envelope that was queued only for its taint), so it moves to
+// Executed and is never later expired as though it had not run.
 func (g *Gate) authorize(c Call) (connectors.Connector, connectors.Function, twins.Level, bool, error) {
 	var none connectors.Function
 	if !c.Origin.valid() {
@@ -285,7 +291,7 @@ func (g *Gate) authorize(c Call) (connectors.Connector, connectors.Function, twi
 		}
 		return nil, none, "", false, deny("%s: %s", c.Function, why)
 	}
-	return conn, spec, f.Level, needEnvelope, nil
+	return conn, spec, f.Level, needEnvelope || c.EnvelopeID != "", nil
 }
 
 // NeedsEnvelope reports whether a call at level with the given taint must go

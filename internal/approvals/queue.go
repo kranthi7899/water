@@ -58,6 +58,10 @@ type Queue struct {
 	st  *store.Store
 	log *audit.Log
 	Now func() time.Time
+
+	// beforeTransition, when set (tests only), runs in Decide between the
+	// pending check and the compare-and-swap, to interleave a racing decider.
+	beforeTransition func()
 }
 
 func NewQueue(st *store.Store, log *audit.Log) *Queue {
@@ -205,13 +209,24 @@ func (q *Queue) Decide(ctx context.Context, id string, a Answer) (Envelope, erro
 		}
 		return q.getAfter(ctx, id, ErrExpired)
 	}
+	if h := q.beforeTransition; h != nil {
+		h()
+	}
 	if a != Yes {
 		reason := "answered no"
 		if a != No {
 			reason = "ambiguous answer: treated as no"
 		}
-		if _, err := q.st.TransitionApproval(ctx, id, string(Pending), string(Denied), reason, now); err != nil {
+		ok, err := q.st.TransitionApproval(ctx, id, string(Pending), string(Denied), reason, now)
+		if err != nil {
 			return Envelope{}, err
+		}
+		if !ok {
+			// Another decider (or expiry) won the compare-and-swap: this
+			// answer was not applied, so it is not recorded as a denial.
+			// The current envelope comes back with the error so the caller
+			// can show what won; callers never act on an errored Decide.
+			return q.getAfter(ctx, id, fmt.Errorf("approvals: %s changed while deciding; this answer was not applied", id))
 		}
 		if _, err := q.log.Append(audit.Record{Kind: audit.KindDenial, Function: e.Action, EnvelopeID: id, Origin: e.Origin, Reason: reason, ArgsHash: e.PayloadHash}); err != nil {
 			return Envelope{}, err

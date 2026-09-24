@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -170,4 +171,76 @@ func TestExpiredTurnTokenIsRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 for an expired turn token", resp.StatusCode)
 	}
+}
+
+// TestApprovedTaintedSLevelEnvelopeIsClaimed: an S-level call queued only
+// because it was tainted must, once approved and run through the decision
+// handler, be claimed like any envelope — moved to Executed and bound in the
+// audit decision — so a later ExpireStale never records a denial for an
+// action that actually ran.
+func TestApprovedTaintedSLevelEnvelopeIsClaimed(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	out := h.invokeAsModel(t, gate.P0, gate.Tainted, "notes.save_note", map[string]any{"text": "from an email"})
+	id, _ := out["approval_id"].(string)
+	if out["status"] != "queued" || id == "" {
+		t.Fatalf("out = %+v, want queued with an approval_id", out)
+	}
+	env, err := h.q.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := h.post(t, "/v1/approvals/"+id+"/decision", `{"payload_hash":"`+env.PayloadHash+`","reply":"yes"}`, h.token)
+	var result DecisionResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !result.Executed || len(h.notes.saved) != 1 {
+		t.Fatalf("expected the approved note to execute once: %+v saved=%v", result, h.notes.saved)
+	}
+	got, err := h.q.Get(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != approvals.Executed {
+		t.Fatalf("envelope status = %s, want executed (the gate never claimed it)", got.Status)
+	}
+
+	h.q.Now = func() time.Time { return got.ExpiresAt.Add(time.Hour) }
+	if err := h.q.ExpireStale(ctx); err != nil {
+		t.Fatal(err)
+	}
+	entries := readAuditEntries(t, h.log.Path())
+	for _, e := range entries {
+		if e.EnvelopeID == id && e.Kind == audit.KindDenial {
+			t.Fatalf("audit records a denial for an envelope that executed: %+v", e)
+		}
+	}
+	bound := false
+	for _, e := range entries {
+		if e.EnvelopeID == id && e.Kind == audit.KindDecision && e.Allowed && strings.Contains(e.Reason, "with approved envelope") {
+			bound = true
+		}
+	}
+	if !bound {
+		t.Fatal("the gate's decision for the approved envelope does not record the envelope binding")
+	}
+}
+
+func readAuditEntries(t *testing.T, path string) []audit.Entry {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []audit.Entry
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var e audit.Entry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, e)
+	}
+	return out
 }

@@ -6,7 +6,9 @@ import (
 )
 
 var (
-	affirmative = set("yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed", "approve", "approved", "affirmative", "correct")
+	// "correct" is deliberately absent: "correct that" / "please correct it"
+	// is a request to fix the draft, and it must never read as approval.
+	affirmative = set("yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed", "approve", "approved", "affirmative")
 	negative    = set("no", "nope", "nah", "not", "dont", "don't", "never", "cancel", "stop", "wait", "hold", "abort", "negative", "deny", "reject", "wrong")
 	// filler may accompany an affirmative without changing it.
 	filler = set("send", "it", "go", "ahead", "do", "please", "that", "this", "now", "and", "the", "one", "thanks", "thank", "you")

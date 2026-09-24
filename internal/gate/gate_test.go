@@ -499,3 +499,31 @@ func TestTamperedEnvelopeRowIsRefused(t *testing.T) {
 		t.Fatal("tampered envelope sent mail")
 	}
 }
+
+// TestPresentedEnvelopeIsAlwaysClaimed: a call that presents an EnvelopeID
+// is claimed against it even when its level and taint would not require one
+// (a clean S call), so the envelope is consumed exactly once and a mismatched
+// payload is refused rather than silently ignored.
+func TestPresentedEnvelopeIsAlwaysClaimed(t *testing.T) {
+	h := newHarness(t, testManifest)
+	ctx := context.Background()
+	note := map[string]any{"text": "Dana says the budget is final"}
+	e := h.approve(t, "notes.save_note", note)
+	if _, err := h.g.Invoke(ctx, gate.Call{Function: "notes.save_note", Args: map[string]any{"text": "something else"}, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID}); err == nil {
+		t.Fatal("a clean S call with a mismatched envelope payload ran")
+	}
+	e = h.approve(t, "notes.save_note", note)
+	if _, err := h.g.Invoke(ctx, gate.Call{Function: "notes.save_note", Args: note, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID}); err != nil {
+		t.Fatalf("clean S with approval: %v", err)
+	}
+	got, err := h.q.Get(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != approvals.Executed {
+		t.Fatalf("envelope status = %s, want executed", got.Status)
+	}
+	if _, err := h.g.Invoke(ctx, gate.Call{Function: "notes.save_note", Args: note, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID}); err == nil {
+		t.Fatal("a used envelope was accepted a second time")
+	}
+}

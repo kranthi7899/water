@@ -121,11 +121,12 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Approved: run it now, exactly once. Origin comes from the envelope
-	// itself (set when the model or scheduler proposed it); Taint does not
-	// gate an already-approved envelope (level A always requires one
-	// regardless of taint), so Clean here just satisfies the call shape.
+	// itself (set when the model or scheduler proposed it). The payload may
+	// derive from external content (an S envelope is queued only because it
+	// was tainted), so it is presented as Tainted; the gate claims any
+	// presented envelope against its action and payload hash regardless.
 	res, ierr := d.cfg.Gate.Invoke(r.Context(), gate.Call{
-		Function: e.Action, Args: e.Payload, Origin: gate.Origin(e.Origin), Taint: gate.Clean, EnvelopeID: e.ID,
+		Function: e.Action, Args: e.Payload, Origin: gate.Origin(e.Origin), Taint: gate.Tainted, EnvelopeID: e.ID,
 	})
 	latest, gerr := d.cfg.Approvals.Get(r.Context(), id)
 	if gerr != nil {

@@ -99,3 +99,50 @@ func TestUnwritableFailsAppend(t *testing.T) {
 		t.Fatalf("append after close: %v", err)
 	}
 }
+
+// TestFailedSyncDoesNotDuplicateASeq: a line that was written but whose
+// fsync failed must not stay in the file while the in-memory chain stays
+// behind it, or the next append writes the same seq again and breaks the
+// chain mid-file where Repair cannot help.
+func TestFailedSyncDoesNotDuplicateASeq(t *testing.T) {
+	l := openTemp(t)
+	if _, err := l.Append(Record{Kind: KindCall}); err != nil {
+		t.Fatal(err)
+	}
+	l.syncFile = func(*os.File) error { l.syncFile = nil; return errors.New("injected EIO") }
+	if _, err := l.Append(Record{Kind: KindCall}); err == nil {
+		t.Fatal("append with a failed fsync succeeded")
+	}
+	e, err := l.Append(Record{Kind: KindCall})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Seq != 2 {
+		t.Fatalf("seq after a failed append = %d, want 2", e.Seq)
+	}
+	if n, err := Verify(l.Path()); err != nil || n != 2 {
+		t.Fatalf("verify: %d %v", n, err)
+	}
+}
+
+// TestUnrecoverableFailedAppendPoisonsTheLog: when the failed line cannot be
+// rolled back either, the tail is unknown, so the Log refuses every later
+// append instead of building on it.
+func TestUnrecoverableFailedAppendPoisonsTheLog(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("permission bits do not bind root")
+	}
+	l := openTemp(t)
+	l.syncFile = func(*os.File) error {
+		l.syncFile = nil
+		os.Chmod(l.Path(), 0o400) // the rollback cannot reopen the file
+		return errors.New("injected EIO")
+	}
+	if _, err := l.Append(Record{Kind: KindCall}); err == nil {
+		t.Fatal("append with a failed fsync succeeded")
+	}
+	os.Chmod(l.Path(), 0o600)
+	if _, err := l.Append(Record{Kind: KindCall}); err == nil {
+		t.Fatal("append after an unrecoverable failure succeeded")
+	}
+}
