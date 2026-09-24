@@ -209,15 +209,25 @@ func (c *ClaudeSubscription) scratch() string {
 // any, and returns the --mcp-config path, the events log path, and a cleanup
 // func that removes the temporary files. Callers must always invoke cleanup.
 func (c *ClaudeSubscription) setupTools(req Request) (mcpCfg, logPath string, cleanup func(), err error) {
-	cleanup = func() {}
-	if req.Tools == nil || req.Tools.Empty() {
-		return "", "", cleanup, nil
-	}
 	self := c.SelfExe
 	if self == "" {
 		self, _ = os.Executable()
 	}
-	pf, perr := tools.WritePolicyFile(c.scratch(), req.Tools)
+	return setupToolsFor(self, c.scratch(), req)
+}
+
+// setupToolsFor is setupTools' body, free of a *ClaudeSubscription receiver so
+// WarmSession (a long-lived process, not a per-call ClaudeSubscription) can
+// use it too.
+func setupToolsFor(selfExe, scratchDir string, req Request) (mcpCfg, logPath string, cleanup func(), err error) {
+	cleanup = func() {}
+	if req.Tools == nil || req.Tools.Empty() {
+		return "", "", cleanup, nil
+	}
+	if selfExe == "" {
+		selfExe, _ = os.Executable()
+	}
+	pf, perr := tools.WritePolicyFile(scratchDir, req.Tools)
 	if perr != nil {
 		return "", "", cleanup, fmt.Errorf("tool policy: %w", perr)
 	}
@@ -228,7 +238,7 @@ func (c *ClaudeSubscription) setupTools(req Request) (mcpCfg, logPath string, cl
 		rm = append(rm, logPath)
 	}
 	cfgPath := strings.TrimSuffix(pf, ".json") + ".mcp.json"
-	if werr := os.WriteFile(cfgPath, []byte(tools.MCPConfig(self, pf, logPath)), 0o600); werr != nil {
+	if werr := os.WriteFile(cfgPath, []byte(tools.MCPConfig(selfExe, pf, logPath)), 0o600); werr != nil {
 		for _, p := range rm {
 			os.Remove(p)
 		}

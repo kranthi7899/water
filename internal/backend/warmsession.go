@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"water/internal/tools"
 )
 
 // defaultMaxTurns bounds how long one warm process lives before it is
@@ -25,6 +29,11 @@ type WarmSessionConfig struct {
 	WorkDir string
 	// MaxTurns restarts the process after this many turns (0 = default 40).
 	MaxTurns int
+	// SelfExe is the water binary used as the MCP server for tool calls
+	// (defaults to os.Executable(), as ClaudeSubscription does).
+	SelfExe string
+	// ScratchDir holds per-session policy/log files (defaults to WorkDir/tmp).
+	ScratchDir string
 }
 
 // WarmSession keeps one
@@ -39,15 +48,29 @@ type WarmSessionConfig struct {
 type WarmSession struct {
 	cfg WarmSessionConfig
 
-	mu     sync.Mutex // one turn in flight; also guards everything below
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	lines  chan string
-	werr   chan error
-	live   bool
-	turns  int
-	system string
-	model  string
+	mu           sync.Mutex // one turn in flight; also guards everything below
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	lines        chan string
+	werr         chan error
+	live         bool
+	turns        int
+	system       string
+	model        string
+	toolsKey     string
+	toolsCleanup func()
+}
+
+// toolsKey identifies the tool-proxy scope of a request, so RunTurn can tell
+// whether the running process's --mcp-config still matches. A twin's proxy
+// token is minted once per daemon lifetime (not per turn — the MCP child
+// this spawns is itself long-lived and reads its policy file only once), so
+// in practice this almost never changes after the session's first turn.
+func toolsKey(p *tools.Policy) string {
+	if p == nil {
+		return ""
+	}
+	return p.TwinSocket + "|" + p.TwinToken
 }
 
 func NewWarmSession(cfg WarmSessionConfig) *WarmSession { return &WarmSession{cfg: cfg} }
@@ -86,14 +109,28 @@ func (w *WarmSession) killLocked() {
 		_ = w.cmd.Cancel()
 		<-w.werr
 	}
-	w.cmd, w.stdin, w.lines, w.werr, w.live = nil, nil, nil, nil, false
+	if w.toolsCleanup != nil {
+		w.toolsCleanup()
+		w.toolsCleanup = nil
+	}
+	w.cmd, w.stdin, w.lines, w.werr, w.live, w.toolsKey = nil, nil, nil, nil, false, ""
 }
 
-// start launches the subprocess with the given system prompt and model. It
-// requires --print, --input-format and --output-format to be present in the
-// installed CLI's --help; anything less and it refuses so the caller can fall
-// back to per-turn spawning.
-func (w *WarmSession) start(ctx context.Context, system, model string) error {
+func (w *WarmSession) scratch() string {
+	if w.cfg.ScratchDir != "" {
+		return w.cfg.ScratchDir
+	}
+	if w.cfg.WorkDir != "" {
+		return filepath.Join(w.cfg.WorkDir, "tmp")
+	}
+	return os.TempDir()
+}
+
+// start launches the subprocess for req's system prompt, model and tool
+// policy. It requires --print, --input-format and --output-format to be
+// present in the installed CLI's --help; anything less and it refuses so the
+// caller can fall back to per-turn spawning.
+func (w *WarmSession) start(ctx context.Context, req Request) error {
 	path, err := exec.LookPath(w.bin())
 	if err != nil {
 		return err
@@ -105,21 +142,46 @@ func (w *WarmSession) start(ctx context.Context, system, model string) error {
 	if !fs["--print"] || !fs["--input-format"] || !fs["--output-format"] {
 		return errors.New("claude CLI lacks warm-session flags (--print/--input-format/--output-format)")
 	}
+
+	self := w.cfg.SelfExe
+	if self == "" {
+		self, _ = os.Executable()
+	}
+	mcpCfg, _, toolsCleanup, err := setupToolsFor(self, w.scratch(), req)
+	if err != nil {
+		return fmt.Errorf("warm session: %w", err)
+	}
+
 	args := []string{"--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
+	if fs["--include-partial-messages"] {
+		args = append(args, "--include-partial-messages")
+	}
 	switch {
 	case fs["--system-prompt"]:
-		args = append(args, "--system-prompt", system)
+		args = append(args, "--system-prompt", req.System)
 	case fs["--append-system-prompt"]:
-		args = append(args, "--append-system-prompt", system)
+		args = append(args, "--append-system-prompt", req.System)
 	default:
+		toolsCleanup()
 		return errors.New("claude CLI lacks --system-prompt/--append-system-prompt")
 	}
 	if !fs["--tools"] || !fs["--strict-mcp-config"] {
+		toolsCleanup()
 		return errors.New("claude CLI lacks load-bearing --tools/--strict-mcp-config flags")
 	}
 	args = append(args, "--tools", "", "--strict-mcp-config")
-	if model != "" && fs["--model"] {
-		args = append(args, "--model", model)
+	if mcpCfg != "" {
+		if !fs["--mcp-config"] {
+			toolsCleanup()
+			return errors.New("claude CLI lacks --mcp-config; tools unavailable")
+		}
+		args = append(args, "--mcp-config", mcpCfg)
+		if fs["--allowedTools"] || fs["--allowed-tools"] {
+			args = append(args, "--allowedTools", strings.Join(tools.AllowedToolFlags(req.Tools), ","))
+		}
+	}
+	if req.Model != "" && fs["--model"] {
+		args = append(args, "--model", req.Model)
 	}
 	// The process outlives any single turn's context, so it is built with a
 	// background context; containProcessGroup's Cancel is invoked manually by
@@ -132,16 +194,21 @@ func (w *WarmSession) start(ctx context.Context, system, model string) error {
 	containProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		toolsCleanup()
 		return err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		toolsCleanup()
 		return err
 	}
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
+		toolsCleanup()
 		return err
 	}
+	w.toolsCleanup = toolsCleanup
+	w.toolsKey = toolsKey(req.Tools)
 	lines := make(chan string, 64)
 	go func() {
 		sc := bufio.NewScanner(stdout)
@@ -155,7 +222,7 @@ func (w *WarmSession) start(ctx context.Context, system, model string) error {
 	go func() { werr <- cmd.Wait() }()
 
 	w.cmd, w.stdin, w.lines, w.werr = cmd, stdin, lines, werr
-	w.live, w.turns, w.system, w.model = true, 0, system, model
+	w.live, w.turns, w.system, w.model = true, 0, req.System, req.Model
 	return nil
 }
 
@@ -165,15 +232,16 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	needRestart := !w.live || w.system != req.System || (req.Model != "" && w.model != req.Model) || w.turns >= w.maxTurns()
+	needRestart := !w.live || w.system != req.System || (req.Model != "" && w.model != req.Model) ||
+		w.turns >= w.maxTurns() || w.toolsKey != toolsKey(req.Tools)
 	if needRestart {
 		if w.live {
 			w.killLocked()
 		}
-		if err := w.start(ctx, req.System, req.Model); err != nil {
+		if err := w.start(ctx, req); err != nil {
 			// Warm start failed: fall back to a single non-warm streamed call
 			// rather than surfacing a warm-session-specific error.
-			cold := &ClaudeSubscription{Bin: w.cfg.Bin, WorkDir: w.cfg.WorkDir, Model: req.Model}
+			cold := &ClaudeSubscription{Bin: w.cfg.Bin, WorkDir: w.cfg.WorkDir, Model: req.Model, SelfExe: w.cfg.SelfExe, ScratchDir: w.cfg.ScratchDir}
 			return cold.RunStream(ctx, req, onDelta)
 		}
 	}

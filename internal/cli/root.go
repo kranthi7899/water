@@ -83,6 +83,7 @@ running on the Claude or ChatGPT subscription CLIs you already pay for.`,
 		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(), a.runCmd(), a.orchestrateCmd(), a.buildSiteCmd(),
 		a.diagnoseCmd(), a.dashboardCmd(), a.memoryCmd(), a.personaCmd(), a.experienceCmd(),
 		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(), a.replayCmd(), a.debugCmd(), a.skillsCmd(),
+		a.daemonCmd(), a.auditCmd(), a.askCmd(), a.approveCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root

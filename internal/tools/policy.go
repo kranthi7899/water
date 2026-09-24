@@ -66,6 +66,14 @@ type Policy struct {
 	// holds every role's memory, transcripts, traces and the signing keyring:
 	// a root like "~" must not become a path around per-role isolation.
 	Protected []string `json:"protected,omitempty"`
+
+	// Twin lists the manifest's connector functions exposed as tools for this
+	// call, proxied to the daemon's gate at TwinSocket with TwinToken (a
+	// short-lived, per-turn token; the gate itself decides level, taint,
+	// approval and rate caps, never this process).
+	Twin       []TwinFunction `json:"twin,omitempty"`
+	TwinSocket string         `json:"twin_socket,omitempty"`
+	TwinToken  string         `json:"twin_token,omitempty"`
 }
 
 // FSPolicy is the filesystem grant.
@@ -120,7 +128,7 @@ func (p *Policy) Empty() bool {
 	}
 	fs := p.Filesystem.Mode != "" && p.Filesystem.Mode != "none" && len(p.Filesystem.Roots) > 0
 	sh := p.Shell.Mode != "" && p.Shell.Mode != "none"
-	return !fs && !sh
+	return !fs && !sh && len(p.Twin) == 0
 }
 
 // ToolNames lists the tools this policy exposes, sorted.
@@ -151,6 +159,9 @@ func (p *Policy) ToolNames() []string {
 	if p.BatchActions && (p.Filesystem.Mode == "read-write" || p.Shell.Mode != "" && p.Shell.Mode != "none") {
 		out = append(out, ToolApplyActions)
 	}
+	for _, f := range p.Twin {
+		out = append(out, f.Tool)
+	}
 	sort.Strings(out)
 	return out
 }
@@ -165,6 +176,12 @@ type Decision struct {
 // resolves paths against roots (symlinks and .. included) and never consults
 // the process working directory.
 func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[string]any) {
+	if tf, ok := p.twinByTool(tool); ok {
+		if p.TwinSocket == "" || p.TwinToken == "" {
+			return Decision{false, "twin tool proxy is not configured for this call"}, args
+		}
+		return Decision{true, "proxied to the daemon gate for " + tf.ID}, args
+	}
 	if p.Empty() {
 		return Decision{false, "policy grants nothing"}, args
 	}

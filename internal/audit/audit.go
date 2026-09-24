@@ -6,6 +6,7 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -77,6 +78,14 @@ func (e *BreakError) Error() string {
 // DefaultPath is ~/.water/audit/audit.jsonl.
 func DefaultPath() string { return filepath.Join(config.Home(), "audit", "audit.jsonl") }
 
+// Anchor persists the audit log's last (seq, hash) somewhere other than the
+// log file itself, so a truncated tail can be detected on Open even though
+// the file has no external witness of its own. The store implements this.
+type Anchor interface {
+	LoadAuditAnchor(ctx context.Context) (seq int64, hash string, ok bool, err error)
+	SaveAuditAnchor(ctx context.Context, seq int64, hash string) error
+}
+
 // Log is the single writer for one audit file.
 type Log struct {
 	path   string
@@ -85,12 +94,24 @@ type Log struct {
 	seq    int64
 	last   string
 	now    func() time.Time
+	anchor Anchor
 }
+
+// Option configures Open.
+type Option func(*Log)
+
+// WithAnchor anchors the chain's tail in a is persisted store: Open compares
+// the file's actual tail against the anchor and refuses a mismatch (the file
+// was truncated or replaced out from under the anchor), and every Append
+// updates the anchor before returning.
+func WithAnchor(a Anchor) Option { return func(l *Log) { l.anchor = a } }
 
 // Open takes the writer lock and verifies the existing chain. A log that does
 // not verify is refused rather than extended: appending to a broken chain
-// would launder the break.
-func Open(path string) (*Log, error) {
+// would launder the break. With WithAnchor, a chain that verifies internally
+// but whose tail does not match the anchor (a truncated or replaced file) is
+// refused too.
+func Open(path string, opts ...Option) (*Log, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
@@ -115,7 +136,28 @@ func Open(path string) (*Log, error) {
 		unlock()
 		return nil, err
 	}
-	return &Log{path: path, unlock: unlock, seq: last.Seq, last: last.Hash, now: time.Now}, nil
+	l := &Log{path: path, unlock: unlock, seq: last.Seq, last: last.Hash, now: time.Now}
+	for _, o := range opts {
+		o(l)
+	}
+	if l.anchor != nil {
+		aseq, ahash, ok, err := l.anchor.LoadAuditAnchor(context.Background())
+		if err != nil {
+			unlock()
+			return nil, fmt.Errorf("audit: loading anchor: %w", err)
+		}
+		if ok && (aseq != last.Seq || ahash != last.Hash) {
+			unlock()
+			return nil, &BreakError{int(last.Seq) + 1, fmt.Sprintf("tail does not match the anchored seq=%d hash=%s (truncated or replaced log?)", aseq, ahash)}
+		}
+		if !ok {
+			if err := l.anchor.SaveAuditAnchor(context.Background(), last.Seq, last.Hash); err != nil {
+				unlock()
+				return nil, fmt.Errorf("audit: saving anchor: %w", err)
+			}
+		}
+	}
+	return l, nil
 }
 
 // Path returns the file this log writes.
@@ -175,7 +217,20 @@ func (l *Log) Append(r Record) (Entry, error) {
 	if err != nil {
 		return Entry{}, fmt.Errorf("audit write: %w", err)
 	}
+	// The line is now durable on disk; advance the in-memory chain state
+	// before anything else can go wrong, so a later anchor failure never
+	// leaves this Log computing its next entry against a stale prev_hash.
 	l.seq, l.last = e.Seq, e.Hash
+	if l.anchor != nil {
+		if aerr := l.anchor.SaveAuditAnchor(context.Background(), e.Seq, e.Hash); aerr != nil {
+			// The anchor is what detects tampering with the file later, so a
+			// failure to update it is reported to the caller (the action
+			// this record was for should not be treated as clean) even
+			// though the entry itself is already durable and cannot be
+			// unwritten.
+			return e, fmt.Errorf("audit: anchor write failed after a durable append: %w", aerr)
+		}
+	}
 	return e, nil
 }
 

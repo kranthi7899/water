@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -99,7 +101,15 @@ func (s *Service) Definitions() []Definition {
 	}
 	var out []Definition
 	for _, n := range s.Policy.ToolNames() {
-		out = append(out, all[n])
+		if d, ok := all[n]; ok {
+			out = append(out, d)
+			continue
+		}
+		if tf, ok := s.Policy.twinByTool(n); ok {
+			var schema map[string]any
+			_ = json.Unmarshal(tf.Schema, &schema)
+			out = append(out, Definition{Name: tf.Tool, Description: tf.Description, InputSchema: schema})
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
@@ -115,16 +125,19 @@ func (s *Service) Call(ctx context.Context, tool string, args map[string]any) (s
 	ev.Allowed, ev.Basis = dec.Allowed, dec.Basis
 	var result string
 	var err error
-	if !dec.Allowed {
+	switch {
+	case !dec.Allowed:
 		err = fmt.Errorf("%w: %s", ErrDenied, dec.Basis)
-	} else if tool == ToolApplyActions {
+	case s.isTwinTool(tool):
+		result, err = s.callTwin(ctx, tool, resolved)
+	case tool == ToolApplyActions:
 		result, ev.Allowed, err = s.applyActions(ctx, ev.CallID, args)
 		if !ev.Allowed {
 			ev.Basis = err.Error()
 		} else {
 			ev.Basis += "; approved exact action plan once by user"
 		}
-	} else if s.Policy.RequiresApproval(tool) {
+	case s.Policy.RequiresApproval(tool):
 		allowed, aerr := RequestApproval(ctx, s.Policy.ApprovalSocket, ApprovalRequest{CallID: ev.CallID, Role: s.Policy.Role, Tool: tool, Args: resolved})
 		if aerr != nil {
 			ev.Allowed = false
@@ -138,7 +151,7 @@ func (s *Service) Call(ctx context.Context, tool string, args map[string]any) (s
 			ev.Basis += "; approved once by user"
 			result, err = s.executeWithDeadline(ctx, tool, resolved)
 		}
-	} else {
+	default:
 		result, err = s.executeWithDeadline(ctx, tool, resolved)
 	}
 	s.recordEvent(ev, result, err)
@@ -244,6 +257,54 @@ func (s *Service) applyActions(ctx context.Context, callID string, args map[stri
 		fmt.Fprintf(&out, "action %d: %s\n", i+1, strings.TrimSpace(result))
 	}
 	return out.String(), true, nil
+}
+
+func (s *Service) isTwinTool(tool string) bool {
+	_, ok := s.Policy.twinByTool(tool)
+	return ok
+}
+
+// twinInvokeResponse is what the daemon's POST /v1/tools/invoke returns.
+type twinInvokeResponse struct {
+	Status     string          `json:"status"` // ok | queued | denied
+	Output     json.RawMessage `json:"output,omitempty"`
+	ApprovalID string          `json:"approval_id,omitempty"`
+	Reason     string          `json:"reason,omitempty"`
+}
+
+// callTwin proxies one model-initiated connector call to the daemon's gate
+// over the twin socket. The gate there — not this process — decides level,
+// taint, approvals and rate caps; an A-level call comes back "queued" rather
+// than executing inline.
+func (s *Service) callTwin(ctx context.Context, tool string, args map[string]any) (string, error) {
+	tf, _ := s.Policy.twinByTool(tool)
+	body, err := json.Marshal(map[string]any{"function": tf.ID, "args": args})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://twin/v1/tools/invoke", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.Policy.TwinToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := twinHTTPClient(s.Policy.TwinSocket).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("twin proxy: %w", err)
+	}
+	defer resp.Body.Close()
+	var out twinInvokeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("twin proxy: bad response: %w", err)
+	}
+	switch out.Status {
+	case "ok":
+		return string(out.Output), nil
+	case "queued":
+		return fmt.Sprintf("queued for approval %s", out.ApprovalID), nil
+	default:
+		return "", fmt.Errorf("%w: %s", ErrDenied, out.Reason)
+	}
 }
 
 // NewCallID returns a unique, citeable invocation id.

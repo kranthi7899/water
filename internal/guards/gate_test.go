@@ -345,7 +345,7 @@ func checkSourceInvariants(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Invoke" && rel != "internal/gate/gate.go" {
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Invoke" && rel != "internal/gate/gate.go" && !isGateInvokeCall(n) {
 					t.Errorf("%s: calls Invoke outside the gate at %s", rel, fset.Position(n.Pos()))
 				}
 			case *ast.FuncDecl:
@@ -385,6 +385,28 @@ func checkSourceInvariants(t *testing.T) {
 	if connectorsSeen < 3 {
 		t.Fatalf("found %d connector Invoke implementations; the scan is not seeing the fakes", connectorsSeen)
 	}
+}
+
+// isGateInvokeCall recognises the one shape a legitimate caller of the gate's
+// OWN Invoke method has: Invoke(ctx, gate.Call{...}). A connector's Invoke
+// takes a permit.Permit, never a gate.Call literal, so this cannot mistake
+// one for the other while still letting the daemon (the gate's real caller
+// once it exists outside gate_test.go) call the gate the way it is meant to
+// be called.
+func isGateInvokeCall(n *ast.CallExpr) bool {
+	if len(n.Args) != 2 {
+		return false
+	}
+	lit, ok := n.Args[1].(*ast.CompositeLit)
+	if !ok {
+		return false
+	}
+	sel, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, _ := sel.X.(*ast.Ident)
+	return pkg != nil && pkg.Name == "gate" && sel.Sel.Name == "Call"
 }
 
 func recvName(fn *ast.FuncDecl) string {

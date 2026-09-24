@@ -271,12 +271,7 @@ func (g *Gate) authorize(c Call) (connectors.Connector, connectors.Function, twi
 			return nil, none, "", false, deny("auto mode never performs outward actions (%s is level %s)", c.Function, f.Level)
 		}
 	}
-	needEnvelope := f.Level == twins.A
-	if f.Level == twins.S && c.Taint != Clean {
-		// External content may not drive autonomous writes; it escalates to
-		// the approval path instead.
-		needEnvelope = true
-	}
+	needEnvelope := NeedsEnvelope(f.Level, c.Taint)
 	if needEnvelope && c.EnvelopeID == "" {
 		why := "level A requires an approved envelope"
 		if f.Level == twins.S {
@@ -287,6 +282,16 @@ func (g *Gate) authorize(c Call) (connectors.Connector, connectors.Function, twi
 	return conn, spec, f.Level, needEnvelope, nil
 }
 
+// NeedsEnvelope reports whether a call at level with the given taint must go
+// through an approved envelope rather than executing inline: every A-level
+// call does, and an S-level call does whenever its arguments derive from
+// external content (or taint is unknown). Callers that want to propose an
+// envelope themselves before ever reaching Invoke (the daemon's model-tool
+// bridge) use this to decide that without duplicating gate.authorize.
+func NeedsEnvelope(level twins.Level, taint Taint) bool {
+	return level == twins.A || (level == twins.S && taint != Clean)
+}
+
 func (g *Gate) takeRate(key string, rc *twins.RateCap) bool {
 	if rc == nil {
 		return true
@@ -294,17 +299,35 @@ func (g *Gate) takeRate(key string, rc *twins.RateCap) bool {
 	return g.take(key, rc.Max, time.Duration(rc.Per))
 }
 
-// take records one use of key in a sliding window if the cap allows it.
+// take records one use of key in a sliding window if the cap allows it. When
+// a store is configured, the window is counted there instead of only in
+// memory, so caps survive a daemon restart.
 func (g *Gate) take(key string, max int, per time.Duration) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.cfg.Now()
+	if g.cfg.Store != nil {
+		return g.takeStoreLocked(key, max, per, now)
+	}
 	hits := g.live(key, now, per)
 	if len(hits) >= max {
 		return false
 	}
 	g.rates[key] = append(hits, now)
 	return true
+}
+
+// takeStoreLocked is take's store-backed path. Callers hold g.mu, which
+// serialises it against every other window check in this process; only one
+// daemon process ever holds the store open (the lock file guarantees that),
+// so this is enough to make the check-then-insert atomic in practice.
+func (g *Gate) takeStoreLocked(key string, max int, per time.Duration, now time.Time) bool {
+	ctx := context.Background()
+	n, err := g.cfg.Store.CountHitsSince(ctx, key, now.Add(-per))
+	if err != nil || n >= max {
+		return false
+	}
+	return g.cfg.Store.RecordHit(ctx, key, now) == nil
 }
 
 // ModelCall charges one model call against the manifest's usage cap. P2
@@ -342,6 +365,9 @@ func (g *Gate) takeModel(auto bool, u twins.Usage, window time.Duration) string 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.cfg.Now()
+	if g.cfg.Store != nil {
+		return g.takeModelStoreLocked(auto, u, window, now)
+	}
 	all, autoHits := g.live("model", now, window), g.live("model:auto", now, window)
 	if auto && len(autoHits) >= u.AutoModelCalls {
 		return fmt.Sprintf("auto model-call cap reached (%d per %s)", u.AutoModelCalls, window)
@@ -352,6 +378,36 @@ func (g *Gate) takeModel(auto bool, u twins.Usage, window time.Duration) string 
 	g.rates["model"] = append(all, now)
 	if auto {
 		g.rates["model:auto"] = append(autoHits, now)
+	}
+	return ""
+}
+
+func (g *Gate) takeModelStoreLocked(auto bool, u twins.Usage, window time.Duration, now time.Time) string {
+	ctx := context.Background()
+	since := now.Add(-window)
+	if auto {
+		n, err := g.cfg.Store.CountHitsSince(ctx, "model:auto", since)
+		if err != nil {
+			return "auto model-call cap unavailable"
+		}
+		if n >= u.AutoModelCalls {
+			return fmt.Sprintf("auto model-call cap reached (%d per %s)", u.AutoModelCalls, window)
+		}
+	}
+	n, err := g.cfg.Store.CountHitsSince(ctx, "model", since)
+	if err != nil {
+		return "model-call cap unavailable"
+	}
+	if n >= u.ModelCalls {
+		return fmt.Sprintf("model-call cap reached (%d per %s)", u.ModelCalls, window)
+	}
+	if err := g.cfg.Store.RecordHit(ctx, "model", now); err != nil {
+		return "model-call cap unavailable"
+	}
+	if auto {
+		if err := g.cfg.Store.RecordHit(ctx, "model:auto", now); err != nil {
+			return "auto model-call cap unavailable"
+		}
 	}
 	return ""
 }
