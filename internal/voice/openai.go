@@ -24,28 +24,23 @@ const openAISpeechEndpoint = "https://api.openai.com/v1/audio/speech"
 
 var ErrMeteredVoiceDisabled = errors.New("expressive OpenAI voice is disabled: set voice.allow_metered: true explicitly")
 
-// RoleProfile gives the CEO twin a durable sonic identity without asking a
+// SpeechProfile gives the CEO twin a durable sonic identity without asking a
 // model to invent one. The voice label is a built-in OpenAI voice, not a
 // claim to imitate a real person.
-type RoleProfile struct {
+type SpeechProfile struct {
 	Voice        string
 	Instructions string
 }
 
-// ProfileFor returns the CEO voice profile. Water only ever speaks as "ceo";
-// any other role gets a neutral fallback.
-func ProfileFor(role string) RoleProfile {
-	if role == "ceo" {
-		return RoleProfile{"marin", "Composed, confident and measured. Deliver decisions clearly, with restrained warmth and deliberate pacing."}
-	}
-	return RoleProfile{"marin", "Clear, natural, measured speech."}
+// CEOProfile returns the CEO voice profile, the only one Water speaks with.
+func CEOProfile() SpeechProfile {
+	return SpeechProfile{"marin", "Composed, confident and measured. Deliver decisions clearly, with restrained warmth and deliberate pacing."}
 }
 
 // OpenAIOptions contains no implicit credentials. APIKey is expected to come
 // from OPENAI_API_KEY at the CLI boundary, never Water's model API fallback.
 type OpenAIOptions struct {
 	APIKey       string
-	Role         string
 	Voice        string
 	Model        string
 	AllowMetered bool
@@ -58,7 +53,6 @@ type OpenAIOptions struct {
 // personas, inboxes, tools, or audio input—only completed response text.
 type OpenAI struct {
 	apiKey       string
-	role         string
 	voice        string
 	model        string
 	instructions string
@@ -70,7 +64,7 @@ type OpenAI struct {
 }
 
 func NewOpenAI(o OpenAIOptions) *OpenAI {
-	p := ProfileFor(o.Role)
+	p := CEOProfile()
 	if o.Voice != "" {
 		p.Voice = o.Voice
 	}
@@ -83,7 +77,7 @@ func NewOpenAI(o OpenAIOptions) *OpenAI {
 	if o.HTTPClient == nil {
 		o.HTTPClient = &http.Client{Timeout: 90 * time.Second}
 	}
-	v := &OpenAI{apiKey: o.APIKey, role: o.Role, voice: p.Voice, model: o.Model, instructions: p.Instructions, allowed: o.AllowMetered, endpoint: o.Endpoint, client: o.HTTPClient, player: o.Player, customPlayer: o.Player != nil}
+	v := &OpenAI{apiKey: o.APIKey, voice: p.Voice, model: o.Model, instructions: p.Instructions, allowed: o.AllowMetered, endpoint: o.Endpoint, client: o.HTTPClient, player: o.Player, customPlayer: o.Player != nil}
 	if v.player == nil {
 		v.player = playAudio
 	}

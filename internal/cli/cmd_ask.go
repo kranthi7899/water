@@ -13,7 +13,7 @@ import (
 )
 
 // askCmd streams one turn to stdout. With --voice, it also speaks each
-// "sentence" event through the OS voice provider as it arrives — the free
+// "sentence" event through the configured voice provider as it arrives — the free
 // interim voice path a macOS Shortcut can call before the native client
 // exists.
 func (a *App) askCmd() *cobra.Command {
@@ -27,19 +27,21 @@ func (a *App) askCmd() *cobra.Command {
 				prompt += " " + a
 			}
 			speak := a.flags.voice
-			client, err := newDaemonClient()
-			if err != nil {
-				return exitWith(ExitError, err)
-			}
 			ch := runtime.ChannelCLI
 			var speaker voice.Provider
 			if speak {
+				// Resolve the voice before contacting the daemon so a
+				// misconfigured --voice fails fast as a usage error.
 				ch = runtime.ChannelVoice
-				p, ok := voice.Open("os")
-				if !ok || !p.Available() {
-					return exitWith(ExitUsage, errors.New("--voice requires the OS voice provider to be available"))
+				p, err := a.replySpeaker()
+				if err != nil {
+					return exitWith(ExitUsage, fmt.Errorf("--voice: %w", err))
 				}
 				speaker = p
+			}
+			client, err := newDaemonClient()
+			if err != nil {
+				return exitWith(ExitError, err)
 			}
 			ctx := context.Background()
 			var turnErr error

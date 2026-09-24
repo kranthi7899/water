@@ -42,10 +42,10 @@ func (a *App) runChat(ctx context.Context) error {
 	speak := a.flags.voice
 	var speaker voice.Provider
 	if speak {
-		if p, ok := voice.Open("os"); ok && p.Available() {
+		if p, err := a.replySpeaker(); err == nil {
 			speaker = p
 		} else {
-			fmt.Fprintln(os.Stderr, "voice: OS provider unavailable — continuing without speech")
+			fmt.Fprintf(os.Stderr, "voice: %v — continuing without speech\n", err)
 			speak = false
 		}
 	}

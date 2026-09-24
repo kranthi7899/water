@@ -35,21 +35,18 @@ func TestOSDegradesWithClearMessage(t *testing.T) {
 func TestOSRoleResolvesInstalledVoice(t *testing.T) {
 	installed := []string{"Daniel", "Samantha", "Rishi", "Moira", "Ava (Premium)"}
 	o := &OS{bin: "/usr/bin/say"}
-	o.voice = pickVoice("", OSProfileFor("ceo").Voices, installed)
+	o.voice = pickVoice("", CEOOSProfile().Voices, installed)
 	if o.voice != "Daniel" {
 		t.Fatalf("ceo voice = %q, want Daniel", o.voice)
 	}
-	if v := pickVoice("samantha", OSProfileFor("ceo").Voices, installed); v != "Samantha" {
+	if v := pickVoice("samantha", CEOOSProfile().Voices, installed); v != "Samantha" {
 		t.Fatalf("installed override ignored: %q", v)
 	}
-	if v := pickVoice("marin", OSProfileFor("ceo").Voices, installed); v != "Daniel" {
-		t.Fatalf("uninstalled override must fall back to role default, got %q", v)
+	if v := pickVoice("marin", CEOOSProfile().Voices, installed); v != "Daniel" {
+		t.Fatalf("uninstalled override must fall back to the profile default, got %q", v)
 	}
-	if v := pickVoice("", OSProfileFor("ceo").Voices, nil); v != "" {
+	if v := pickVoice("", CEOOSProfile().Voices, nil); v != "" {
 		t.Fatalf("no installed voices must mean system default, got %q", v)
-	}
-	if v := OSProfileFor("coo").Voices; v != nil {
-		t.Fatalf("non-ceo role should have no voice table, got %v", v)
 	}
 }
 

@@ -37,7 +37,7 @@ func (a *App) voiceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			vp, err := a.voiceProvider(cfg, "ceo")
+			vp, err := a.voiceProvider(cfg)
 			if err != nil {
 				return exitWith(ExitUsage, err)
 			}

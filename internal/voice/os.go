@@ -24,7 +24,7 @@ func init() { Register("os", func() Provider { return NewOS() }) }
 type OS struct {
 	bin   string
 	args  []string
-	voice string                       // resolved per-role voice; empty means the system default
+	voice string                       // resolved CEO voice; empty means the system default
 	rate  int                          // words per minute; 0 means the engine default
 	Look  func(string) (string, error) // exec.LookPath; overridable in tests
 }
@@ -69,8 +69,8 @@ func (o *OS) Absence() string {
 	}
 }
 
-// Speak renders text through the OS TTS binary, in this provider's per-role
-// voice when one was resolved. Markdown is flattened first so the engine does
+// Speak renders text through the OS TTS binary, in the resolved CEO voice
+// when one was resolved. Markdown is flattened first so the engine does
 // not recite asterisks, fences and table pipes.
 func (o *OS) Speak(ctx context.Context, text string) error {
 	if o.bin == "" {

@@ -73,15 +73,6 @@ type VoiceConfig struct {
 	CEOVoice     string `yaml:"ceo_voice"`
 }
 
-// VoiceFor returns the selected voice identifier for a role. Water only ever
-// speaks as "ceo"; any other role gets no override.
-func (c VoiceConfig) VoiceFor(role string) string {
-	if role == "ceo" {
-		return c.CEOVoice
-	}
-	return ""
-}
-
 // APIConfig holds the metered backend's settings. Key is never written to the
 // environment of any subprocess.
 type APIConfig struct {
@@ -245,11 +236,23 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Sync.IntervalMinutes = atoi("sync.interval_minutes")
 	r.Sync.MailIntervalSeconds = atoi("sync.mail_interval_seconds")
 	r.Brief.ReadyAfter = flat["brief.ready_after"]
-	if err != nil {
-		return err
+	if v := r.Brief.ReadyAfter; v != "" && err == nil {
+		// Parsed the same way internal/sync's readyTime does; a bad value
+		// there only logs on every tick and never precomputes the brief.
+		if _, e := time.Parse("15:04", v); e != nil {
+			err = fmt.Errorf("brief.ready_after: %q is not HH:MM (set by %s)", v, r.Provenance["brief.ready_after"])
+		}
 	}
-	return nil
+	return err
 }
+
+// intKeys and boolKeys are the non-string keys (see apply). Save stores these
+// as YAML ints/bools and every other key as a string, so a string value that
+// merely looks numeric or boolean ("0123", "t") is kept verbatim.
+var (
+	intKeys  = map[string]bool{"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true}
+	boolKeys = map[string]bool{"backend.allow_metered": true, "voice.allow_metered": true}
+)
 
 // Flat returns the resolved values as dotted keys (for `water config`).
 func (r *Resolved) Flat() map[string]string {
@@ -337,24 +340,43 @@ func migrate(raw map[string]any) (map[string]any, error) {
 }
 
 // Save writes only the file layer: the given key/values merged into the
-// existing file (or a fresh one). It never persists env/flag values.
+// existing file (or a fresh one). It never persists env/flag values. Values
+// are validated exactly as Load would parse them, and the existing file is
+// read and migrated exactly as Load does, before anything is written; on any
+// error the file is left untouched.
 func Save(set map[string]string) error {
-	p := Path()
-	raw := map[string]any{}
-	if b, err := os.ReadFile(p); err == nil {
-		if err := yaml.Unmarshal(b, &raw); err != nil {
-			return err
-		}
-	}
-	if raw == nil {
-		raw = map[string]any{}
-	}
-	raw["schema"] = CurrentSchema
+	flat := defaults()
+	prov := map[string]string{}
 	for k, v := range set {
-		if _, known := defaults()[k]; !known {
+		if k == "schema" {
+			return errors.New("schema is managed by water, not settable")
+		}
+		if _, known := flat[k]; !known {
 			return fmt.Errorf("unknown config key %q", k)
 		}
-		setNested(raw, strings.Split(k, "."), coerce(v))
+		flat[k], prov[k] = v, LayerFile
+	}
+	if err := (&Resolved{Provenance: prov}).apply(flat); err != nil {
+		return err
+	}
+
+	p := Path()
+	var raw map[string]any
+	b, err := os.ReadFile(p)
+	switch {
+	case err == nil:
+		if err := yaml.Unmarshal(b, &raw); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	// migrate stamps CurrentSchema, and refuses a file newer than this binary.
+	if raw, err = migrate(raw); err != nil {
+		return fmt.Errorf("%s: %w", p, err)
+	}
+	for k, v := range set {
+		setNested(raw, strings.Split(k, "."), typed(k, v))
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -363,7 +385,7 @@ func Save(set map[string]string) error {
 	if err != nil {
 		return err
 	}
-	header := "# water configuration (schema 1). Layers: defaults → this file → WATER_* env → flags.\n"
+	header := fmt.Sprintf("# water configuration (schema %d). Layers: defaults → this file → WATER_* env → flags.\n", CurrentSchema)
 	return os.WriteFile(p, append([]byte(header), out...), 0o600)
 }
 
@@ -380,11 +402,15 @@ func setNested(m map[string]any, path []string, v any) {
 	setNested(child, path[1:], v)
 }
 
-func coerce(s string) any {
-	if n, err := strconv.Atoi(s); err == nil {
+// typed returns the YAML value for key k: an int or bool for the typed keys
+// (already validated by Save), the raw string for everything else.
+func typed(k, s string) any {
+	switch {
+	case intKeys[k]:
+		n, _ := strconv.Atoi(s)
 		return n
-	}
-	if b, err := strconv.ParseBool(s); err == nil {
+	case boolKeys[k]:
+		b, _ := strconv.ParseBool(s)
 		return b
 	}
 	return s

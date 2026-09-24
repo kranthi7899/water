@@ -105,7 +105,7 @@ func (a *App) doctorCmd() *cobra.Command {
 			}
 
 			// Voice.
-			if vp, verr := a.voiceProvider(cfg, "ceo"); verr != nil {
+			if vp, verr := a.voiceProvider(cfg); verr != nil {
 				add("voice", "fail", verr.Error())
 			} else if !vp.Available() {
 				add("voice", "warn", voice.Absence(vp))
