@@ -33,8 +33,12 @@ func speakableFilter(ch runtime.Channel, emit func(runtime.Event)) func(runtime.
 // §11.4 step 7). It owns the turn (turn.OwnerMain) from the moment it
 // routes successfully, and always leaves the turn StateDone before
 // returning.
-func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime.Env, emit func(runtime.Event), fireAck func(), ackTimer Timer, briefCacheMiss bool) {
+func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime.Env, emit func(runtime.Event), fireAck func(), ackTimer Timer, briefCacheMiss bool, rec *routeRecorder) {
+	rec.owner = "main"
+	rec.answeredBy = "main"
+
 	if err := n.turns.Route(id, turn.OwnerMain); err != nil {
+		rec.outcome = "error"
 		emit(runtime.Event{Kind: runtime.EventError, Error: "nervous: " + err.Error()})
 		return
 	}
@@ -43,51 +47,89 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 	// if it hasn't, via the same sync.Once so it's never emitted twice.
 	ackTimer.Stop()
 	fireAck()
-	emitMain := speakableFilter(t.Channel, n.turns.Emitter(id, turn.OwnerMain, emit))
+	n.tier0Breaker.RecordSuccess() // no-op unless a half-open trial is in flight; reaching main is not itself a t0 failure
+	rec.beginTier("main")
+	firstSentenceOnce := false
+	emitMain := speakableFilter(t.Channel, n.turns.Emitter(id, turn.OwnerMain, func(ev runtime.Event) {
+		if !firstSentenceOnce && (ev.Kind == runtime.EventDelta || ev.Kind == runtime.EventSentence) {
+			firstSentenceOnce = true
+			rec.recordFirstSentence(n.cfg.Clock.Now())
+		}
+		emit(ev)
+	}))
 
 	if briefCacheMiss {
 		text, err := runtime.ComputeAndCacheBrief(ctx, env)
+		rec.endTier("main")
 		if err != nil {
+			rec.outcome = "error"
 			emitMain(runtime.Event{Kind: runtime.EventError, Error: err.Error()})
 			_ = n.turns.Done(id, turn.StateDone)
 			return
 		}
+		rec.outcome = successOutcome(ctx)
 		runtime.DeliverText(t.Channel, text, emitMain)
-		n.lintVoiceReply(t.Channel, text)
+		n.lintVoiceReply(t.Channel, text, rec)
 		emitMain(runtime.Event{Kind: runtime.EventDone, Text: text})
 		_ = n.turns.Done(id, turn.StateDone)
 		return
 	}
 
 	if !n.cfg.MainEnabled {
+		rec.endTier("main")
+		rec.outcome = "error"
 		emitMain(runtime.Event{Kind: runtime.EventError, Error: "no tier is available to answer that"})
 		_ = n.turns.Done(id, turn.StateDone)
 		return
 	}
 
-	resp, err := runtime.ModelTurn(ctx, env, runtime.Turn{Channel: t.Channel, Prompt: t.Context + t.Text}, emitMain)
+	prompt := t.Context + t.Text
+	if ring := n.ring.prompt(n.cfg.Clock.Now()); ring != "" {
+		prompt += "\n\n" + ring
+	}
+	resp, err := runtime.ModelTurn(ctx, env, runtime.Turn{Channel: t.Channel, Prompt: prompt}, emitMain)
+	rec.endTier("main")
 	if err != nil {
+		rec.outcome = "error"
 		emitMain(runtime.Event{Kind: runtime.EventError, Error: err.Error()})
 		_ = n.turns.Done(id, turn.StateDone)
 		return
 	}
-	n.lintVoiceReply(t.Channel, resp.Text)
+	rec.outcome = successOutcome(ctx)
+	n.lintVoiceReply(t.Channel, resp.Text, rec)
 	emitMain(runtime.Event{Kind: runtime.EventDone, Text: resp.Text})
 	_ = n.turns.Done(id, turn.StateDone)
 }
 
+// successOutcome reports "cancelled" instead of "answered" when ctx was
+// already done by the time a call returned successfully. A fake or very
+// fast real backend can still hand back a reply after its context was
+// cancelled (nothing forces it to check), but the turn's own protocol-level
+// truth is that it was cancelled, and the route_log row should say so
+// rather than claiming a clean answer.
+func successOutcome(ctx context.Context) string {
+	if ctx.Err() != nil {
+		return "cancelled"
+	}
+	return "answered"
+}
+
 // lintVoiceReply runs speak.Lint over a completed main-path reply's full raw
-// text, on the voice channel only, and hands any warnings to
-// Config.OnVoiceLint. The reply itself is never truncated here (Design
-// §8.4) — Lint only reports, via the "overlength" tag, when it ran long.
-// Storing warnings in a route_log row is R-14's job; this just makes them
-// available.
-func (n *Nervous) lintVoiceReply(ch runtime.Channel, raw string) {
-	if ch != runtime.ChannelVoice || n.cfg.OnVoiceLint == nil {
+// text, on the voice channel only, records any warnings on rec (so they
+// reach the route_log row), and — unchanged from R-13 — still hands them to
+// Config.OnVoiceLint if set. The reply itself is never truncated here
+// (Design §8.4) — Lint only reports, via the "overlength" tag, when it ran
+// long.
+func (n *Nervous) lintVoiceReply(ch runtime.Channel, raw string, rec *routeRecorder) {
+	if ch != runtime.ChannelVoice {
 		return
 	}
 	warnings := speak.Lint(raw, n.cfg.Style.Voice(), n.cfg.Style.MaxChars(string(runtime.ChannelVoice)))
-	if len(warnings) > 0 {
+	if len(warnings) == 0 {
+		return
+	}
+	rec.addWarnings(warnings)
+	if n.cfg.OnVoiceLint != nil {
 		n.cfg.OnVoiceLint(warnings)
 	}
 }

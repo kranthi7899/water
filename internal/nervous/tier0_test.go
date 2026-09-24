@@ -120,13 +120,14 @@ func tier0FixtureRegistry(t *testing.T, files map[string]string) *intents.Regist
 	}
 	fns := intents.Functions{
 		Read: map[string]intents.FunctionSpec{
-			"store.calendar_events": {ID: "store.calendar_events", Args: map[string]slots.Type{"when": slots.TypeDateRange}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
-			"test.alpha_fn":         {ID: "test.alpha_fn", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
-			"test.beta_fn":          {ID: "test.beta_fn", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
-			"test.person_fn":        {ID: "test.person_fn", Args: map[string]slots.Type{"who": slots.TypePerson}, Required: []string{"who"}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
-			"test.delta_fn":         {ID: "test.delta_fn", Args: map[string]slots.Type{"x": slots.TypeCount}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
-			"approvals.pending":     {ID: "approvals.pending", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
-			"store.cached_brief":    {ID: "store.cached_brief", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"store.calendar_events":  {ID: "store.calendar_events", Args: map[string]slots.Type{"when": slots.TypeDateRange}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"test.alpha_fn":          {ID: "test.alpha_fn", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"test.beta_fn":           {ID: "test.beta_fn", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"test.person_fn":         {ID: "test.person_fn", Args: map[string]slots.Type{"who": slots.TypePerson}, Required: []string{"who"}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"test.delta_fn":          {ID: "test.delta_fn", Args: map[string]slots.Type{"x": slots.TypeCount}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"approvals.pending":      {ID: "approvals.pending", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
+			"approvals.bind_pending": {ID: "approvals.bind_pending", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassControl},
+			"store.cached_brief":     {ID: "store.cached_brief", Args: map[string]slots.Type{}, ReadOnly: true, Deterministic: true, Class: intents.ClassLookup},
 		},
 	}
 	fsys := fstest.MapFS{"twins/testtwin/intents/_shared.yaml": {Data: []byte(tier0SharedYAML)}}

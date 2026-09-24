@@ -14,6 +14,7 @@ import (
 	"water/internal/nervous/tmpl"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
+	"water/internal/store"
 )
 
 // Turn is one channel's request into the front door. It carries only the
@@ -49,10 +50,9 @@ type Config struct {
 	Tasks reflex.TaskControl
 
 	// OnVoiceLint receives the main path's speak.Lint warnings for a voice
-	// turn, if any. Storing them in the route_log row is R-14's job; this
-	// hook (mirroring runtime.Env.OnTaint's existing shape) exists now so
-	// R-14 can wire it up without this package changing again. Nil is fine
-	// (no warning is ever silently required to go anywhere).
+	// turn, if any. R-14 both reads these into the route_log row AND still
+	// calls this hook if set, so a later task (e.g. a live status view) can
+	// observe them without going through the store.
 	OnVoiceLint func(warnings []string)
 
 	Tier0Enabled bool
@@ -69,6 +69,20 @@ type Config struct {
 	// from message senders", Risk 14: 180 days, kept local).
 	SenderWindow time.Duration
 	SenderLimit  int
+
+	// Store is the writer *store.Store route_log/intent_state rows go
+	// through. Nil is accepted (route logging is then a no-op) so existing
+	// tests that don't care about it keep working unchanged.
+	Store *store.Store
+	// Breaker configures Tier 0's circuit breaker (Design §11.4/§17).
+	Breaker BreakerConfig
+	// MissWindow bounds the possible-miss detection window (default 60s)
+	// and doubles as the lookback ListRoutes uses to find "the previous row
+	// on this channel".
+	MissWindow time.Duration
+	// Retention bounds how long route_log rows are kept before
+	// pruneRoutesOncePerDay deletes them (default 90 days).
+	Retention time.Duration
 }
 
 // DefaultConfig returns Config with every flag/timing at its documented
@@ -82,6 +96,9 @@ func DefaultConfig() Config {
 		Clock:        realClock{},
 		SenderWindow: 180 * 24 * time.Hour,
 		SenderLimit:  500,
+		Breaker:      DefaultBreakerConfig(),
+		MissWindow:   DefaultMissWindow,
+		Retention:    90 * 24 * time.Hour,
 	}
 }
 
@@ -92,6 +109,13 @@ func DefaultConfig() Config {
 type Nervous struct {
 	cfg   Config
 	turns *turn.Table
+
+	ring         *reflexRing
+	tier0Breaker *Breaker
+	toolTracer   *ToolTracer
+
+	pruneMu      sync.Mutex
+	lastPruneDay string
 }
 
 // New builds a Nervous. Registry and Style are required; everything else
@@ -116,7 +140,34 @@ func New(cfg Config) (*Nervous, error) {
 	if cfg.SenderLimit <= 0 {
 		cfg.SenderLimit = 500
 	}
-	return &Nervous{cfg: cfg, turns: cfg.Turns}, nil
+	if cfg.Breaker == (BreakerConfig{}) {
+		cfg.Breaker = DefaultBreakerConfig()
+	}
+	if cfg.MissWindow <= 0 {
+		cfg.MissWindow = DefaultMissWindow
+	}
+	n := &Nervous{
+		cfg:        cfg,
+		turns:      cfg.Turns,
+		ring:       newReflexRing(),
+		toolTracer: NewToolTracer(),
+	}
+	n.tier0Breaker = NewBreaker(cfg.Breaker, cfg.Clock)
+	return n, nil
+}
+
+// Tier0Breaker exposes Tier 0's breaker state for a later task's health
+// endpoint (Design §11.2's RouterHealth). Not used by anything in this
+// task's own tests beyond confirming it's reachable.
+func (n *Nervous) Tier0Breaker() (BreakerState, string, time.Time) {
+	return n.tier0Breaker.State()
+}
+
+// ToolTracer exposes the tool-call attribution tracer so a later task
+// (R-16's quick-tool call site, R-15's main-path tool bridge) can record
+// uses without this package needing to change again.
+func (n *Nervous) ToolTracer() *ToolTracer {
+	return n.toolTracer
 }
 
 func now(env runtime.Env) time.Time {
@@ -183,15 +234,32 @@ func pendingCount(ctx context.Context, env runtime.Env) int {
 
 // Handle is the one entry point every channel calls (Design §11.4). It
 // never returns an error: every failure becomes an EventError so the
-// caller's stream always ends with either "done" or "error".
+// caller's stream always ends with either "done" or "error". Exactly one
+// route_log row is written per call, from rec.finish, deferred first so it
+// runs last — after Done() has settled the turn's final state, and even if
+// this frame later panics (the recover directly below re-panics once the
+// row is written, rather than swallowing the bug).
 func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func(runtime.Event)) {
 	id := t.TaskID
+	at := now(env)
+	rec := n.newRouteRecorder(id, t.Channel, t.Text, at)
+	defer rec.finish(ctx)
+	defer func() {
+		if p := recover(); p != nil {
+			rec.outcome = "error"
+			rec.escalationReason = "panic"
+			panic(p)
+		}
+	}()
+
 	emitRouter := n.turns.Emitter(id, turn.OwnerRouter, emit)
 
 	if _, err := n.turns.Final("", id, t.Channel); err != nil {
 		// A duplicate or otherwise invalid task id: nothing this package
 		// can recover from sensibly, and the caller (the daemon, later)
 		// is responsible for task-id uniqueness. Answer conservatively.
+		rec.outcome = "error"
+		rec.escalationReason = "duplicate_task_id"
 		emit(runtime.Event{Kind: runtime.EventAck})
 		emit(runtime.Event{Kind: runtime.EventError, Error: "nervous: " + err.Error()})
 		return
@@ -199,7 +267,12 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 	emitRouter(runtime.Event{Kind: runtime.EventAck})
 
 	var ackOnce sync.Once
-	fireAck := func() { ackOnce.Do(func() { n.emitHandoff(t.Channel, emitRouter) }) }
+	fireAck := func() {
+		ackOnce.Do(func() {
+			rec.recordAck(n.cfg.Clock.Now())
+			n.emitHandoff(t.Channel, emitRouter)
+		})
+	}
 	ackTimer := n.cfg.Clock.AfterFunc(n.cfg.AckAfter, fireAck)
 	defer ackTimer.Stop()
 
@@ -213,7 +286,6 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 		_ = n.turns.Done(id, doneOrCancelled(ctx))
 	}()
 
-	at := now(env)
 	reg := n.cfg.Registry()
 	u := tmpl.Normalize(t.Text, wordSet(reg.Shared().SkipWords))
 	pending := pendingCount(ctx, env)
@@ -226,9 +298,11 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 	escReason := elReason
 	var briefCacheMiss bool
 
-	if eligible && n.cfg.Tier0Enabled {
+	if eligible && n.cfg.Tier0Enabled && n.tier0Breaker.Allow() {
+		rec.beginTier("t0")
 		var err error
 		result, escReason, err = TryTier0(ctx, reg, deps, u, pending, at, ents)
+		rec.endTier("t0")
 		if err != nil {
 			if errors.Is(err, reflex.ErrBriefCacheMiss) {
 				// The one deliberate exception to "the quick tiers never
@@ -238,19 +312,29 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 				// cache one instead (Design §11.4 step 7 / Risk 7).
 				briefCacheMiss = true
 				escReason = "brief_cache_miss"
+				n.tier0Breaker.RecordSuccess() // a cache miss is not a Tier 0 malfunction
 			} else {
 				escReason = "handler_error"
+				n.tier0Breaker.RecordFailure(escReason)
 			}
+		} else if result != nil {
+			n.tier0Breaker.RecordSuccess()
 		}
+		// A clean "escalate, no match" outcome (no_match/ambiguous_match/
+		// slot_unresolved/action_word) is not itself a Tier 0 failure —
+		// only an actual handler error counts against the breaker.
+	} else if eligible && n.cfg.Tier0Enabled {
+		escReason = "breaker_open"
 	}
 
+	rec.escalationReason = escReason
+
 	if result != nil {
-		n.answerQuick(id, t, *result, env, emit)
+		n.answerQuick(id, t, *result, env, emit, rec)
 		return
 	}
 
-	n.answerMain(ctx, id, t, env, emit, fireAck, ackTimer, briefCacheMiss)
-	_ = escReason // recorded by a later task's route log (R-14); nothing to do with it yet in R-12
+	n.answerMain(ctx, id, t, env, emit, fireAck, ackTimer, briefCacheMiss, rec)
 }
 
 // answerQuick delivers a Tier 0 (or, once a later task adds it, Tier 1)
@@ -259,8 +343,21 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 // one (a write intent, wired by a later task — Tier 0 as built in R-12
 // never sets ApprovalID itself, but the delivery path already handles it so
 // that task needs no change here).
-func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event)) {
+func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event), rec *routeRecorder) {
+	rec.owner = "quick"
+	rec.answeredBy = "t0" // Tier 1 (R-18) will pass its own tier id once it exists
+	rec.intent = result.Intent
+	// Tier 0 as built (R-11's TryTier0) only ever runs a read intent's
+	// handler — write intents route through a separate proposal path a
+	// later task builds (Design §12) — so every quick answer reaching here
+	// today is intent_kind "read". IntentOrigin ("embedded" vs "learned")
+	// has no meaning yet either: the promotion loop that creates learned
+	// intents doesn't exist until R-22/23.
+	rec.intentKind = "read"
+	rec.outcome = quickOutcome(result)
+
 	if err := n.turns.Route(id, turn.OwnerQuick); err != nil {
+		rec.outcome = "error"
 		emit(runtime.Event{Kind: runtime.EventError, Error: "nervous: " + err.Error()})
 		return
 	}
@@ -286,6 +383,24 @@ func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runti
 	}
 	emitQuick(runtime.Event{Kind: runtime.EventDone, Text: text})
 	_ = n.turns.Done(id, turn.StateDone)
+}
+
+// quickOutcome maps a quick answer's render.Result.Kind to the route_log
+// outcome enum (Design §14). "decision" is bindPendingHandler's shape when
+// exactly one approval is pending (Design §5.2/reflex.go): it has surfaced
+// that envelope for a later binding decision, not decided anything itself
+// yet (deciding is R-21's job), so it's recorded as "proposed" rather than
+// "decided" — the closest existing enum value to "something is now staged
+// for approval," not a claim that anything was approved.
+func quickOutcome(result render.Result) string {
+	switch result.Kind {
+	case "clarify":
+		return "clarified"
+	case "decision":
+		return "proposed"
+	default:
+		return "answered"
+	}
 }
 
 func doneOrCancelled(ctx context.Context) turn.State {
