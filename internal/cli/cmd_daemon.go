@@ -15,7 +15,9 @@ import (
 
 	"water/internal/backend"
 	"water/internal/config"
+	"water/internal/connectors/google/gapi"
 	"water/internal/gateway"
+	watersync "water/internal/sync"
 )
 
 // daemonCmd is the top-level `water daemon` command group.
@@ -86,6 +88,17 @@ func (a *App) runDaemon(ctx context.Context) error {
 	srv := &http.Server{Handler: d.Mux()}
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// The background Google refresh (internal/sync): P2, gate-mediated, skips
+	// quietly if nothing is connected, and stops with the rest of the daemon
+	// because it shares sigCtx.
+	refresher := watersync.New(watersync.Config{
+		Gate: deps.gate, Vault: deps.vault, Service: gapi.Service, Account: gapi.DefaultAccount,
+		Interval: cfg.Sync.Interval(),
+		Logf:     func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) },
+	})
+	go refresher.Run(sigCtx)
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(l) }()
 	select {

@@ -292,6 +292,46 @@ func List[T any, P interface {
 	return list[T, P](ctx, s, cond, args, q.Limit, P(&zero).Table())
 }
 
+// EventsInRange returns events whose start_at falls in [from, to), earliest
+// first. Unlike List (which pages by created_at, newest first), this is what
+// "what's on my calendar" needs: an event ingested long ago that starts
+// today must still show up, even if 500 other records were created more
+// recently.
+func EventsInRange(ctx context.Context, s *Store, from, to time.Time) ([]Event, error) {
+	var probe Event
+	cols := columns(&probe)
+	names := make([]string, len(cols))
+	for i, c := range cols {
+		names[i] = c.name
+	}
+	q := fmt.Sprintf("SELECT %s FROM events WHERE start_at >= ? AND start_at < ? ORDER BY start_at ASC", strings.Join(names, ", "))
+	rows, err := s.db.QueryContext(ctx, q, from.UnixNano(), to.UnixNano())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var rec Event
+		cols := columns(&rec)
+		dests := make([]any, len(cols))
+		fills := make([]func() error, len(cols))
+		for i, c := range cols {
+			dests[i], fills[i] = scanTarget(c.v)
+		}
+		if err := rows.Scan(dests...); err != nil {
+			return nil, err
+		}
+		for _, f := range fills {
+			if err := f(); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
 func list[T any, P interface {
 	*T
 	Record

@@ -1,6 +1,9 @@
 # The CEO twin. A connector function exists for this twin only if it is
-# listed here, at the level stated. The fake_* connectors are in-memory
-# stand-ins that exercise the full gate path until real connectors land.
+# listed here, at the level stated. A3 replaced the in-memory fake_*
+# connectors with the real, read-only Google connectors (internal/connectors/
+# google/{gcal,gmail,gdrive}); the fakes now live only in tests
+# (internal/connectors/fake), which the gate, guards and gateway tests
+# exercise against their own hand-written manifests, not this file.
 id: ceo
 name: CEO twin
 
@@ -16,21 +19,21 @@ models:
   strong: ""
 
 connectors:
-  - name: fake_calendar
+  - name: gcal
     functions:
-      - {name: list_events, level: R}
-      - {name: create_event, level: A, rate: {max: 10, per: 1h}}
-  - name: fake_mail
+      - {name: list_events, level: R, rate: {max: 120, per: 1h}}
+  - name: gmail
     functions:
       - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
-      - {name: draft_reply, level: D}
-      - {name: send_email, level: A, rate: {max: 20, per: 1h}}
-  - name: fake_docs
+      - {name: get_message, level: R, rate: {max: 120, per: 1h}}
+  - name: gdrive
     functions:
-      - {name: read_doc, level: R}
+      - {name: search_files, level: R, rate: {max: 60, per: 1h}}
+      - {name: read_file, level: R, rate: {max: 60, per: 1h}}
 
+# Only functions that read (never draft or act) may run unattended in the
+# background sync (internal/sync); get_message and the Drive functions stay
+# model- or CEO-initiated.
 auto_allowlist:
-  - fake_calendar.list_events
-  - fake_mail.list_messages
-  - fake_mail.draft_reply
-  - fake_docs.read_doc
+  - gcal.list_events
+  - gmail.list_messages

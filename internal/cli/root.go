@@ -79,6 +79,7 @@ subscription you already pay for.`,
 		a.onboardCmd(), a.doctorCmd(), a.statusCmd(), a.chatCmd(),
 		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(),
 		a.daemonCmd(), a.auditCmd(), a.askCmd(), a.approveCmd(),
+		a.connectCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root

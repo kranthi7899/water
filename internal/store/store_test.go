@@ -104,6 +104,43 @@ func TestUpsertIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestEventsInRangeIgnoresCreatedAt is the A3 fast-path fix: an event
+// ingested long ago (an old created_at, from a stale background sync run)
+// that starts today must still be found. Filtering by created_at recency (as
+// the old "500 newest, then filter in Go" approach did) would have missed
+// it once enough other rows existed.
+func TestEventsInRangeIgnoresCreatedAt(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	today := ts(10)
+	old := &Event{
+		Meta:    Meta{Source: "gcal", SourceID: "primary:old", CreatedAt: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)},
+		Title:   "Board sync",
+		StartAt: today,
+		EndAt:   ts(11),
+	}
+	other := &Event{
+		Meta:    Meta{Source: "gcal", SourceID: "primary:other"},
+		Title:   "Next week",
+		StartAt: today.Add(7 * 24 * time.Hour),
+	}
+	if err := s.Upsert(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+	got, err := EventsInRange(ctx, s, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "Board sync" {
+		t.Fatalf("EventsInRange = %+v, want just the old-created, today-starting event", got)
+	}
+}
+
 func TestApprovalTransitionIsCompareAndSet(t *testing.T) {
 	s, _ := openTemp(t)
 	ctx := context.Background()

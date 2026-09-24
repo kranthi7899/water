@@ -17,6 +17,9 @@ import (
 	"water/internal/backend"
 	"water/internal/connectors"
 	"water/internal/connectors/fake"
+	"water/internal/connectors/google/gcal"
+	"water/internal/connectors/google/gdrive"
+	"water/internal/connectors/google/gmail"
 	"water/internal/gate"
 	"water/internal/gate/permit"
 	"water/internal/store"
@@ -151,11 +154,37 @@ func denied(t *testing.T, err error, want string) {
 	}
 }
 
+// TestEmbeddedCEOManifestBuildsAGate checks that the manifest actually
+// shipped in twins/ceo/twin.yaml is loadable and compatible with the real
+// Google connectors' declared levels — the same check gate.New does at
+// daemon startup. It builds no HTTP fixtures and never calls Invoke: gcal,
+// gmail and gdrive would reach real Google without one.
 func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
-	h := newHarness(t, "")
-	res, err := h.g.Invoke(context.Background(), gate.Call{Function: "fake_mail.list_messages", Origin: gate.P0})
-	if err != nil || !res.Untrusted || len(res.Records) != 1 {
-		t.Fatalf("%+v %v", res, err)
+	m, err := twins.Load(water.TwinsFS(), "ceo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := connectors.NewRegistry(gcal.New(), gmail.New(), gdrive.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	log, err := audit.Open(filepath.Join(dir, "audit", "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	q := approvals.NewQueue(st, log)
+	if _, err := gate.New(gate.Config{Manifest: m, Registry: reg, Approvals: q, Audit: log, Vault: vault.NewMemory(), Store: st}); err != nil {
+		t.Fatal(err)
+	}
+	if !m.AutoAllowed("gcal.list_events") || !m.AutoAllowed("gmail.list_messages") {
+		t.Fatal("auto allowlist wrong")
 	}
 }
 

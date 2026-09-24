@@ -11,7 +11,9 @@ import (
 
 	"water/internal/backend"
 	"water/internal/config"
+	"water/internal/connectors/google/gapi"
 	"water/internal/gateway"
+	"water/internal/vault"
 	"water/internal/voice"
 )
 
@@ -83,6 +85,13 @@ func (a *App) doctorCmd() *cobra.Command {
 			} else {
 				add("twin", "ok", fmt.Sprintf("%s: %d function(s) across %d connector(s)", deps.manifest.ID, len(deps.manifest.FunctionIDs()), len(deps.manifest.Connectors)))
 				deps.Close()
+			}
+
+			// Google (Calendar/Gmail/Drive): presence only, no network call.
+			if _, err := vault.Default().Get(gapi.Service, gapi.DefaultAccount); err != nil {
+				add("google", "warn", "not connected; run `water connect google` (see docs/google-setup.md)")
+			} else {
+				add("google", "ok", fmt.Sprintf("connected (%s/%s)", gapi.Service, gapi.DefaultAccount))
 			}
 
 			// The daemon.

@@ -21,68 +21,26 @@ const CurrentSchema = 1
 
 // Config is the typed, fully-resolved configuration.
 type Config struct {
-	Schema        int                 `yaml:"schema"`
-	Backend       BackendConfig       `yaml:"backend"`
-	Memory        MemoryConfig        `yaml:"memory"`
-	Voice         VoiceConfig         `yaml:"voice"`
-	Orchestration OrchestrationConfig `yaml:"orchestration"`
-	Telemetry     TelemetryConfig     `yaml:"telemetry"`
-	API           APIConfig           `yaml:"api"`
-	Sessions      SessionsConfig      `yaml:"sessions"`
-	Tools         ToolsConfig         `yaml:"tools"`
-	Skills        SkillsConfig        `yaml:"skills"`
-	UI            UIConfig            `yaml:"ui"`
-	Onboard       OnboardConfig       `yaml:"onboard"`
+	Schema  int           `yaml:"schema"`
+	Backend BackendConfig `yaml:"backend"`
+	Voice   VoiceConfig   `yaml:"voice"`
+	API     APIConfig     `yaml:"api"`
+	Onboard OnboardConfig `yaml:"onboard"`
+	Sync    SyncConfig    `yaml:"sync"`
 }
 
-// SessionsConfig is transcript retention (Part 4.3): count-based with an age
-// backstop; pinned sessions are exempt.
-type SessionsConfig struct {
-	Keep   int    `yaml:"keep"`
-	MaxAge string `yaml:"max_age"`
+// SyncConfig configures the daemon's background Google refresh
+// (internal/sync).
+type SyncConfig struct {
+	IntervalMinutes int `yaml:"interval_minutes"`
 }
 
-// ToolsConfig enables Water's tool layer for roles whose role.yaml declares a
-// tools block, and names the roots they may read. Roots are never inherited
-// from the working directory (Part 5.2).
-type ToolsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Roots   string `yaml:"roots"` // comma-separated absolute or ~-paths
-}
-
-// SkillsConfig picks the skill selector.
-type SkillsConfig struct {
-	Selector string `yaml:"selector"` // description | keyword
-}
-
-// UIConfig holds interactive-session knobs.
-type UIConfig struct {
-	Theme string `yaml:"theme"` // "" = per-role theme; a name forces one theme
-}
+// Interval is IntervalMinutes as a time.Duration.
+func (c SyncConfig) Interval() time.Duration { return time.Duration(c.IntervalMinutes) * time.Minute }
 
 // OnboardConfig records the last verified round trip.
 type OnboardConfig struct {
 	VerifiedAt string `yaml:"verified_at"`
-}
-
-// RootList splits tools.roots.
-func (c *Config) RootList() []string {
-	var out []string
-	for _, r := range strings.Split(c.Tools.Roots, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			out = append(out, Expand(r))
-		}
-	}
-	return out
-}
-
-// SessionMaxAge parses sessions.max_age (0 = disabled).
-func (c *Config) SessionMaxAge() time.Duration {
-	d, err := time.ParseDuration(c.Sessions.MaxAge)
-	if err != nil {
-		return 0
-	}
-	return d
 }
 
 type BackendConfig struct {
@@ -90,52 +48,21 @@ type BackendConfig struct {
 	AllowMetered bool   `yaml:"allow_metered"`
 }
 
-type MemoryConfig struct {
-	Provider   string `yaml:"provider"`
-	MaxEntries int    `yaml:"max_entries"`
-	MaxBytes   int    `yaml:"max_bytes"`
-}
-
+// VoiceConfig configures the single CEO twin's optional speech output.
 type VoiceConfig struct {
 	Provider     string `yaml:"provider"` // os | openai | noop
 	AllowMetered bool   `yaml:"allow_metered"`
 	Model        string `yaml:"model"`
 	CEOVoice     string `yaml:"ceo_voice"`
-	COOVoice     string `yaml:"coo_voice"`
-	CTOVoice     string `yaml:"cto_voice"`
-	DesignVoice  string `yaml:"design_voice"`
 }
 
-// VoiceFor returns the selected voice identifier for a role. Empty values are
-// intentional: providers then use their own safe profile defaults.
+// VoiceFor returns the selected voice identifier for a role. Water only ever
+// speaks as "ceo"; any other role gets no override.
 func (c VoiceConfig) VoiceFor(role string) string {
-	switch role {
-	case "ceo":
+	if role == "ceo" {
 		return c.CEOVoice
-	case "coo":
-		return c.COOVoice
-	case "cto":
-		return c.CTOVoice
-	case "design":
-		return c.DesignVoice
-	default:
-		return ""
 	}
-}
-
-type OrchestrationConfig struct {
-	Router        string `yaml:"router"`
-	MaxParallel   int    `yaml:"max_parallel"`
-	Timeout       string `yaml:"timeout"`        // whole-run ceiling
-	CallTimeout   string `yaml:"call_timeout"`   // one model call
-	MaxSteps      int    `yaml:"max_steps"`      // hard step budget per run
-	MaxRounds     int    `yaml:"max_rounds"`     // COO assignment rounds (depth cap)
-	Checkpointer  string `yaml:"checkpointer"`   // file | noop
-	CheckpointDir string `yaml:"checkpoint_dir"` // where run snapshots live
-}
-
-type TelemetryConfig struct {
-	TraceDir string `yaml:"trace_dir"`
+	return ""
 }
 
 // APIConfig holds the metered backend's settings. Key is never written to the
@@ -143,24 +70,6 @@ type TelemetryConfig struct {
 type APIConfig struct {
 	Key   string `yaml:"key,omitempty"`
 	Model string `yaml:"model,omitempty"`
-}
-
-// TimeoutDuration parses orchestration.timeout (the whole-run ceiling).
-func (c *Config) TimeoutDuration() time.Duration {
-	d, err := time.ParseDuration(c.Orchestration.Timeout)
-	if err != nil {
-		return 20 * time.Minute
-	}
-	return d
-}
-
-// CallTimeoutDuration parses orchestration.call_timeout (one model call).
-func (c *Config) CallTimeoutDuration() time.Duration {
-	d, err := time.ParseDuration(c.Orchestration.CallTimeout)
-	if err != nil {
-		return 4 * time.Minute
-	}
-	return d
 }
 
 // Layer names, in precedence order.
@@ -191,38 +100,47 @@ func Keys() []string {
 
 func defaults() map[string]string {
 	return map[string]string{
-		"schema":                       strconv.Itoa(CurrentSchema),
-		"backend.preferred":            "auto",
-		"backend.allow_metered":        "false",
-		"memory.provider":              "markdown",
-		"memory.max_entries":           "200",
-		"memory.max_bytes":             "32768",
-		"voice.provider":               "os",
-		"voice.allow_metered":          "false",
-		"voice.model":                  "gpt-4o-mini-tts",
-		"voice.ceo_voice":              "",
-		"voice.coo_voice":              "",
-		"voice.cto_voice":              "",
-		"voice.design_voice":           "",
-		"orchestration.router":         "hierarchy",
-		"orchestration.max_parallel":   "4",
-		"orchestration.timeout":        "20m",
-		"orchestration.call_timeout":   "4m",
-		"orchestration.max_steps":      "24",
-		"orchestration.max_rounds":     "2",
-		"orchestration.checkpointer":   "file",
-		"orchestration.checkpoint_dir": filepath.Join(Home(), "checkpoints"),
-		"telemetry.trace_dir":          filepath.Join(Home(), "traces"),
-		"api.key":                      "",
-		"api.model":                    "",
-		"sessions.keep":                "30",
-		"sessions.max_age":             "2160h",
-		"tools.enabled":                "false",
-		"tools.roots":                  "",
-		"skills.selector":              "description",
-		"ui.theme":                     "",
-		"onboard.verified_at":          "",
+		"schema":                strconv.Itoa(CurrentSchema),
+		"backend.preferred":     "auto",
+		"backend.allow_metered": "false",
+		"voice.provider":        "os",
+		"voice.allow_metered":   "false",
+		"voice.model":           "gpt-4o-mini-tts",
+		"voice.ceo_voice":       "",
+		"api.key":               "",
+		"api.model":             "",
+		"onboard.verified_at":   "",
+		"sync.interval_minutes": "10",
 	}
+}
+
+// retiredPrefixes and retiredKeys name config sections and keys removed after
+// the council-to-single-twin rebuild (orchestration, per-role sessions/tools/
+// skills/ui/telemetry/memory knobs, and the COO/CTO/design voices). An old
+// config.yaml that still sets them must keep loading, so Load ignores them
+// instead of failing with "unknown key"; it still rejects anything else it
+// doesn't recognize. There is no schema bump: nothing about the resolved
+// shape of a *current* key changed, only which keys still exist.
+var retiredPrefixes = []string{
+	"orchestration.", "sessions.", "tools.", "skills.", "ui.", "telemetry.", "memory.",
+}
+
+var retiredKeys = map[string]bool{
+	"voice.coo_voice":    true,
+	"voice.cto_voice":    true,
+	"voice.design_voice": true,
+}
+
+func retired(key string) bool {
+	if retiredKeys[key] {
+		return true
+	}
+	for _, p := range retiredPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Load resolves configuration. flags are dotted-key overrides supplied by the
@@ -247,6 +165,9 @@ func Load(flags map[string]string) (*Resolved, error) {
 		}
 		for k, v := range flatten("", raw) {
 			if _, known := flat[k]; !known {
+				if retired(k) {
+					continue
+				}
 				return nil, fmt.Errorf("%s: unknown key %q", res.FilePath, k)
 			}
 			flat[k], prov[k] = v, LayerFile
@@ -295,47 +216,16 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Schema = atoi("schema")
 	r.Backend.Preferred = flat["backend.preferred"]
 	r.Backend.AllowMetered = abool("backend.allow_metered")
-	r.Memory.Provider = flat["memory.provider"]
-	r.Memory.MaxEntries = atoi("memory.max_entries")
-	r.Memory.MaxBytes = atoi("memory.max_bytes")
 	r.Voice.Provider = flat["voice.provider"]
 	r.Voice.AllowMetered = abool("voice.allow_metered")
 	r.Voice.Model = flat["voice.model"]
 	r.Voice.CEOVoice = flat["voice.ceo_voice"]
-	r.Voice.COOVoice = flat["voice.coo_voice"]
-	r.Voice.CTOVoice = flat["voice.cto_voice"]
-	r.Voice.DesignVoice = flat["voice.design_voice"]
-	r.Orchestration.Router = flat["orchestration.router"]
-	r.Orchestration.MaxParallel = atoi("orchestration.max_parallel")
-	r.Orchestration.Timeout = flat["orchestration.timeout"]
-	r.Orchestration.CallTimeout = flat["orchestration.call_timeout"]
-	r.Orchestration.MaxSteps = atoi("orchestration.max_steps")
-	r.Orchestration.MaxRounds = atoi("orchestration.max_rounds")
-	r.Orchestration.Checkpointer = flat["orchestration.checkpointer"]
-	r.Orchestration.CheckpointDir = Expand(flat["orchestration.checkpoint_dir"])
-	r.Telemetry.TraceDir = Expand(flat["telemetry.trace_dir"])
 	r.API.Key = flat["api.key"]
 	r.API.Model = flat["api.model"]
-	r.Sessions.Keep = atoi("sessions.keep")
-	r.Sessions.MaxAge = flat["sessions.max_age"]
-	r.Tools.Enabled = abool("tools.enabled")
-	r.Tools.Roots = flat["tools.roots"]
-	r.Skills.Selector = flat["skills.selector"]
-	r.UI.Theme = flat["ui.theme"]
 	r.Onboard.VerifiedAt = flat["onboard.verified_at"]
+	r.Sync.IntervalMinutes = atoi("sync.interval_minutes")
 	if err != nil {
 		return err
-	}
-	if _, e := time.ParseDuration(r.Orchestration.Timeout); e != nil {
-		return fmt.Errorf("orchestration.timeout: %q is not a duration", r.Orchestration.Timeout)
-	}
-	if _, e := time.ParseDuration(r.Orchestration.CallTimeout); e != nil {
-		return fmt.Errorf("orchestration.call_timeout: %q is not a duration", r.Orchestration.CallTimeout)
-	}
-	if r.Sessions.MaxAge != "" && r.Sessions.MaxAge != "0" {
-		if _, e := time.ParseDuration(r.Sessions.MaxAge); e != nil {
-			return fmt.Errorf("sessions.max_age: %q is not a duration", r.Sessions.MaxAge)
-		}
 	}
 	return nil
 }
@@ -343,37 +233,17 @@ func (r *Resolved) apply(flat map[string]string) error {
 // Flat returns the resolved values as dotted keys (for `water config`).
 func (r *Resolved) Flat() map[string]string {
 	return map[string]string{
-		"schema":                       strconv.Itoa(r.Schema),
-		"backend.preferred":            r.Backend.Preferred,
-		"backend.allow_metered":        strconv.FormatBool(r.Backend.AllowMetered),
-		"memory.provider":              r.Memory.Provider,
-		"memory.max_entries":           strconv.Itoa(r.Memory.MaxEntries),
-		"memory.max_bytes":             strconv.Itoa(r.Memory.MaxBytes),
-		"voice.provider":               r.Voice.Provider,
-		"voice.allow_metered":          strconv.FormatBool(r.Voice.AllowMetered),
-		"voice.model":                  r.Voice.Model,
-		"voice.ceo_voice":              r.Voice.CEOVoice,
-		"voice.coo_voice":              r.Voice.COOVoice,
-		"voice.cto_voice":              r.Voice.CTOVoice,
-		"voice.design_voice":           r.Voice.DesignVoice,
-		"orchestration.router":         r.Orchestration.Router,
-		"orchestration.max_parallel":   strconv.Itoa(r.Orchestration.MaxParallel),
-		"orchestration.timeout":        r.Orchestration.Timeout,
-		"orchestration.call_timeout":   r.Orchestration.CallTimeout,
-		"orchestration.max_steps":      strconv.Itoa(r.Orchestration.MaxSteps),
-		"orchestration.max_rounds":     strconv.Itoa(r.Orchestration.MaxRounds),
-		"orchestration.checkpointer":   r.Orchestration.Checkpointer,
-		"orchestration.checkpoint_dir": r.Orchestration.CheckpointDir,
-		"telemetry.trace_dir":          r.Telemetry.TraceDir,
-		"api.key":                      mask(r.API.Key),
-		"api.model":                    r.API.Model,
-		"sessions.keep":                strconv.Itoa(r.Sessions.Keep),
-		"sessions.max_age":             r.Sessions.MaxAge,
-		"tools.enabled":                strconv.FormatBool(r.Tools.Enabled),
-		"tools.roots":                  r.Tools.Roots,
-		"skills.selector":              r.Skills.Selector,
-		"ui.theme":                     r.UI.Theme,
-		"onboard.verified_at":          r.Onboard.VerifiedAt,
+		"schema":                strconv.Itoa(r.Schema),
+		"backend.preferred":     r.Backend.Preferred,
+		"backend.allow_metered": strconv.FormatBool(r.Backend.AllowMetered),
+		"voice.provider":        r.Voice.Provider,
+		"voice.allow_metered":   strconv.FormatBool(r.Voice.AllowMetered),
+		"voice.model":           r.Voice.Model,
+		"voice.ceo_voice":       r.Voice.CEOVoice,
+		"api.key":               mask(r.API.Key),
+		"api.model":             r.API.Model,
+		"onboard.verified_at":   r.Onboard.VerifiedAt,
+		"sync.interval_minutes": strconv.Itoa(r.Sync.IntervalMinutes),
 	}
 }
 

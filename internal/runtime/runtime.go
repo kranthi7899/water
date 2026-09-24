@@ -202,20 +202,14 @@ func StateSummary(ctx context.Context, env Env) (summary string, tainted bool) {
 	end := start.Add(24 * time.Hour)
 	var b strings.Builder
 
-	evs, err := store.List[store.Event](ctx, env.Store, store.Query{Limit: 500})
+	todays, err := store.EventsInRange(ctx, env.Store, start, end)
 	if err != nil {
 		fmt.Fprintf(&b, "Today's events: unavailable (%v)\n", err)
 	} else {
-		var todays []store.Event
-		for _, e := range evs {
-			if !e.StartAt.Before(start) && e.StartAt.Before(end) {
-				todays = append(todays, e)
-				tainted = tainted || e.External
-			}
-		}
 		fmt.Fprintf(&b, "Today's events: %d\n", len(todays))
 		for _, e := range todays {
 			fmt.Fprintf(&b, "- %s %s\n", e.StartAt.Local().Format("15:04"), e.Title)
+			tainted = tainted || e.External
 		}
 	}
 

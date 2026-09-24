@@ -104,15 +104,9 @@ func scheduleAnswer(ctx context.Context, env Env, day string) string {
 		start = start.Add(24 * time.Hour)
 	}
 	end := start.Add(24 * time.Hour)
-	evs, err := store.List[store.Event](ctx, env.Store, store.Query{Limit: 500})
+	todays, err := store.EventsInRange(ctx, env.Store, start, end)
 	if err != nil {
 		return "I couldn't read the calendar just now."
-	}
-	var todays []store.Event
-	for _, e := range evs {
-		if !e.StartAt.Before(start) && e.StartAt.Before(end) {
-			todays = append(todays, e)
-		}
 	}
 	if len(todays) == 0 {
 		return fmt.Sprintf("Nothing on the calendar for %s.", day)

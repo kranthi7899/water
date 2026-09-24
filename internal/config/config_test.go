@@ -10,8 +10,8 @@ func TestLayersAndProvenance(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WATER_HOME", home)
 	os.MkdirAll(home, 0o755)
-	os.WriteFile(filepath.Join(home, "config.yaml"), []byte("schema: 1\nbackend:\n  preferred: codex-subscription\nmemory:\n  max_entries: 50\n"), 0o600)
-	t.Setenv("WATER_MEMORY_MAX_ENTRIES", "75")
+	os.WriteFile(filepath.Join(home, "config.yaml"), []byte("schema: 1\nbackend:\n  preferred: codex-subscription\nvoice:\n  model: gpt-4o-mini-tts\n"), 0o600)
+	t.Setenv("WATER_VOICE_MODEL", "custom-model")
 
 	r, err := Load(map[string]string{"backend.allow_metered": "true"})
 	if err != nil {
@@ -19,9 +19,9 @@ func TestLayersAndProvenance(t *testing.T) {
 	}
 	cases := map[string][2]string{
 		"backend.preferred":     {"codex-subscription", LayerFile},
-		"memory.max_entries":    {"75", LayerEnv},
+		"voice.model":           {"custom-model", LayerEnv},
 		"backend.allow_metered": {"true", LayerFlag},
-		"orchestration.router":  {"hierarchy", LayerDefault},
+		"voice.provider":        {"os", LayerDefault},
 	}
 	flat := r.Flat()
 	for k, want := range cases {
@@ -29,7 +29,7 @@ func TestLayersAndProvenance(t *testing.T) {
 			t.Errorf("%s = %q from %s; want %q from %s", k, flat[k], r.Provenance[k], want[0], want[1])
 		}
 	}
-	if r.Memory.MaxEntries != 75 || !r.Backend.AllowMetered {
+	if r.Voice.Model != "custom-model" || !r.Backend.AllowMetered {
 		t.Fatal("typed config not applied")
 	}
 }
@@ -44,6 +44,31 @@ func TestUnknownKeyAndBadSchema(t *testing.T) {
 	os.WriteFile(filepath.Join(home, "config.yaml"), []byte("schema: 99\n"), 0o600)
 	if _, err := Load(nil); err == nil {
 		t.Fatal("newer schema should fail")
+	}
+}
+
+// TestRetiredKeysStillLoad is the council-era config.yaml compatibility case:
+// a file with the removed orchestration/sessions/tools/skills/ui/telemetry/
+// memory blocks and per-role voices must still load, silently dropping them.
+func TestRetiredKeysStillLoad(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WATER_HOME", home)
+	old := "schema: 1\n" +
+		"orchestration:\n  router: hierarchy\n  checkpoint_dir: /tmp/x\n" +
+		"telemetry:\n  trace_dir: /tmp/traces\n" +
+		"sessions:\n  keep: 30\n" +
+		"tools:\n  enabled: true\n" +
+		"skills:\n  selector: keyword\n" +
+		"ui:\n  theme: dark\n" +
+		"memory:\n  provider: markdown\n" +
+		"voice:\n  ceo_voice: marin\n  coo_voice: cedar\n  cto_voice: ash\n  design_voice: coral\n"
+	os.WriteFile(filepath.Join(home, "config.yaml"), []byte(old), 0o600)
+	r, err := Load(nil)
+	if err != nil {
+		t.Fatalf("old config with retired keys should still load: %v", err)
+	}
+	if r.Voice.CEOVoice != "marin" {
+		t.Fatalf("surviving key lost: ceo_voice = %q", r.Voice.CEOVoice)
 	}
 }
 

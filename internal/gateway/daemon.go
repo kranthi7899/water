@@ -288,6 +288,10 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 		return
 	}
+	// The result carries content written by someone else (mail, an invited
+	// event, a shared doc): every later call this session makes must be
+	// treated as tainted too, per escalateTaint's doc comment.
+	d.escalateTaint(res.Untrusted)
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
 }
 

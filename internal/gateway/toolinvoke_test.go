@@ -133,6 +133,29 @@ func TestCleanSLevelCallRunsAutonomously(t *testing.T) {
 	}
 }
 
+// TestExternalToolResultEscalatesSessionTaint is the A3 taint fix: a model
+// tool call whose result is Untrusted (fake_mail.list_messages is External)
+// must escalate the daemon's stable session token to tainted, so a later
+// call in the same warm session is authorized as tainted even though this
+// one call itself was requested clean.
+func TestExternalToolResultEscalatesSessionTaint(t *testing.T) {
+	h := newHarness(t)
+	tok := h.d.stableSessionToken()
+	if ta, ok := h.d.lookupTurnToken(tok); !ok || ta.Taint != gate.Clean {
+		t.Fatalf("expected a fresh session token to start clean, got %+v ok=%v", ta, ok)
+	}
+
+	out := h.invokeAsModel(t, gate.P0, gate.Clean, "fake_mail.list_messages", nil)
+	if out["status"] != "ok" {
+		t.Fatalf("out = %+v, want status=ok", out)
+	}
+
+	ta, ok := h.d.lookupTurnToken(tok)
+	if !ok || ta.Taint != gate.Tainted {
+		t.Fatalf("an External tool result did not escalate the session token's taint: %+v ok=%v", ta, ok)
+	}
+}
+
 func TestExpiredTurnTokenIsRejected(t *testing.T) {
 	h := newHarness(t)
 	tok := h.d.mintTurnToken(gate.P0, gate.Clean, -time.Second) // already expired

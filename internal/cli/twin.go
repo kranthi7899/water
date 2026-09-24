@@ -7,16 +7,16 @@ import (
 	"water/internal/approvals"
 	"water/internal/audit"
 	"water/internal/connectors"
-	"water/internal/connectors/fake"
+	"water/internal/connectors/google/gcal"
+	"water/internal/connectors/google/gdrive"
+	"water/internal/connectors/google/gmail"
 	"water/internal/gate"
 	"water/internal/store"
 	"water/internal/twins"
 	"water/internal/vault"
 )
 
-// twinDeps bundles what the CEO twin's daemon needs to run. A2 wires the
-// fake_* connectors (the only ones that exist so far); A3 replaces them with
-// real ones without changing this shape or anything that depends on it.
+// twinDeps bundles what the CEO twin's daemon needs to run.
 type twinDeps struct {
 	manifest  *twins.Manifest
 	store     *store.Store
@@ -45,8 +45,11 @@ func loadCEORoleMD() string {
 
 // buildCEORegistry constructs the connector registry the CEO twin's manifest
 // is checked against. Every function twin.yaml lists must be provided here.
+// gcal, gmail and gdrive all read one shared water.google/ceo Keychain
+// credential (see internal/connectors/google/gapi); `water connect google`
+// writes it.
 func buildCEORegistry() (*connectors.Registry, error) {
-	return connectors.NewRegistry(fake.NewCalendar(), fake.NewMail(), fake.NewDocs())
+	return connectors.NewRegistry(gcal.New(), gmail.New(), gdrive.New())
 }
 
 // buildTwinDeps opens the store and the anchored, hash-chained audit log at

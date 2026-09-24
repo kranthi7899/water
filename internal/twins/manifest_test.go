@@ -14,14 +14,17 @@ func TestEmbeddedCEOManifestLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f, ok := m.Function("fake_mail.send_email")
-	if !ok || f.Level != twins.A || f.Rate == nil || time.Duration(f.Rate.Per) != time.Hour {
-		t.Fatalf("send_email: %+v %v", f, ok)
+	f, ok := m.Function("gmail.get_message")
+	if !ok || f.Level != twins.R || f.Rate == nil || time.Duration(f.Rate.Per) != time.Hour {
+		t.Fatalf("get_message: %+v %v", f, ok)
 	}
-	if !m.AutoAllowed("fake_mail.draft_reply") || m.AutoAllowed("fake_mail.send_email") {
+	if !m.AutoAllowed("gcal.list_events") || !m.AutoAllowed("gmail.list_messages") {
 		t.Fatal("auto allowlist wrong")
 	}
-	if _, ok := m.Function("fake_mail.delete_everything"); ok {
+	if m.AutoAllowed("gmail.get_message") || m.AutoAllowed("gdrive.read_file") {
+		t.Fatal("only the two read-and-summarize functions belong on the auto allowlist")
+	}
+	if _, ok := m.Function("gmail.delete_everything"); ok {
 		t.Fatal("unlisted function resolved")
 	}
 }
