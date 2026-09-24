@@ -1,6 +1,6 @@
 # Evolution plan: council to CEO twin
 
-Status: **Step 0 done (2026-09-23). Next: Slice A1.** Context: `docs/CONTEXT.md`.
+Status: **A1 done (2026-09-23). Next: Slice A2.** Context: `docs/CONTEXT.md`.
 
 ## Constraints decided with the owner
 - **Zero metered spend.** Model calls go through the Claude subscription (`claude` CLI) only. Voice is free and on-device: Apple `SFSpeechRecognizer` (on-device recognition) and `AVSpeechSynthesizer` / `say`. Twilio, the X API and paid speech services are deferred.
@@ -63,3 +63,17 @@ Every phase must pass vet, test and a `CGO_ENABLED=0` build.
 
 ## Log
 - 2026-09-23: Step 0 done. Reasoning-layer work committed on `feat/build-site`, branch `feat/ceo-twin` created, and CONTEXT.md, CLAUDE.md and this plan written.
+- 2026-09-23: **A1 done.** New packages: `store`, `audit`, `canon`, `twins` (with `twins/ceo/twin.yaml`, embedded), `gate` (+ `gate/permit`, `gate/internal/mint`), `connectors` (+ `connectors/fake`), `approvals`, `vault`. The council code is untouched.
+  - **How the gate is made unbypassable.** A connector's `Invoke(ctx, permit.Permit)` gets its arguments and credential only by redeeming the permit (`p.Open()`), and it can do that once. Permits are minted in `internal/gate/internal/mint`, which Go's internal-directory rule lets only `internal/gate/...` import. `gate/permit` re-exports the type, so connectors can accept a permit but cannot make one. The gate also fails any call where the connector returned without redeeming. A guard test checks all of this, and also scans the source to confirm that only the gate imports the mint or calls `Invoke`, and that every connector redeems as its first statement.
+  - **Other choices:**
+    - Taint's zero value is "unknown" and counts as tainted.
+    - A tainted call to an S function escalates to needing an approved envelope. Tainted R and D calls are allowed because nothing leaves.
+    - A manifest may grant a function's declared level or tighten it to A or B, never loosen it. `gate.New` enforces this.
+    - Approvals bind the sha256 of the canonical payload and must also match the action. A mismatched call voids the approval. Claims are compare-and-set, and a stored row whose payload no longer matches its hash is refused.
+    - Every audit write comes before the effect it records, and an audit failure fails the action. An approval that can't be audited is reverted to denied.
+    - `audit.Open` refuses to extend a chain that doesn't verify.
+    - Rate and usage windows are in memory for now, so the A2 daemon holds them.
+    - P2 model calls pause while the persisted subscription status isn't "allowed".
+    - Added one audit kind, `propose`, for a new envelope entering the queue.
+  - **Known limit:** truncating the tail of the audit log isn't detectable without an external anchor for the last hash. Consider one in A2.
+  - **Verify on the Mac:** `WATER_KEYCHAIN_TEST=1 go test ./internal/vault`. It passed during the run, but check it from a normal login session, and check that reads by `/usr/bin/security` never prompt. Secrets must be single-line because they go in on stdin.
