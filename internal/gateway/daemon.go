@@ -159,6 +159,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/approvals/{id}/decision", d.auth(d.handleDecideApproval))
 	mux.Handle("GET /v1/state", d.auth(d.handleState))
 	mux.Handle("GET /v1/decisions", d.auth(d.handleListDecisions))
+	mux.Handle("POST /v1/decisions/{id}/email", d.auth(d.handleEmailDecisionReport))
 	mux.Handle("POST /v1/tasks/{id}/cancel", d.auth(d.handleCancel))
 	mux.Handle("POST /v1/meetings/start", d.auth(d.handleMeetingStart))
 	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))

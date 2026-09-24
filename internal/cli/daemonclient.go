@@ -146,6 +146,37 @@ func (c *daemonClient) Decisions(ctx context.Context) ([]*decisions.Card, error)
 	return cards, nil
 }
 
+// EmailDecisionResult mirrors what POST /v1/decisions/{id}/email answers:
+// either the card was found and a send_message approval was queued for it
+// (Status "queued", ApprovalID set), or it was refused (Status "denied",
+// Reason set) before anything was proposed.
+type EmailDecisionResult struct {
+	Status     string `json:"status"`
+	ApprovalID string `json:"approval_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// EmailDecisionReport asks the daemon to render decision card id as an HTML
+// report (internal/reports, via Card.HTMLReport) and stage it as a
+// gmail.send_message approval, with the report as html_attachment. Nothing
+// is sent until the CEO decides the resulting approval, exactly like any
+// other level-A action (`water approve`).
+func (c *daemonClient) EmailDecisionReport(ctx context.Context, id string, to []string, subject, body string) (EmailDecisionResult, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/decisions/"+id+"/email", map[string]any{"to": to, "subject": subject, "body": body})
+	if err != nil {
+		return EmailDecisionResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return EmailDecisionResult{}, httpError(resp)
+	}
+	var out EmailDecisionResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return EmailDecisionResult{}, err
+	}
+	return out, nil
+}
+
 // DecisionResult mirrors gateway.DecisionResult: the envelope's final state,
 // and — when the answer was yes — whether the action actually ran.
 type DecisionResult struct {
