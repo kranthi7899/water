@@ -76,6 +76,13 @@ type Document struct {
 	Owner      string    `db:"owner"`
 	Excerpt    string    `db:"excerpt"`
 	ModifiedAt time.Time `db:"modified_at"`
+
+	// Content is a read's full text (up to the connector's own size cap)
+	// and Truncated says that cap cut it short. They carry a read_file
+	// result to its caller in memory only: neither has a db tag, so neither
+	// is persisted, and a Document loaded from the store has only Excerpt.
+	Content   string
+	Truncated bool
 }
 
 type Issue struct {

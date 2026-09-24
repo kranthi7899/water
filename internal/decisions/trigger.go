@@ -18,7 +18,10 @@ package decisions
 //     verdict in the store's decision_classifications table
 //     (internal/store/decision_classifications.go, migration 0004) keyed by
 //     the item's own (Source, SourceID). A later sync tick, or a daemon
-//     restart, never re-classifies the same item.
+//     restart, never re-classifies the same item. Two exceptions: a
+//     Fallback verdict (the model's reply was unreadable) is never
+//     persisted and is retried after Triager.FallbackRetry, and
+//     Triager.Forget clears both layers so the item is asked again.
 //
 // A note on attention.go's duplication. This package cannot import
 // internal/runtime to call its private needsAttention directly (it's
@@ -38,6 +41,7 @@ package decisions
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"water/internal/store"
@@ -72,6 +76,11 @@ func (c *StoreCache) Classify(ctx context.Context, item store.Record) (Classific
 	if err != nil {
 		return Classification{}, err
 	}
+	if result.Fallback {
+		// An unreadable reply is not a verdict: don't pin the item to
+		// generic forever (the Triager in front bounds how often it retries).
+		return result, nil
+	}
 	if err := c.Store.SetDecisionClassification(ctx, store.DecisionClassification{
 		Source: m.Source, SourceID: m.SourceID,
 		NeedsDecision: result.NeedsDecision, TypeID: result.TypeID, Confidence: result.Confidence,
@@ -80,6 +89,19 @@ func (c *StoreCache) Classify(ctx context.Context, item store.Record) (Classific
 		return Classification{}, fmt.Errorf("decisions: caching classification: %w", err)
 	}
 	return result, nil
+}
+
+// Forget deletes ref's ("source:source_id") persisted verdict, so the next
+// Classify asks Inner again. It implements Forgetter.
+func (c *StoreCache) Forget(ctx context.Context, ref string) error {
+	if c == nil || c.Store == nil {
+		return nil
+	}
+	source, id, ok := strings.Cut(ref, ":")
+	if !ok || source == "" || id == "" {
+		return fmt.Errorf("decisions: forget: %q is not a source:source_id ref", ref)
+	}
+	return c.Store.DeleteDecisionClassification(ctx, source, id)
 }
 
 // DefaultWindow is how far back Trigger.Run looks for candidate messages
@@ -104,16 +126,34 @@ type Trigger struct {
 	Window time.Duration
 }
 
+// Report is one RunReport pass: the cards that built, and one error per
+// candidate item that could not be classified or built this time (a
+// usage-cap refusal, a backend outage). A skipped item is retried on the
+// next run; it never takes the other items' cards down with it.
+type Report struct {
+	Cards   []*Card
+	Skipped []error
+}
+
 // Run scans messages created since now-Window and, for each the Triager's
 // candidate predicate flags, classifies it (a no-op against either cache
 // once already classified) and builds a Card when the classification says a
-// decision is needed. It returns only the cards built on this call; nothing
-// here persists cards themselves (see the package doc above for why: only
-// the classification verdict is cached, so a rebuilt card always reflects
-// current gate/connector state).
+// decision is needed. It returns the cards built on this call; nothing here
+// persists cards themselves (only the classification verdict is cached, so
+// a rebuilt card always reflects current gate/connector state).
+//
+// A per-item failure is skipped, not fatal: the cards that did build are
+// still returned (use RunReport to see what was skipped). Only failing to
+// list the store at all is an error.
 func (tr *Trigger) Run(ctx context.Context, now time.Time) ([]*Card, error) {
+	rep, err := tr.RunReport(ctx, now)
+	return rep.Cards, err
+}
+
+// RunReport is Run, also reporting each skipped item.
+func (tr *Trigger) RunReport(ctx context.Context, now time.Time) (Report, error) {
 	if tr == nil || tr.Store == nil || tr.Triager == nil || tr.Builder == nil {
-		return nil, fmt.Errorf("decisions: trigger needs a store, a triager and a builder")
+		return Report{}, fmt.Errorf("decisions: trigger needs a store, a triager and a builder")
 	}
 	window := tr.Window
 	if window <= 0 {
@@ -121,23 +161,28 @@ func (tr *Trigger) Run(ctx context.Context, now time.Time) ([]*Card, error) {
 	}
 	msgs, err := store.List[store.Message, *store.Message](ctx, tr.Store, store.Query{Since: now.Add(-window)})
 	if err != nil {
-		return nil, fmt.Errorf("decisions: trigger: listing messages: %w", err)
+		return Report{}, fmt.Errorf("decisions: trigger: listing messages: %w", err)
 	}
-	var cards []*Card
+	var rep Report
 	for i := range msgs {
+		if err := ctx.Err(); err != nil {
+			return rep, err
+		}
 		item := &msgs[i]
 		c, ok, err := tr.Triager.Triage(ctx, item)
 		if err != nil {
-			return nil, fmt.Errorf("decisions: trigger: classifying %s: %w", Ref(item), err)
+			rep.Skipped = append(rep.Skipped, fmt.Errorf("decisions: trigger: classifying %s: %w", Ref(item), err))
+			continue
 		}
 		if !ok || !c.NeedsDecision {
 			continue
 		}
 		card, err := tr.Builder.Build(ctx, item, c)
 		if err != nil {
-			return nil, fmt.Errorf("decisions: trigger: building card for %s: %w", Ref(item), err)
+			rep.Skipped = append(rep.Skipped, fmt.Errorf("decisions: trigger: building card for %s: %w", Ref(item), err))
+			continue
 		}
-		cards = append(cards, card)
+		rep.Cards = append(rep.Cards, card)
 	}
-	return cards, nil
+	return rep, nil
 }

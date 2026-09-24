@@ -60,3 +60,11 @@ func (s *Store) SetDecisionClassification(ctx context.Context, c DecisionClassif
 		c.Source, c.SourceID, needsDecision, c.TypeID, c.Confidence, classifiedAt.UnixNano())
 	return err
 }
+
+// DeleteDecisionClassification removes the cached classification for
+// (source, sourceID), so the next lookup misses and the item is classified
+// afresh. Deleting a row that isn't there is not an error.
+func (s *Store) DeleteDecisionClassification(ctx context.Context, source, sourceID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM decision_classifications WHERE source = ? AND source_id = ?`, source, sourceID)
+	return err
+}

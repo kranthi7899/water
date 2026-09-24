@@ -270,6 +270,8 @@ func (c *Drive) Normalize(function string, raw json.RawMessage) ([]store.Record,
 			MimeType:   f.MimeType,
 			Owner:      ownerName(f.Owners),
 			Excerpt:    excerpt(f.Content),
+			Content:    f.Content,
+			Truncated:  f.Truncated,
 			ModifiedAt: modified.UTC(),
 		}}, nil
 	}

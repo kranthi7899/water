@@ -42,9 +42,11 @@ readiness rule — it never fails silently or invents a number). The sheet is
 expected to be exported as CSV with a header row naming a cash column
 (`cash`, `cash_on_hand`, ...) and a monthly burn column (`burn`,
 `monthly_burn`, ...); `internal://budget_request.compute_runway` reads the
-last row with both columns parseable and computes runway = cash / burn in
-code. A missing, unreadable, or zero-burn sheet yields `missing_info`, not a
-crash or a guessed number.
+last row with both columns parseable from the full export (not the short
+excerpt) and computes runway = cash / burn in code. A missing, unreadable,
+truncated (too large for the connector's content cap), zero-burn,
+negative-cash or non-numeric (`NaN`, `Inf`) sheet yields `missing_info`,
+not a crash or a guessed number.
 
 `comparable_requests` is a keyword search over Drive for similar past asks,
 the same pattern `generic`'s own needs use; it is research, not part of the
@@ -54,7 +56,9 @@ This type is classified, not run on every synced message: the daemon only
 offers an item to `Classify` when the brief's existing "needs attention"
 heuristic (`internal/runtime/brief.go`) already flagged it as worth a human
 look, and each item is classified at most once (cached by its
-`store.Meta` `Source`+`SourceID`, forgotten only if the upstream item is
-later re-ingested with real changes). Classification itself still decides
+`store.Meta` `Source`+`SourceID`). The cached verdict is not tied to the
+item's content: it is cleared only by an explicit `Triager.Forget`, and a
+verdict the model's reply could not be read for is never cached durably
+(it is retried later instead of pinning the item to `generic`). Classification itself still decides
 whether the flagged item is a budget request at all, or something else, or
 nothing needing a decision.

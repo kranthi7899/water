@@ -248,14 +248,14 @@ func TestClassifyFallsBackToGeneric(t *testing.T) {
 		reply string
 		want  Classification
 	}{
-		"confident match":   {`{"needs_decision": true, "type_id": "budget", "confidence": 0.9}`, Classification{true, "budget", 0.9}},
-		"below floor":       {`{"needs_decision": true, "type_id": "budget", "confidence": 0.3}`, Classification{true, GenericID, 0.3}},
-		"unknown type":      {`Sure: {"needs_decision": true, "type_id": "keynote", "confidence": 0.99}`, Classification{true, GenericID, 0.99}},
-		"explicit generic":  {"```json\n{\"needs_decision\": true, \"type_id\": \"generic\", \"confidence\": 0.9}\n```", Classification{true, GenericID, 0.9}},
-		"no decision":       {`{"needs_decision": false, "type_id": "", "confidence": 0.8}`, Classification{false, GenericID, 0.8}},
-		"garbage":           {"I think it's a budget thing", Classification{true, GenericID, 0}},
-		"missing field":     {`{"type_id": "budget", "confidence": 0.9}`, Classification{true, GenericID, 0}},
-		"confidence clamps": {`{"needs_decision": true, "type_id": "budget", "confidence": 7}`, Classification{true, "budget", 1}},
+		"confident match":   {`{"needs_decision": true, "type_id": "budget", "confidence": 0.9}`, Classification{true, "budget", 0.9, false}},
+		"below floor":       {`{"needs_decision": true, "type_id": "budget", "confidence": 0.3}`, Classification{true, GenericID, 0.3, false}},
+		"unknown type":      {`Sure: {"needs_decision": true, "type_id": "keynote", "confidence": 0.99}`, Classification{true, GenericID, 0.99, false}},
+		"explicit generic":  {"```json\n{\"needs_decision\": true, \"type_id\": \"generic\", \"confidence\": 0.9}\n```", Classification{true, GenericID, 0.9, false}},
+		"no decision":       {`{"needs_decision": false, "type_id": "", "confidence": 0.8}`, Classification{false, GenericID, 0.8, false}},
+		"garbage":           {"I think it's a budget thing", Classification{true, GenericID, 0, true}},
+		"missing field":     {`{"type_id": "budget", "confidence": 0.9}`, Classification{true, GenericID, 0, true}},
+		"confidence clamps": {`{"needs_decision": true, "type_id": "budget", "confidence": 7}`, Classification{true, "budget", 1, false}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -524,7 +524,9 @@ func TestTriagerClassifiesOnlyCandidatesOnce(t *testing.T) {
 	if _, hit := tr.Cached(msg("m1", true, "", "")); !hit {
 		t.Fatal("cache is keyed by source identity")
 	}
-	tr.Forget("gmail:m1")
+	if err := tr.Forget(ctx, "gmail:m1"); err != nil {
+		t.Fatal(err)
+	}
 	tr.Triage(ctx, msg("m1", true, "dana@x.com", "Approve the budget?"))
 	if n.Load() != 2 {
 		t.Fatal("Forget must allow a fresh classification")
@@ -568,7 +570,7 @@ func TestPhraserCannotInventNumbersOrHideGaps(t *testing.T) {
 	if len(c.Options) != 2 || c.Recommendation == "" || c.Readiness != Ready {
 		t.Fatalf("sourced prose dropped: %+v", c)
 	}
-	if !strings.Contains(strings.Join(c.Gaps, "|"), "No deadline was found.") || !strings.Contains(strings.Join(c.Gaps, "|"), "Unclear which vendor.") {
+	if !strings.Contains(strings.Join(c.Gaps, "|"), "No deadline could be extracted from the item.") || !strings.Contains(strings.Join(c.Gaps, "|"), "Unclear which vendor.") {
 		t.Fatalf("gaps must only grow: %q", c.Gaps)
 	}
 

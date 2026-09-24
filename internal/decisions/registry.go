@@ -186,9 +186,58 @@ func (t Type) Validate(m *twins.Manifest) error {
 		seen[n.Name] = true
 	}
 	for i, a := range t.StagedActions {
-		if strings.TrimSpace(a) == "" {
-			return fmt.Errorf("%s: staged_actions[%d] is empty", t.ID, i)
+		if err := validateStagedAction(a, m); err != nil {
+			return fmt.Errorf("%s: staged_actions[%d]: %w", t.ID, i, err)
 		}
+	}
+	return nil
+}
+
+// actionRe is the shape of a manifest function id, "connector.function".
+var actionRe = regexp.MustCompile(`^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`)
+
+// plannedActions are the write functions the evolution plan names for the
+// next increment (docs/EVOLUTION_PLAN.md) but no manifest grants yet. A
+// staged action may name one of these before it exists, and is shown "not
+// yet available" until the manifest grants it at level A. Anything else
+// must already be a level-A function in the manifest, so a misspelling
+// fails at load instead of leaving a card silently unactionable forever.
+var plannedActions = map[string]bool{
+	"gmail.draft_message": true,
+	"gmail.send_message":  true,
+	"gcal.create_event":   true,
+	"gcal.move_event":     true,
+}
+
+// validateStagedAction checks one staged action: a well-formed id, on a
+// connector the manifest declares, that is either a level-A function there
+// or a planned one not yet granted.
+func validateStagedAction(a string, m *twins.Manifest) error {
+	if strings.TrimSpace(a) == "" {
+		return fmt.Errorf("is empty")
+	}
+	if !actionRe.MatchString(a) {
+		return fmt.Errorf("%q is not a connector.function id", a)
+	}
+	connector, _, _ := strings.Cut(a, ".")
+	declared := false
+	for _, c := range m.Connectors {
+		if c.Name == connector {
+			declared = true
+			break
+		}
+	}
+	if !declared {
+		return fmt.Errorf("%s: connector %s is not in the %s manifest", a, connector, m.ID)
+	}
+	if f, ok := m.Function(a); ok {
+		if f.Level != twins.A {
+			return fmt.Errorf("%s is level %s; staged actions must be A", a, f.Level)
+		}
+		return nil
+	}
+	if !plannedActions[a] {
+		return fmt.Errorf("%s is neither a function in the %s manifest nor a planned action", a, m.ID)
 	}
 	return nil
 }

@@ -22,8 +22,9 @@ type Prose struct {
 }
 
 // Phraser rewords a card built by code. Whatever it returns is checked:
-// prose carrying a number that is not already in the card's evidence,
-// figures or item is discarded field by field, gaps can be added but never
+// prose carrying a number (in digits or as a word such as "six") that is
+// not already in the card's evidence, figures or item is discarded field by
+// field, gaps can be added but never
 // removed, and a recommendation is kept only on a ready, registered-type
 // card.
 type Phraser interface {
@@ -85,12 +86,34 @@ func (p *ModelPhraser) Phrase(ctx context.Context, c Card, t Type) (Prose, error
 	return out, nil
 }
 
-var numberRe = regexp.MustCompile(`\d[\d,.]*`)
+// numberRe matches a digit run plus any letters glued to it, so a
+// magnitude suffix ("45k", "2bn") is part of the token and "2k" is not
+// accepted just because a bare "2" is in the facts.
+var numberRe = regexp.MustCompile(`\d[\d,.]*[A-Za-z]*`)
 
+// numberWordRe matches a number written as a word. Without it, "two
+// thousand dollars" or "above six months" would carry an invented figure
+// past a check that only looks at digits.
+var numberWordRe = regexp.MustCompile(`(?i)\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen|half|twice|double|triple)\b`)
+
+// numbers returns every number-like token in s: digit runs (commas and a
+// trailing period dropped, a glued suffix kept and lowercased) and number
+// words (lowercased). The check is lexical: a token is accepted if the
+// card's facts contain it anywhere, not only where it means the same thing
+// ("45" in an evidence line about something else still counts as sourced).
+// Telling those apart would need semantic checking this layer does not do.
 func numbers(s string) []string {
 	var out []string
 	for _, n := range numberRe.FindAllString(s, -1) {
-		out = append(out, strings.TrimRight(strings.ReplaceAll(n, ",", ""), "."))
+		i := strings.IndexFunc(n, func(r rune) bool { return (r < '0' || r > '9') && r != ',' && r != '.' })
+		digits, suffix := n, ""
+		if i >= 0 {
+			digits, suffix = n[:i], strings.ToLower(n[i:])
+		}
+		out = append(out, strings.TrimRight(strings.ReplaceAll(digits, ",", ""), ".")+suffix)
+	}
+	for _, w := range numberWordRe.FindAllString(s, -1) {
+		out = append(out, strings.ToLower(w))
 	}
 	return out
 }

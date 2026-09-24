@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"water/internal/gate"
 	"water/internal/store"
@@ -67,7 +70,18 @@ type Builder struct {
 	Gate     Invoker
 	Phraser  Phraser
 	Origin   gate.Origin
+
+	// phrased caches Phraser output by a hash of the code-built card it was
+	// asked to phrase. Every decisions list and every brief rebuilds every
+	// open card, and each phrasing is a charged model call against the
+	// usage cap: an unchanged card reuses its prose instead. A card whose
+	// facts changed hashes differently and is phrased again.
+	mu      sync.Mutex
+	phrased map[string]Prose
 }
+
+// maxPhrased bounds the prose cache; past it the cache is simply reset.
+const maxPhrased = 512
 
 // Build prepares a card for item as type c.TypeID (generic when that id is
 // unknown). It never drops the item: a failing fetch or an unsourced
@@ -155,9 +169,12 @@ func (b *Builder) Build(ctx context.Context, item store.Record, c Classification
 		card.StagedActions = append(card.StagedActions, StagedAction{Function: a, Actionable: actionable(b.Registry.Manifest(), a)})
 	}
 
+	if text, at := deadlineSource(item); text != "" {
+		card.Deadline = extractDeadline(text, at, time.Local)
+	}
 	b.codeProse(card, t, item)
 	if b.Phraser != nil {
-		if p, err := b.Phraser.Phrase(ctx, *card, t); err == nil {
+		if p, ok := b.phrase(ctx, card, t); ok {
 			applyProse(card, p)
 		}
 	}
@@ -166,6 +183,49 @@ func (b *Builder) Build(ctx context.Context, item store.Record, c Classification
 		card.quarantine()
 	}
 	return card, nil
+}
+
+// phrase returns the Phraser's prose for c, from the cache when the same
+// code-built card was phrased before. A failed phrasing is not cached.
+func (b *Builder) phrase(ctx context.Context, c *Card, t Type) (Prose, bool) {
+	key := proseKey(c, t)
+	if key != "" {
+		b.mu.Lock()
+		p, hit := b.phrased[key]
+		b.mu.Unlock()
+		if hit {
+			return p, true
+		}
+	}
+	p, err := b.Phraser.Phrase(ctx, *c, t)
+	if err != nil {
+		return Prose{}, false
+	}
+	if key != "" {
+		b.mu.Lock()
+		if b.phrased == nil || len(b.phrased) >= maxPhrased {
+			b.phrased = map[string]Prose{}
+		}
+		b.phrased[key] = p
+		b.mu.Unlock()
+	}
+	return p, true
+}
+
+// proseKey hashes everything a Phraser sees about a card; "" when the card
+// can't be encoded (then it is simply not cached).
+func proseKey(c *Card, t Type) string {
+	raw, err := json.Marshal(struct {
+		Card        *Card
+		Type        string
+		Title       string
+		DefaultRule string
+	}{c, t.ID, t.Title, t.DefaultRule})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }
 
 // resolve runs every need in order. Connector fetches go through the gate
@@ -311,7 +371,7 @@ func (b *Builder) codeProse(c *Card, t Type, item store.Record) {
 		subject = "an item with no subject"
 	}
 	lead := t.Title + ": " + subject
-	if who := f["sender"]; who != "" {
+	if who := f["sender_display"]; who != "" {
 		lead += " (from " + who + ")"
 	}
 	c.Lead = clip(lead, 160)
@@ -322,6 +382,6 @@ func (b *Builder) codeProse(c *Card, t Type, item store.Record) {
 		c.Question = clip(t.Title+": decide on "+subject+"?", 200)
 	}
 	if c.Deadline == nil {
-		c.Gaps = append(c.Gaps, "No deadline was found.")
+		c.Gaps = append(c.Gaps, "No deadline could be extracted from the item.")
 	}
 }

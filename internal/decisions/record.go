@@ -2,6 +2,8 @@ package decisions
 
 import (
 	"fmt"
+	"net/mail"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -80,34 +82,61 @@ func describe(r store.Record) string {
 	return ""
 }
 
-// fields are the values an args template may substitute.
+// fields are the values an args template may substitute, plus
+// "sender_display" (the raw sender, for code-built prose only; it is not a
+// placeholder a template may use).
 func fields(r store.Record) map[string]string {
 	f := map[string]string{"source_id": ""}
 	if m := Meta(r); m != nil {
 		f["source_id"] = m.SourceID
 	}
-	var subject string
+	var subject, sender string
 	switch v := r.(type) {
 	case *store.Message:
-		f["sender"], f["thread"], subject = v.From, v.Thread, v.Subject
+		sender, f["thread"], subject = v.From, v.Thread, v.Subject
 	case *store.Meeting:
-		f["sender"], subject = v.Organizer, v.Title
+		sender, subject = v.Organizer, v.Title
 	case *store.Event:
-		f["sender"], subject = v.Organizer, v.Title
+		sender, subject = v.Organizer, v.Title
 	case *store.Document:
-		f["sender"], subject = v.Owner, v.Title
+		sender, subject = v.Owner, v.Title
 	case *store.Issue:
 		subject = v.Title
 	case *store.Commit:
-		f["sender"], subject = v.Author, v.Message
+		sender, subject = v.Author, v.Message
 	case *store.Transaction:
 		subject = v.Counterparty
 	case *store.Contact:
-		f["sender"], subject = v.Email, v.Name
+		sender, subject = v.Email, v.Name
 	}
+	f["sender_display"] = sender
+	f["sender"] = senderAddress(sender)
 	f["subject"] = subject
 	f["keywords"] = keywords(subject)
 	return f
+}
+
+// addressRe is the only shape a {sender} value may take: a bare address
+// with no quotes, spaces, parentheses, braces or search operators.
+var addressRe = regexp.MustCompile(`^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+$`)
+
+// senderAddress reduces a raw From/Organizer/Owner value to its bare email
+// address. The header is written by whoever sent the mail: a display name
+// like `"a" OR "invoice"` would otherwise become Gmail search syntax in a
+// "from:{sender}" query, and even an honest "Dana Smith <dana@x.com>" only
+// binds from: to "Dana". Anything that does not reduce to a plain address
+// is "", which fill() reports as missing so the need is skipped, not run
+// with a guessed value.
+func senderAddress(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	a, err := mail.ParseAddress(v)
+	if err != nil || !addressRe.MatchString(a.Address) {
+		return ""
+	}
+	return a.Address
 }
 
 var stopwords = map[string]bool{

@@ -16,6 +16,10 @@ type Classification struct {
 	NeedsDecision bool
 	TypeID        string  // a registered id, or "generic"
 	Confidence    float64 // 0..1, informational — not itself a gate
+	// Fallback marks a verdict the classifier could not actually read (an
+	// unparseable model reply): the item still gets a generic card, but the
+	// verdict is not durably cached, so a later pass classifies it again.
+	Fallback bool
 }
 
 // Classifier says whether an item needs a decision and of which type. A
@@ -58,8 +62,9 @@ func (m *ModelClassifier) floor() float64 {
 // Classify never returns an unregistered type id: an unknown id, a
 // confidence under the floor, or an unreadable reply all become generic.
 // An unreadable reply also counts as needing a decision, so an item the
-// cheap heuristic already flagged is never silently dropped. Only a failed
-// model call is an error.
+// cheap heuristic already flagged is never silently dropped, and is marked
+// Fallback so no cache pins it to generic for good. Only a failed model
+// call is an error.
 func (m *ModelClassifier) Classify(ctx context.Context, item store.Record) (Classification, error) {
 	if m == nil || m.Registry == nil || m.Backend == nil {
 		return Classification{}, errors.New("decisions: classifier needs a registry and a backend")
@@ -93,7 +98,7 @@ func (m *ModelClassifier) Classify(ctx context.Context, item store.Record) (Clas
 		Confidence    float64 `json:"confidence"`
 	}
 	if err := decodeJSONObject(resp.Text, &out); err != nil || out.NeedsDecision == nil {
-		return Classification{NeedsDecision: true, TypeID: GenericID}, nil
+		return Classification{NeedsDecision: true, TypeID: GenericID, Fallback: true}, nil
 	}
 	c := Classification{NeedsDecision: *out.NeedsDecision, TypeID: strings.TrimSpace(out.TypeID), Confidence: min(max(out.Confidence, 0), 1)}
 	if _, ok := m.Registry.Lookup(c.TypeID); !ok || c.Confidence < m.floor() {
@@ -120,14 +125,31 @@ func itemText(r store.Record) string {
 // classified at most once per Triager: results are cached by the item's
 // store identity (Source, SourceID), so a later sync tick re-seeing the
 // same message costs nothing. Failed classifications are not cached, so
-// they are retried on the next tick.
+// they are retried on the next tick. A Fallback verdict (unreadable reply)
+// is cached only until FallbackRetry has passed, then asked again.
 type Triager struct {
 	classifier Classifier
 	candidate  func(store.Record) bool
 
+	// FallbackRetry is how long a Fallback verdict is reused before the
+	// item is classified again; zero means DefaultFallbackRetry.
+	FallbackRetry time.Duration
+	now           func() time.Time
+
 	mu       sync.Mutex
 	cache    map[string]Classification
+	retryAt  map[string]time.Time // only for Fallback entries
 	inFlight map[string]*triageWait
+}
+
+// DefaultFallbackRetry bounds how often one unreadable item costs another
+// classification call: at most once per this interval per process.
+const DefaultFallbackRetry = time.Hour
+
+// Forgetter is implemented by a Classifier with its own cache (StoreCache)
+// so Triager.Forget can clear every layer, not only its in-memory one.
+type Forgetter interface {
+	Forget(ctx context.Context, ref string) error
 }
 
 type triageWait struct {
@@ -142,7 +164,7 @@ func NewTriager(c Classifier, candidate func(store.Record) bool) (*Triager, erro
 	if c == nil || candidate == nil {
 		return nil, errors.New("decisions: triager needs a classifier and a candidate predicate")
 	}
-	return &Triager{classifier: c, candidate: candidate, cache: map[string]Classification{}, inFlight: map[string]*triageWait{}}, nil
+	return &Triager{classifier: c, candidate: candidate, now: time.Now, cache: map[string]Classification{}, retryAt: map[string]time.Time{}, inFlight: map[string]*triageWait{}}, nil
 }
 
 // Triage returns item's classification. ok is false when the item is not a
@@ -156,8 +178,10 @@ func (t *Triager) Triage(ctx context.Context, item store.Record) (c Classificati
 	}
 	t.mu.Lock()
 	if c, hit := t.cache[key]; hit {
-		t.mu.Unlock()
-		return c, true, nil
+		if at, fallback := t.retryAt[key]; !fallback || t.now().Before(at) {
+			t.mu.Unlock()
+			return c, true, nil
+		}
 	}
 	w, running := t.inFlight[key]
 	if !running {
@@ -179,6 +203,14 @@ func (t *Triager) Triage(ctx context.Context, item store.Record) (c Classificati
 	delete(t.inFlight, key)
 	if w.err == nil {
 		t.cache[key] = w.c
+		delete(t.retryAt, key)
+		if w.c.Fallback {
+			retry := t.FallbackRetry
+			if retry <= 0 {
+				retry = DefaultFallbackRetry
+			}
+			t.retryAt[key] = t.now().Add(retry)
+		}
 	}
 	t.mu.Unlock()
 	close(w.done)
@@ -193,10 +225,17 @@ func (t *Triager) Cached(item store.Record) (Classification, bool) {
 	return c, ok
 }
 
-// Forget drops ref ("source:source_id") from the cache, e.g. after the
+// Forget drops ref ("source:source_id") from every cache layer — this
+// Triager's own and, when the classifier is a Forgetter (StoreCache), the
+// durable one — so the next Triage classifies it afresh, e.g. after the
 // upstream item changed enough to deserve a fresh look.
-func (t *Triager) Forget(ref string) {
+func (t *Triager) Forget(ctx context.Context, ref string) error {
 	t.mu.Lock()
 	delete(t.cache, ref)
+	delete(t.retryAt, ref)
 	t.mu.Unlock()
+	if f, ok := t.classifier.(Forgetter); ok {
+		return f.Forget(ctx, ref)
+	}
+	return nil
 }

@@ -2,16 +2,26 @@ package decisions
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"water"
+	"water/internal/connectors/google/gdrive"
 	"water/internal/gate"
 	"water/internal/store"
 	"water/internal/twins"
 )
 
-func budgetSheet(id, excerpt string) *store.Document {
-	return &store.Document{Meta: store.Meta{Source: "gdrive", SourceID: id, External: true}, Title: "Runway", Excerpt: excerpt}
+// budgetSheet is a Drive read_file result as gdrive.Normalize shapes it:
+// the full text in Content, the first 280 runes in Excerpt.
+func budgetSheet(id, content string) *store.Document {
+	ex := []rune(content)
+	if len(ex) > 280 {
+		ex = ex[:280]
+	}
+	return &store.Document{Meta: store.Meta{Source: "gdrive", SourceID: id, External: true}, Title: "Runway", Excerpt: string(ex), Content: content}
 }
 
 func TestComputeRunwayParsesTheLatestRow(t *testing.T) {
@@ -193,5 +203,68 @@ func TestBudgetRequestCardEndToEnd(t *testing.T) {
 	}
 	if _, ok := c2.Defaults["runway_months"]; ok {
 		t.Fatal("no runway figure should reach the card from an unreadable spreadsheet")
+	}
+}
+
+// twelveMonthCSV is a realistic runway export whose rows run past the
+// 280-rune Drive excerpt, with a burn whose digits a cut row would truncate.
+func twelveMonthCSV() string {
+	var b strings.Builder
+	b.WriteString("month,cash_on_hand,monthly_burn\n")
+	for i := 1; i <= 12; i++ {
+		fmt.Fprintf(&b, "2026-%02d,%d,45000\n", i, 900000-45000*i)
+	}
+	return b.String()
+}
+
+func gdriveReadFile(t *testing.T, content string, truncated bool) store.Record {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"id": "sheet1", "name": "Runway", "mimeType": "application/vnd.google-apps.spreadsheet", "content": content, "truncated": truncated})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs, err := (&gdrive.Drive{}).Normalize("read_file", raw)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("normalize: %v %+v", err, recs)
+	}
+	return recs[0]
+}
+
+// TestComputeRunwayReadsTheWholeSheetNotTheExcerpt runs a real 12-month
+// export through the real gdrive normalizer: the runway must come from the
+// last full row, never a row cut in half at the 280-rune excerpt boundary.
+func TestComputeRunwayReadsTheWholeSheetNotTheExcerpt(t *testing.T) {
+	sheet := gdriveReadFile(t, twelveMonthCSV(), false)
+	res, err := computeRunway(context.Background(), ComputeInput{Resolved: map[string]NeedResult{budgetSpreadsheetNeed: {Records: []store.Record{sheet}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Figures["monthly_burn"].Value != 45000.0 || res.Figures["cash_on_hand"].Value != 360000.0 || res.Figures["runway_months"].Value != 8.0 {
+		t.Fatalf("figures: %+v", res.Figures)
+	}
+
+	cut := gdriveReadFile(t, twelveMonthCSV()[:250], true)
+	res, err = computeRunway(context.Background(), ComputeInput{Resolved: map[string]NeedResult{budgetSpreadsheetNeed: {Records: []store.Record{cut}}}})
+	if err != nil || len(res.Figures) != 0 {
+		t.Fatalf("a truncated export has lost its latest months and must be missing_info: %+v %v", res, err)
+	}
+}
+
+func TestParseBudgetCSVRejectsNonFiniteAndNegativeAmounts(t *testing.T) {
+	for name, s := range map[string]string{
+		"nan":           "cash,burn\nNaN,NaN\n",
+		"inf burn":      "cash,burn\n100000,Inf\n",
+		"infinity burn": "cash,burn\n100000,infinity\n",
+		"-inf cash":     "cash,burn\n-Inf,1000\n",
+		"inf cash":      "cash,burn\n+Inf,1000\n",
+		"negative cash": "cash,burn\n$-5000,1000\n",
+		"hex":           "cash,burn\n0x10,0x10\n",
+		"negative burn": "cash,burn\n5000,-1000\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if c, b, n, ok := parseBudgetCSV(s); ok {
+				t.Fatalf("accepted %q: cash %v burn %v rows %d", s, c, b, n)
+			}
+		})
 	}
 }

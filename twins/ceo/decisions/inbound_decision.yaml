@@ -17,7 +17,7 @@ default_rule: >-
   No auto-approval: every inbound decision routes to the CEO with whatever
   sender history and related documents were found.
 staged_actions:
-  - gmail.send_email
+  - gmail.send_message
 severity_weight: 2
 ---
 Stub type for Slice C-base (`docs/slices/C.md` section 5): a valid,

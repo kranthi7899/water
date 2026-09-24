@@ -18,7 +18,7 @@ default_rule: >-
   correspondence history and related documents were found. Investor
   relationships are too high-stakes for a threshold rule.
 staged_actions:
-  - gmail.send_email
+  - gmail.send_message
 severity_weight: 3
 ---
 Stub type for Slice C-base (`docs/slices/C.md` section 5): a valid,
