@@ -1,6 +1,6 @@
 # Evolution plan: council to CEO twin
 
-Status: **A1 done (2026-09-23). Next: Slice A2.** Context: `docs/CONTEXT.md`.
+Status: **A2 done (2026-09-23). Next: Slice A3.** Context: `docs/CONTEXT.md`.
 
 ## Constraints decided with the owner
 - **Zero metered spend.** Model calls go through the Claude subscription (`claude` CLI) only. Voice is free and on-device: Apple `SFSpeechRecognizer` (on-device recognition) and `AVSpeechSynthesizer` / `say`. Twilio, the X API and paid speech services are deferred.
@@ -20,18 +20,24 @@ Status: **A1 done (2026-09-23). Next: Slice A2.** Context: `docs/CONTEXT.md`.
 - There is no daemon, no Keychain code and no connector layer. The only Unix socket is the per-session approval broker.
 
 ## Keep / move / retire
+
+**Amended by the owner, 2026-09-23 (during A2):** the council is **deleted
+outright, not kept dormant**. Water is a single personal agent. The table
+below reflects what actually happened, not the original A1-era plan.
+
 | Existing | Fate |
 |---|---|
-| `orchestrator` executor and checkpointer | Keep as the engine for the pipelines. Retire the hierarchy and fan-out routers. |
-| `agent` (`Assemble`, `call`, `RunTurn`) | Refactor into `internal/runtime`. Delete `ceoNode`/`cooNode`/`specialistNode` and `Consult`. |
-| `backend` | Keep. Add model tiers, `RunStream` and a warm session process. The API backend stays opt-in only. |
-| `tools` (Policy, root confinement, atomic write, approval broker, MCP server, untrusted wrap) | Becomes the basis of `gate` and `approvals`, with access levels R/D/A/S/B. |
-| `trace` | Keep for pipeline runs. It is not the audit log: no hash chain, files are 0644, and errors are dropped. |
-| `memory` | Keep as long-term memory, and add provenance. |
-| `session`, `config`, `auth`, `voice`, `dashboard`, `guards` | Keep. |
-| `agents/coo`, `cto`, `design` | Dormant: `dormant: true` in `role.yaml`, and the loader skips them. |
-| `agents/ceo` persona files | Move to `docs/archive/personas/ceo/`. `twins/ceo/role.md` replaces them. |
-| `orchestrate`, `experience`, `build-site`, `/consult`, `/switch`, `/agents` | Retire. The code stays in git history. |
+| `agents/` (all four roles: souls, experience, reasoning, skills, memory seeds, role.yaml, `.index.json`) | **Deleted**, not archived. The CEO's role — responsibilities and environment, not a personality — lives in `twins/ceo/role.md`. Persona files survive only in git history. |
+| `orchestrator` (executor, checkpointer, both routers, the state graph, `AgentMessage`/outbox) | **Deleted entirely**, including the executor and checkpointer. Pipelines (brief, recap, packets) will be plain Go functions in a later slice, not a state graph. |
+| `agent` (`Assemble`, `call`, `RunTurn`, `Consult`, `ceoNode`/`cooNode`/`specialistNode`) | **Deleted.** `internal/runtime` (built in A2) was written fresh against the twin/gate/store shape and never depended on this package, so nothing needed porting. |
+| `roles`, `persona` (incl. the skills loader), `identity` (role_id/content_hash + the HMAC keyring), `experience`, `diagnose`, `dashboard`, `surface`, `trace` | **Deleted.** The audit log and session/turn events replace `trace`; there is no per-role anything left to register, sign, or diagnose. |
+| `chat`, `editor`, `session` | **Deleted.** Both were reachable only through the deleted `run`/`build-site` commands and did not compile against a council-free tree; `water chat` is now a plain daemon-client REPL (`internal/cli/cmd_chat.go`), and transcript persistence is left for a later slice. |
+| `backend` | Kept. Model tiers, `RunStream`, and a warm session process were added in A2. The API backend stays opt-in only. |
+| `tools` | Trimmed to what the twin uses: the MCP server (now in twin mode, proxying connector calls to the daemon's gate), `WritePolicyFile`/`LoadPolicyFile`, and `ResolveWithinRoots`/`ExpandRoots` (kept for a future connector, unused today). Deleted: the interactive-workspace read/write/run/apply_actions/open_page tools, the `ApprovalBroker` (the daemon's queue replaces it), and the shell sandbox. |
+| `gate`, `approvals`, `audit`, `store`, `connectors`, `vault` (Slice A1) | Kept, extended in A2: rate/usage windows and the audit anchor persist in the store; `water audit verify`/`repair`. |
+| `memory`, `config`, `auth`, `voice`, `guards` | Kept. `memory` is not yet wired into the twin's runtime (a later slice); `config` still carries some now-unused per-role/orchestration knobs (harmless, not cleaned up); `guards` lost the council-only tests and kept/ported the rest (strict MCP config, `--tools ""`, metered-leak/`ScrubbedEnv`, the A1 gate guards). |
+| `theme`, `layout`, `themes/{coo,cto,design}.yaml` | Left in the tree but unwired from any command — dead weight, not deleted, because `internal/layout`'s own tests still exercise all four themes. Candidate for a follow-up cleanup slice. |
+| `run`, `orchestrate`, `build-site`, `diagnose`, `dashboard`, `persona`, `experience`, `skills`, `replay`, `debug dump`, `memory` (CLI) | **Deleted.** `/consult`, `/switch`, `/agents` went with the TUI that had them. |
 
 The new layout follows the tree in CONTEXT.md. Two approved dependencies are added, both pure Go so the binary stays static: `modernc.org/sqlite` and `modelcontextprotocol/go-sdk` (MCP client only). The Keychain is reached through the `/usr/bin/security` CLI behind a `Vault` interface, so it needs no cgo.
 
@@ -77,3 +83,9 @@ Every phase must pass vet, test and a `CGO_ENABLED=0` build.
     - Added one audit kind, `propose`, for a new envelope entering the queue.
   - **Known limit:** truncating the tail of the audit log isn't detectable without an external anchor for the last hash. Consider one in A2.
   - **Verify on the Mac:** `WATER_KEYCHAIN_TEST=1 go test ./internal/vault`. It passed during the run, but check it from a normal login session, and check that reads by `/usr/bin/security` never prompt. Secrets must be single-line because they go in on stdin.
+- 2026-09-23: **Owner decision, mid-A2:** the council is deleted outright, not kept dormant. Water is a single personal agent from here on; there is no persona archive. This replaced Phase 4 of `docs/slices/A2.md` and is reflected in the keep/move/retire table above and in `docs/CONTEXT.md`'s amendment.
+- 2026-09-23: **A2 done.** `water daemon` (HTTP over a 0600 Unix socket, single-instance flock, bearer-token clients) now owns the gate, approvals, audit, store and model sessions; `water chat`, `water ask` and `water approve` are its clients. New: `internal/runtime` (context assembly from `twins/ceo/role.md` + a state summary, a phrase-based zero-model-call fast path for schedule/approvals/brief questions, sentence-by-sentence voice streaming), `internal/gateway` (the daemon itself, plus a Twin extension to `internal/tools` that proxies model-initiated connector calls from an MCP-serve child to the daemon's gate). `internal/backend` gained `RunStream`, `WarmSession` (one persistent `claude` process reused across turns, restarting on crash/system-prompt/model/tool-scope change or after 40 turns) and model tiers from `twin.yaml`. Deciding a pending approval "yes" now executes the action in that same call, exactly once. Gate rate/usage windows and the audit log's tail now persist in the store (`water audit verify`/`repair` round out A1's open items). Then the council was deleted per the owner's decision above: `agents/`, `orchestrator`, `agent`, `roles`, `persona`, `identity`, `experience`, `diagnose`, `dashboard`, `surface`, `trace`, `chat`, `editor`, `session`, and the CLI commands that only served them.
+  - **The stable-token deviation.** The spec sketch implied a token per turn for the model's tool-proxy auth. That cannot work with a warm session: the MCP bridge child a warm process spawns reads its `--mcp-config` policy file once, at its own startup, and then serves every turn in that process's life — so the token baked into it cannot rotate per turn without forcing a process restart on every single turn, which defeats the warm session. A2 instead mints one long-lived, session-scoped proxy token, and escalates its taint (never resets it) the first time any turn's assembled context includes external content. This is the conservative direction to err in given the constraint.
+  - **Verified once by hand against the real `claude` CLI** (never in tests, which use `backend.Fake` or a fake-CLI shell script): streaming deltas and voice-channel sentences, `--include-partial-messages` actually needed adding to the warm session's own args (a bug caught only by this manual check — the automated warm-session tests use a fake CLI that doesn't need the real partial-message shape), a model calling `fake_calendar__list_events` and `fake_calendar__create_event` over MCP, the `create_event` call landing in the approval queue, and approving it executing exactly once. Cold spawn vs. warm reuse measured on this Mac: about 1.47s vs. 0.77s for a trivial turn.
+  - **Left undone / for later slices:** `water memory` has no replacement command and long-term memory is not wired into the runtime yet; transcript persistence for `water chat` (the old per-role `session` package was deleted, not replaced); `theme`/`layout`/three of the four `themes/*.yaml` are dead weight, not deleted; `config` still carries unused per-role/orchestration knobs; the model-tool bridge's "session taken as one unit" taint model should be revisited once P1/P2 scheduling (auto mode) exists and more than one logical conversation can be in flight.
+  - **Verify on the Mac:** `water daemon install` and `launchctl` loading it (unit-tested only as plist rendering); that a second `water daemon` truly refuses to start when the first is running under launchd, not just in-process; time-to-first-token specifically (this run measured whole-turn latency, not first delta) for warm vs. cold.

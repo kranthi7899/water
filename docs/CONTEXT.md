@@ -83,3 +83,23 @@ water/                         # single repo
 ```
 
 Runtime data lives outside the repo in `~/.water/`: the SQLite database, long-term memory files, the audit log, run sockets, and per-twin data directories. Secrets are stored in the macOS Keychain, never in files and never in model context.
+
+## Amendment (2026-09-23)
+
+The owner decided, mid-way through Slice A2, to go further than "keep the
+other roles in the repo but mark them dormant" (above): **the other roles
+are deleted, not kept dormant.** `agents/coo`, `agents/cto`, `agents/design`
+and their skills, and the four roles' persona files generally, are gone from
+the working tree; there is no `docs/archive/personas/` — anything not kept
+survives only in git history. Water is a single personal agent.
+
+Two further consequences of that decision, both already reflected in the
+code and in `docs/EVOLUTION_PLAN.md`'s keep/move/retire table:
+
+- The Go state-graph executor (`internal/orchestrator`'s executor and
+  checkpointer) is removed along with the rest of the council, not kept for
+  pipelines as originally planned. A later slice's pipelines (brief, recap,
+  packets) will be plain Go functions, not a state graph.
+- Twin-to-twin messaging (Slice E) will be designed and built fresh on its
+  own envelope when that slice starts, rather than reusing anything from the
+  deleted `orchestrator.AgentMessage`/outbox.
