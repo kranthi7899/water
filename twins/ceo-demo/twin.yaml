@@ -24,10 +24,14 @@ connectors:
   - name: gcal
     functions:
       - {name: list_events, level: R, rate: {max: 120, per: 1h}}
+      - {name: create_event, level: A, rate: {max: 20, per: 1h}}
+      - {name: move_event, level: A, rate: {max: 20, per: 1h}}
   - name: gmail
     functions:
       - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
       - {name: get_message, level: R, rate: {max: 120, per: 1h}}
+      - {name: draft_message, level: D, rate: {max: 40, per: 1h}}
+      - {name: send_message, level: A, rate: {max: 20, per: 1h}}
   - name: gdrive
     functions:
       - {name: search_files, level: R, rate: {max: 60, per: 1h}}

@@ -79,6 +79,51 @@ func TestReadBackIsFromThePayload(t *testing.T) {
 	}
 }
 
+// TestReadBackSendMessageAndDraftMessage confirms gmail's write functions
+// read back identically to send_email's shape (same payload fields), except
+// draft_message is phrased as drafting, and only send_message's prompt talks
+// about sending.
+func TestReadBackSendMessageAndDraftMessage(t *testing.T) {
+	payload := map[string]any{"to": []any{"dana@acme.com"}, "subject": "Re: Q3 budget", "body": "Sounds good, thanks."}
+	send := ReadBack(Envelope{Action: "gmail.send_message", Recipient: "Dana Lee", Payload: payload})
+	if want := "Send email to Dana Lee <dana@acme.com>, subject 'Re: Q3 budget'. Body: 'Sounds good, thanks.'. Say yes to send or no to cancel."; send != want {
+		t.Fatalf("send_message:\ngot  %q\nwant %q", send, want)
+	}
+	draft := ReadBack(Envelope{Action: "gmail.draft_message", Recipient: "Dana Lee", Payload: payload})
+	if want := "Draft an email to Dana Lee <dana@acme.com>, subject 'Re: Q3 budget'. Body: 'Sounds good, thanks.'. Say yes to create the draft or no to cancel."; draft != want {
+		t.Fatalf("draft_message:\ngot  %q\nwant %q", draft, want)
+	}
+	// html_attachment is not one of the special-cased fields, so it must
+	// still show up under "Also", never silently dropped.
+	withHTML := ReadBack(Envelope{Action: "gmail.send_message", Payload: map[string]any{
+		"to": []any{"a@x.com"}, "subject": "s", "body": "b", "html_attachment": "<p>hi</p>",
+	}})
+	if !strings.Contains(withHTML, "html_attachment") {
+		t.Fatalf("send_message read-back hides html_attachment: %q", withHTML)
+	}
+}
+
+// TestReadBackMoveEvent confirms move_event gets its own polished case (it
+// previously fell through to the generic default), showing every field the
+// approval hash binds.
+func TestReadBackMoveEvent(t *testing.T) {
+	got := ReadBack(Envelope{Action: "gcal.move_event", Payload: map[string]any{
+		"event_id": "e5", "new_start": "2026-10-02T16:00:00-04:00", "new_end": "2026-10-02T16:30:00-04:00",
+	}})
+	want := "Move event e5 to start 2026-10-02T16:00:00-04:00 ending 2026-10-02T16:30:00-04:00. Say yes to move it or no to cancel."
+	if got != want {
+		t.Fatalf("move_event:\ngot  %q\nwant %q", got, want)
+	}
+	// A move_event without new_end (schema requires it, but the read-back
+	// must never assume a key is present) still renders a complete sentence.
+	noEnd := ReadBack(Envelope{Action: "gcal.move_event", Payload: map[string]any{
+		"event_id": "e5", "new_start": "2026-10-02T16:00:00-04:00",
+	}})
+	if !strings.HasPrefix(noEnd, "Move event e5 to start 2026-10-02T16:00:00-04:00.") {
+		t.Fatalf("move_event without new_end: %q", noEnd)
+	}
+}
+
 func TestQueueLifecycleAndMenu(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "water.db"))

@@ -22,14 +22,28 @@ connectors:
   - name: gcal
     functions:
       - {name: list_events, level: R, rate: {max: 120, per: 1h}}
+      - {name: create_event, level: A, rate: {max: 20, per: 1h}}
+      - {name: move_event, level: A, rate: {max: 20, per: 1h}}
   - name: gmail
     functions:
       - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
       - {name: get_message, level: R, rate: {max: 120, per: 1h}}
+      - {name: draft_message, level: D, rate: {max: 40, per: 1h}}
+      - {name: send_message, level: A, rate: {max: 20, per: 1h}}
   - name: gdrive
     functions:
       - {name: search_files, level: R, rate: {max: 60, per: 1h}}
       - {name: read_file, level: R, rate: {max: 60, per: 1h}}
+  # agentmail is a second identity of the gmail connector, pointed at the
+  # agent's own verified mailbox (a distinct vault credential, account
+  # "agent" -- see docs/agent-identity-setup.md), for internal/agentmail's
+  # inbound-triage watcher. Only list_messages is granted: draft_message/
+  # send_message/get_message stay unreachable through this identity no
+  # matter what the underlying connector implements, because the gate
+  # checks this manifest before it ever looks at a connector.
+  - name: agentmail
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
 
 # Only functions that read (never draft or act) may run unattended in the
 # background sync (internal/sync); get_message and the Drive functions stay
@@ -37,3 +51,4 @@ connectors:
 auto_allowlist:
   - gcal.list_events
   - gmail.list_messages
+  - agentmail.list_messages

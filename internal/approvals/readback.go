@@ -40,6 +40,27 @@ func summary(e Envelope, full bool) string {
 		}
 		s = fmt.Sprintf("Send email to %s, subject '%s'. "+body, recipients(e), lim(p["subject"], 80), lim(p["body"], 80))
 		used = []string{"to", "subject", "body"}
+	case "send_message":
+		body := "Body: '%s'."
+		if !full {
+			body = "Body begins: '%s'."
+		}
+		s = fmt.Sprintf("Send email to %s, subject '%s'. "+body, recipients(e), lim(p["subject"], 80), lim(p["body"], 80))
+		used = []string{"to", "subject", "body"}
+	case "draft_message":
+		body := "Body: '%s'."
+		if !full {
+			body = "Body begins: '%s'."
+		}
+		s = fmt.Sprintf("Draft an email to %s, subject '%s'. "+body, recipients(e), lim(p["subject"], 80), lim(p["body"], 80))
+		used = []string{"to", "subject", "body"}
+	case "move_event":
+		s = fmt.Sprintf("Move event %s to start %s", lim(p["event_id"], 80), lim(p["new_start"], 40))
+		if _, ok := p["new_end"]; ok {
+			s += " ending " + lim(p["new_end"], 40)
+		}
+		s += "."
+		used = []string{"event_id", "new_start", "new_end"}
 	case "create_event":
 		s = fmt.Sprintf("Create event '%s' starting %s", lim(p["title"], 80), lim(p["start"], 40))
 		if _, ok := p["end"]; ok {
@@ -85,10 +106,14 @@ func rest(p map[string]any, used []string, lim func(any, int) string, sep string
 
 func prompt(action string) string {
 	switch shortName(action) {
-	case "send_email":
+	case "send_email", "send_message":
 		return "Say yes to send or no to cancel."
+	case "draft_message":
+		return "Say yes to create the draft or no to cancel."
 	case "create_event":
 		return "Say yes to create it or no to cancel."
+	case "move_event":
+		return "Say yes to move it or no to cancel."
 	}
 	return "Say yes to proceed or no to cancel."
 }

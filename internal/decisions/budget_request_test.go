@@ -143,7 +143,9 @@ func TestBudgetRequestRegistryFileLoads(t *testing.T) {
 	if !sawCompute {
 		t.Fatal("budget_request must use internal://budget_request.compute_runway")
 	}
-	if len(bt.StagedActions) != 2 {
+	// Only gmail.send_message (level A): gmail.draft_message is level D and
+	// a staged action must be level A (see the yaml's own note on this).
+	if len(bt.StagedActions) != 1 || bt.StagedActions[0] != "gmail.send_message" {
 		t.Fatalf("staged actions: %+v", bt.StagedActions)
 	}
 }

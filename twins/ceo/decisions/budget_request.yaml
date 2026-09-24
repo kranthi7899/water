@@ -24,9 +24,15 @@ default_rule: >-
   after it; otherwise route to the CEO with the full packet.
 staged_actions:
   - gmail.send_message
-  - gmail.draft_message
 severity_weight: 2
 ---
+`staged_actions` names only `gmail.send_message` (level A): the Slice C
+write increment (docs/slice-c-planning.md) shipped `gmail.draft_message` at
+level D, and a staged action must be level A (it exists to be queued for the
+CEO's approval; a D-level draft has no external effect and runs directly,
+so it was never a fit here — drafting a follow-up is still available to the
+twin as an ordinary tool call, just not as a card's staged action).
+
 The threshold in `default_rule` follows the board policy in
 `twins/ceo/role.md`'s "Budget structure" section; update both together if
 that policy changes.

@@ -24,9 +24,13 @@ default_rule: >-
   after it; otherwise route to the CEO with the full packet.
 staged_actions:
   - gmail.send_message
-  - gmail.draft_message
 severity_weight: 2
 ---
+`staged_actions` names only `gmail.send_message` (level A): a staged action
+must be level A, and `gmail.draft_message` (level D) has no external effect
+and runs directly rather than being queued for approval — see
+twins/ceo/decisions/budget_request.yaml's matching note.
+
 The threshold in `default_rule` follows the board policy in
 `twins/ceo/role.md`'s "Budget structure" section; update both together if
 that policy changes.
