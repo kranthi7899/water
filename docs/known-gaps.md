@@ -1,28 +1,57 @@
-# Known persona coverage gaps
+# Known gaps
 
-Recorded from the persona audit (2026-09-15). These gaps are **deliberately unaddressed**.
-Every lesson in `experience.md` must trace to a real source in `.index.json`, and no sourced
-material for these gaps exists yet. Writing lessons without it would break the
-evidence-grounding rule the rest of the personas follow. Each gap is open for a future
-sourcing pass.
+Deliberate deferrals for the single-twin CEO daemon, recorded so they aren't
+re-litigated or mistaken for oversights. Context: `docs/CONTEXT.md`,
+`docs/EVOLUTION_PLAN.md`. The persona/council-era gaps this file used to
+track (Design accessibility, COO sequencing lessons) applied to the deleted
+four-role council and are archived at
+`docs/archive/known-gaps-persona-council-era.md`.
 
-## Design: accessibility
+## Slice C (decisions): deferred to a later pass
 
-- **What's missing:** `agents/design/experience.md` has no lessons on accessibility.
-- **Why it matters:** accessibility is one of the two things Design can escalate on directly
-  (`agents/design/role.yaml` names WCAG 2.2). Today Design can check a published standard,
-  but it has no experience-grounded judgment about how accessibility failures play out, get
-  argued down, or get fixed.
-- **To close it:** find documented cases or studies, add them to `.index.json` with their
-  source records, then write lessons that match those index sentences word for word and
-  re-stamp.
+From the 2026-09-24 amendment (`docs/slices/C.md`), deliberately not built
+in C-base:
 
-## COO: sequencing, resourcing, unblocking
+- **Proposing new playbooks from repeated cases.** No mechanism watches for
+  a decision type recurring often enough to be worth a dedicated registry
+  entry; every unmatched case runs through `generic` every time, however
+  often it repeats.
+- **Standing grants.** Every staged action still needs its own approval; C
+  does not add a way to pre-approve a class of future actions (e.g. "always
+  approve budget requests under $2,000"). The P2 gate rule stays strict (see
+  `docs/slice-c-planning.md`) until a scenario proves the need.
+- **Probabilities on options.** Decision cards state options, consequences
+  and gaps in prose; they do not assign or display numeric likelihoods.
+- **A dedicated classifier model.** `Classify(item)` (the triage interface
+  in `docs/slices/C.md`) is model-based for now. A faster/cheaper classifier
+  can replace it later behind the same interface without touching the
+  registry, cards, or gate wiring.
 
-- **What's missing:** `agents/coo/experience.md` has no lessons on the role's own core verbs:
-  sequencing, resourcing/assignment, and unblocking dependencies.
-- **Why it matters:** `agents/coo/role.yaml` lists these as what the COO owns. The current
-  lessons cover estimation bias, status filtering, commitment verification, and (reframed)
-  surfacing deputy and early-imposition patterns. None of them bears on how to order or staff
-  the work itself.
-- **To close it:** same sourcing path as above.
+## Slice M (live-meeting assistance): consent handling deferred
+
+`docs/slices/M.md` builds a prototype with no real third parties in the
+meetings it will be tested against, so it deliberately does not build any
+consent flow: no participant notification, no recording-consent capture, no
+region-specific two-party-consent logic, no way for a non-CEO attendee to
+object or opt out. It keeps only the cheap, structural safeguards: audio
+never touches disk or the daemon, only timestamped transcript text crosses
+the local API; the client shows a visible "listening" indicator; sessions
+start and stop by explicit hotkey, never automatically from calendar
+presence alone.
+
+**This must be revisited before Slice M is ever used with a real external
+participant.** Recording a meeting that includes people outside the CEO's
+own company raises real consent obligations (varying by jurisdiction) that
+a prototype note cannot discharge. Do not point Slice M at a live call with
+outside participants until this gap is closed.
+
+## Carried over from A-series slices (still true)
+
+- Long-term memory (`internal/memory`) is not wired into the runtime, the
+  morning brief's signals, or (once built) the decision registry — all read
+  the store directly.
+- Hosting the daemon off the laptop (tracked in `docs/EVOLUTION_PLAN.md`'s
+  log) is unscheduled; `water daemon` currently only runs while the Mac is
+  awake.
+- Gmail push (Pub/Sub) was explicitly declined in favor of fast polling
+  (A4, 2026-09-24); revisit only if polling latency becomes a real problem.

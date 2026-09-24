@@ -1,320 +1,65 @@
 # water — build progress
 
-Running log of what exists, what was verified, and what's next. Update this file at the end of
-each work session rather than trusting memory or git history alone.
-
----
-
-## Status: Phase 3 (master build v2) — COMPLETE — 2026-09-14
-
-Everything in the master build prompt is built: input editor, slash commands, sessions, skills,
-identity binding, auth, hierarchy orchestration, tool layer (MCP), attachments, voice, dashboard,
-distribution, visual design system, per-role backends. All 25 gate/guard tests pass. Decisions,
-investigation findings and the Part 10 answers are in `docs/decisions.md`.
-
-### What was built
-
-| Part | Package(s) | Contents |
-|---|---|---|
-| 3A identity | `internal/identity`, `persona`, `roles` | role_id UUID in role.yaml; role_id/file_type/content_hash stamped in every persona file; HMAC keyring at `~/.water/keyring`; `water persona show/edit/sign/verify`; git-backed journal at `~/.water/persona-journal` |
-| 3B auth | `internal/auth`, `cli/cmd_onboard` | `claude login` / `codex login` launched with inherited stdio, headless fallbacks; success gated on one real round trip; `onboard.verified_at` recorded |
-| 3C checkpointer | `orchestrator/checkpoint.go` | `FileCheckpointer` (atomic JSON per run), save after every superstep and on node failure, `--resume <id>`, `--list` |
-| 3D voice | `internal/voice/os.go` | `say` / `spd-say` / `espeak`; Listen is a documented no-op; `--voice` on chat/run |
-| 3E dashboard | `internal/dashboard` | read-only HTTP: runs, outbox graph, timings, diagnostics, tool calls with decisions, persona file status; non-GET → 405 |
-| 3F distribution | `.goreleaser.yaml`, `install.sh`, `.github/workflows` | darwin/linux × amd64/arm64; curl-bash installer with checksum check; CI on push, release on tag |
-| 4.1 editor | `internal/editor` | Bubble Tea v2 + Bubbles v2 textarea behind `InputEditor`; uniseg cell math; Ctrl+J newline, Enter submit, Shift+Enter only after Kitty detection |
-| 4.2 commands | `internal/chat/commands.go` | `/clear /compact /resume /delete /name /model /backend /status /help /quit /consult /switch /remember /why /skills /flag /attach /editor /agents` |
-| 4.3 sessions | `internal/session` | per-role JSONL; count+age retention, pinned exempt; tail-bounded Open so compaction never loads the whole file; manual promotion only |
-| 4.4 skills | `persona/skills.go`, `agents/*/skills` | Anthropic SKILL.md schema enforced; 22 skills restructured from the twin frameworks; `DescriptionSelector` default |
-| 5 tools | `internal/tools`, `backend/claude.go`, `cli/cmd_mcp.go` | policy, root confinement (`..`, symlinks), MCP stdio server (`water mcp-serve`), `--tools "" --strict-mcp-config --mcp-config`, traced decisions, untrusted marking, macOS sandbox profile for the (unused) shell tool; attachments via stream-json |
-| 6 orchestration | `orchestrator/edges.go`, `router_hierarchy.go`, `agent/node.go`, `diagnose` | permission-graph DAG, hierarchy router with rounds/steps/stall bounds, CEO answers alone, mechanical verbatim forwarding, epistemic status marks, capability manifests in role.yaml, seven diagnostics + `water diagnose` |
-| 7 design | `internal/theme`, `internal/layout`, `themes/`, `chat/tui.go` | five theme YAMLs, colour degradation, deterministic regions, hero box fixed per size, agent picker |
-| 8 backends | `backend/registry.go`, `cli/app.go` | per-role `backend:`/`model:` resolved inside `Select` (flag → role.yaml → config → auto); `water status` shows each role's backend and why |
-
-### Gate results (real `claude` CLI, Claude Pro, fresh `$WATER_HOME` each)
-
-| Gate | Result |
-|---|---|
-| `go test ./...` — all guard and gate tests | ✅ 25 tests across 16 packages |
-| `water onboard`: detect → verify round trip → config | ✅ (2.7s, 0 metered) |
-| MCP tool path: CTO reads a file under a declared root; trace has `tool_call` with decision+basis | ✅ |
-| CEO (no tools block) reports NONE | ✅ |
-| Image attachment via stream-json; text memo with injected instruction treated as data | ✅ |
-| `water chat cto` through a pty: header, hero, `/status`, `/help`, `/quit` | ✅ |
-| Hierarchy run A (payments migration): killed at the old 5m run ceiling mid-Design → `--resume` ran only Design → COO rollup → CEO final | ✅ 3 calls on resume, 0 metered; CEO wrote an explicit decision with reversal conditions |
-| Hierarchy run B (onboarding rebuild): killed at 35s mid-COO → `--resume` re-ran COO, not the CEO frame; two assignment rounds; Design dissent forwarded verbatim; final status marked UNCONFIRMED ×4 | ✅ 8 calls, 0 metered, 16 messages; `diagnose`: dissent survival 2/2, every edge permitted, one first-round status flagged for missing marks |
-| A killed run survives the subscription session limit (quota ran out between kill and resume) | ✅ resumed after the window reset |
-| `water diagnose`, `water dashboard` over real traces; POST → 405 | ✅ |
-| Codex backend | ⚠ not installed here; MCP tools on codex deliberately unwired |
-| `goreleaser` / `install.sh` end-to-end | ⚠ no release tag yet; config and script parse |
-
-### Bugs found by real runs and fixed during the campaign
-
-- COO could not see the brief (only the CEO's summary) → Water now appends the brief verbatim
-  under the CEO's direction.
-- Hub nodes marked their inbox consumed before the backend call; a failure then made a resumed
-  run look finished → consume-after-success, plus a restore-time repair; `TestResumeAfterHubFailure`.
-- One `orchestration.timeout` governed both a single call and the whole run; a six-call run hit
-  the 5m ceiling → `call_timeout` (4m) and run `timeout` (20m) are separate.
-- A tool-less CTO emitted tool-call XML as text → every prompt now states exactly which tools
-  exist (or that none do).
-- Hero art sized the hero box, moving CHAT between themes → fixed hero box per terminal size.
-
-### Environment notes
-
-- Go at `/opt/homebrew/bin/go` (`export PATH=/opt/homebrew/bin:$PATH`). Module `water`, Go 1.27.
-- Dev loop: `go build -o bin/water ./cmd/water && ./bin/water doctor`; tests `go test ./...`.
-- Real runs under a scratch home: `WATER_HOME=$(mktemp -d) ./bin/water onboard --no-picker`.
-- Persona files must be re-stamped after a manual edit: `./bin/water persona sign --no-signature`.
-- Subscription session limits are real: a five-hour window ran out mid-campaign; runs checkpoint
-  and resume cleanly across it.
-
-## Follow-up (same day): provenance, measurement, verification
-
-- Part 1 built: `trace:current-run` grant for the COO, call ids on tool events, `Evidence` on
-  messages, mechanical verified / failed / unconfirmed verdicts appended to the COO's status.
-  Three gate tests plus a real run (config under the CTO's root) pass.
-- Part 2 measured: on single-domain briefs the CEO already answers alone; on decomposable briefs
-  without evidence sources the graph reached the same decision as the solo CEO at 8–11× the
-  calls. Numbers and a routing recommendation in `docs/decisions.md`.
-- Part 3 exercised: codex installed and signed in; a real run traced the CTO to codex and every
-  other node to claude, zero metered.
-- Part 4: `v0.1.0-rc.1` released with four binaries; the installer works through a token because
-  the repo is private; the anonymous path needs the repo public.
-- Part 5 built: rate-limit capture from stream-json, budget in `water status`/`/status`,
-  distinct exit 5 with a resume hint, `rate_limited` trace events and a `diagnose` finding.
-
-## Next up
-
-- Verify the Codex path on a machine with `codex` (MCP via `-c mcp_servers.*`, `--image`).
-- Linux Landlock for the shell tool before any role is granted shell.
-- Decide whether to make the repo public (unblocks anonymous `curl | bash`); then `v0.1.0` and
-  the Homebrew tap.
-- Apply the Part 2 routing rule (delegate only with evidence sources) after re-measuring.
-- Persona content pass on the Danone/Mylan CEO entry (see `docs/decisions.md` Q3).
-
-## Harness cross-check + reporting (same day, evening)
-
-Compared the interactive chat harness section-by-section against the documented Hermes Agent
-CLI (Nous Research) and took the cheap, compatible upgrades — see `docs/decisions.md` for the
-full comparison table and what was deliberately not taken (token streaming, `!` shell
-passthrough, mid-turn redirect — each would change the backend contract, add a second unpoliced
-tool path, or has nothing to redirect into with one-call-per-turn).
-
-- `7e49a2b` — bare `water` now opens the chat picker directly (like typing `claude`), instead of
-  printing help when configured.
-- `df733a3` — slash-command autocomplete dropdown with Tab-complete; exit prints a resume command,
-  session slug, turn count, duration; `/copy` + Ctrl+Y clipboard (mouse capture turned off so the
-  terminal's own selection works); login routing when a subscription CLI is signed out; a voice
-  indicator (♪/○) left of the composer with `/voice` and Ctrl+B; context-fill bar from the
-  backend's reported window; a ticking "thinking…" timer; `/undo /retry /usage /save /title`;
-  `voice.provider` now defaults to `os` instead of `noop`.
-- `fd10919` — `install.sh` installs by renaming a fresh file into place rather than overwriting a
-  running binary in place, after overwriting `~/.local/bin/water` while a chat session was live
-  made every new launch hang in the macOS loader (found and fixed live, see the same-day
-  `docs/decisions.md` entry).
-
-### Deliverables generated for the user (not committed to this repo — see below)
-
-Two PDFs and a rehearsed demo kit, all under `~/twin_pitch/` (a separate, uncommitted directory
-next to `~/water` and `~/twin`; not a git repo):
-
-- `~/twin_pitch/Water - Build, Architecture and Validation Report.pdf` — 35-page architecture,
-  validation and usage report generated from real repo facts (line/test counts, actual trace and
-  checkpoint contents from prior real runs, `twin` project validation results). Built as styled
-  HTML rendered to PDF via headless Chrome; source HTML was in the session scratchpad, not saved
-  to the repo.
-- `~/twin_pitch/demo/` — a rehearsed, scripted live demo (`DEMO.md` / exported PDF) for showing
-  the product to a non-technical audience in four phases: (1) same question to all four roles,
-  showing persona differentiation; (2) per-role memory isolation, chat sessions with
-  `/why`/`/consult`/`/remember`, and one real experience-growth cycle (feedback → new lesson →
-  content-hash mismatch → re-sign → different answer) run against `agents-copy` (a throwaway copy
-  of `~/water/agents`, never the shipped personas); (3) orchestration rules explained plus a
-  single-domain brief showing the CEO answering alone; (4) a full team run on a checkout-redesign
-  brief with real CTO/COO/Design disagreement forwarded verbatim to the CEO. Everything runs
-  under `WATER_HOME=~/twin_pitch/demo/home` (isolated from the user's real `~/.water`) and
-  defaults to `codex-subscription` because the Claude 5-hour window was exhausted (105% used) at
-  the time. `reset.sh` clears the live/mutable parts between run-throughs; `recordings/` holds
-  copied traces/checkpoints from earlier real runs (including the evidence-provenance and
-  dissent/resume runs from the follow-up campaign) as backups if a live call is slow.
-
-No code changes in this pass beyond the three commits above; the PDF and demo kit are
-presentation artifacts, generated and verified (rehearsed end-to-end on this Mac) but outside
-the `water` repo.
-
-## Part 9: message rendering — user/agent distinction (same day)
-
-Rendering-only change to the chat TUI transcript (`internal/chat/tui.go`), following a spec
-comparing Water's transcript against Claude Code's. Does not touch the input editor (Part 4.1) —
-only how a *submitted* turn is displayed after the fact.
-
-- User turns drop the `YOU` label; a `❯ ` prefix plus a full-width background tint (Background
-  lightened a fixed 22/255 per channel — `theme.RGB.Lighten`, `Palette.UserTint`) is now the only
-  signal a human typed the line. The tint is TrueColor-only (`Styler.BgTint`); below that it
-  degrades to nothing, and the `❯` prefix alone carries the distinction.
-- Agent turns are unchanged (role-coloured header) except for one addition: a new muted
-  operation-summary line between the header and the reply prose when the turn made a real tool
-  call — `· read 1 file under ~/…` — computed in `internal/chat/render.go` directly from
-  `Turn.ToolEvents` (now populated from `backend.Response.ToolEvents` in `Session.Send`), never a
-  separately written description. Delegation-style summary lines are part of the same rendering
-  convention but have no live data source yet — chat sessions (`agent.RunTurn`) never delegate;
-  only the orchestrator's `HierarchyNode` does.
-- Gate: `TestUserTintNeverOnAgentTurn`, `TestOperationLineSourcedFromTrace`,
-  `TestDegradesWithoutTint` in `internal/chat/render_test.go`. Manual check done via a throwaway
-  dump of real ANSI output (not committed) confirming the tint wraps only user lines. Full
-  `go test ./...` (27 packages) and `go vet`/`gofmt` clean after the change.
-
-
-## Infrastructure judgment pass v2 (same day, afternoon)
-
-Judgment pass against the public source of `openai/codex` and `NousResearch/hermes-agent`
-(shallow clones, read directly; no reconstructed Claude Code source). Full report with per-area
-comparandum / Water / verdict paragraphs: `docs/judgment-pass-v2.md`. 3 adopt, 5 adapt, 5 reject.
-Every gap was reproduced before it was fixed; every fix has a test that fails on the old behaviour.
-
-### Debugging (fixed first)
-
-- **Single-node replay (6a).** Every model call writes `<trace_dir>/<run-id>.calls/<seq>-<role>.json`
-  (0600) with the exact system and prompt. `water replay` lists, prints (`--print`), edits (`--edit`)
-  and re-sends one call in isolation. Verified on a real run.
-- **Stuck-run dump (6d).** `water debug dump <run-id>` signals a live orchestration (SIGUSR1 via a pid
-  file) to write active nodes, in-flight subprocesses, router next step, outbox tail and goroutine
-  stacks; never blocks on the state lock. Verified mid-run.
-- **`--debug` (6b).** Logs every subprocess with its real flags (prompts elided to sizes), pid,
-  duration, exit and last stderr line. Verified on Claude and Codex.
-- **Actionable errors (6c).** Real error line surfaced (Codex's banner was hiding it); backend,
-  role.yaml model and `orchestration.call_timeout` named; `water run` no longer prints twice.
-
-### Gaps fixed from the comparison
-
-- **Invariant 2 through the tool layer (5a).** A tool root containing the water home let the CTO read
-  Design's memory and the keyring. Water home is now a protected path for every tool.
-- **Lost memory writes (5a).** Two writers on one role's memory lost 40 of 80 entries; writes now take
-  a cross-process lock.
-- **Untrusted promotion (5a).** `/remember` without a note refuses a reply that read an attachment or
-  tool output.
-- **MCP server wedge (2).** One blocked read (named pipe under a root) stalled every other request and
-  left the server running after its parent; calls are now concurrent, deadlined, regular-files-only,
-  and the server exits on stdin close.
-- **Shell allowlist (1).** Allowlisting `ls` authorised `ls && …`; compound commands are refused,
-  allowlisted commands exec without a shell, and no shell runs where no OS sandbox exists.
-- **Skill usage (5b).** Read-only `water skills` report. On 47 real prompts: Design's `fitts-law` and
-  `hicks-law` never loaded; CEO `disagree-and-commit` loads far more than its trigger suggests.
-
-### Rejected, with reasons in the report
-
-Codex config layers (4); Codex resume model (3, a confirmation of Water's existing fix); pluggable
-execution backends until a role is granted shell (5c, trigger recorded); Hermes's autonomous
-reflect-and-update loop (5d: 3 real chat turns, 0 flags, no growth logs — no evidence); external
-semantic memory providers (5e); OpenTelemetry (6e).
-
-Tests: 86 test functions, all passing; `go test -race` clean on every changed package.
-
-### Next up (added)
-
-- Review the skills report findings: `fitts-law` / `hicks-law` triggers, `disagree-and-commit`
-  description breadth.
-- Codex backend does not parse token usage (`in=0` in `water replay` listings).
-
-## Claude Code usage parity sweep (same day, evening)
-
-Tried each everyday Claude Code usage against Water in a real terminal. Details and classification in
-`docs/decisions.md` (last section).
-
-- Fixed: slash parser treating absolute paths as commands; dropped file pre-fills `/attach`; silent
-  `@path` failure; codex/api silently dropping PDFs (now refused, claude reads PDFs natively); chat voice
-  needing `--voice`; tool denials now visible in chat and `water run`; no-tools roles point users at
-  `/attach`; header backend name after `/backend`; a quoted dropped PDF followed by the request on the
-  same line is now attached for that turn rather than sent as unreadable prose.
-- Verified working: PDF and Retina screenshot on claude, multi-line paste starting with `/`, piping into
-  `water run`, `/clear` `/resume` `/compact`, retention pruning to 30 and removing a 100-day-old session,
-  `/backend` and `/model` taking effect on the next turn, `/help` listing all 26 commands, OS voice.
-- Open decision: `network: none` (RECONSIDER, evidence threshold stated in decisions.md).
-- Tests: 98, including attachment scenarios for a dragged PDF plus request, an `@` screenshot, the Claude document/image wire format, and dynamic text/office-document handling.
-
-## Attachment breadth update (2026-09-15)
-
-- Plain-text documents are dynamically accepted (including `.md`, `.yaml`, `.json`, `.csv`, and source files).
-- macOS `.doc`, `.docx`, `.rtf`, and `.odt` attachments are converted through the system `textutil` reader into bounded untrusted text.
-- PDFs and supported images retain their native structured delivery to Claude. Opaque binaries still refuse clearly instead of pretending to be readable.
-
-## Interactive workspace approvals (2026-09-15)
-
-- `water` now gives the active chat role a session-only workspace rooted at the directory where Water was launched. It can read/list only inside that root; Water's own state remains protected.
-- Consequential chat work now uses a prevalidated `apply_actions` plan: up to six declared writes/commands appear in one review card, `y` approves only that exact plan once, `n` executes none, and `d` reveals the exact command. The MCP child waits over a private Unix socket, rather than printing over the terminal.
-- macOS shell actions are confined by `sandbox-exec` and have no network access. Linux and Windows shell actions remain refused until a real kernel sandbox exists. Headless `water run` and orchestration retain their deny-by-default posture.
-- Validation: 103 named tests pass plus `go vet`; the real Unix-socket handshake was separately verified, including that a denied write leaves no file behind.
-
-## Approval-plan UX + voice verification (2026-09-15)
-
-- Replaced repeated, raw per-command approval prompts with `apply_actions`: a role must declare one bounded plan (maximum six writes/commands), and Water validates every path, protected-state boundary, and sandbox requirement before one approval card is shown.
-- The card follows progressive disclosure: it leads with the human intent and each affected target, keeps the composer fixed, pages safely in short terminals, and reveals raw command text only on `d`. `y` approves that immutable plan once; `n` executes none. Direct `write_file` / `run` calls cannot bypass this path in interactive chat.
-- Validation: plan rejection leaves every target untouched; an invalid path never reaches the approval UI; a two-step plan gets exactly one correlated prompt; short-terminal paging preserves chat/input geometry. Full suite: 109 named tests plus `go vet`.
-- Voice status: **working TTS** on this Mac. `water voice 'Water voice verification.'` launched `/usr/bin/say` and exited 0. Interactive chat exposes `○ >` when speech is available but off, `♪ >` when on; `/voice on|off|status` and Ctrl+B toggle it. The OS provider speaks completed role replies only.
-- Speech-to-text / microphone listening remains deliberately unshipped (`Listen` returns a clear unavailable message). Audio is never passed to the model; a future STT provider would transcribe to text before the normal role pipeline.
-
-## Expressive role voices (2026-09-15)
-
-- Added optional `voice.provider: openai`, a role-aware expressive speech renderer: CEO `marin`, COO `cedar`, CTO `ash`, and Design `coral`, each with a fixed delivery profile. Switching roles selects the corresponding renderer while leaving the text session, memory, and backend unchanged.
-- This is deliberately **not** enabled by default: it requires both `voice.allow_metered: true` and `OPENAI_API_KEY`. It cannot use or leak Claude/Codex subscription credentials; no key is stored in Water configuration or handed to subprocesses.
-- Validation: in-process API test verifies role voice, style instruction, completed reply text only, returned-audio playback, and chunking; another test proves the provider fails closed without the explicit metered opt-in. Live microphone/STT remains unshipped by design.
-
-## Bounded harness review pass (2026-09-15)
-
-Status: implemented locally, tested, **not committed**. This pass came from scenario-based testing of the CLI harness before demo: prompt submission, approval UX, PDF/file access, cancellation, resume, and subprocess containment.
-
-- Fixed chat state bugs: command output remains visible after a transcript rebuild; a rate-limited or failed prompt is retained as pending so `/retry` and resume target the real failed message; paste now obeys the busy/input-paused state; resize and tiny-terminal layout recompute editor rows after width changes instead of leaving the composer in a misleading staging area.
-- Fixed trust propagation: when a role consumes an inbox message already marked `Untrusted`, Water marks that role as tainted before it can forward status or dissent, preserving the external-content boundary through COO relay.
-- Fixed cancellation checkpointing: the graph executor now waits for already-started sibling nodes before checkpointing a cancelled superstep, so completed work is not lost and rerun on `--resume`.
-- Hardened transcript loading: sessions under a bounded size read enough context to preserve summaries and oversized recent turns; larger transcripts keep the original tail-only no-deadlock behavior. Scanner overflow now fails loudly as incomplete context.
-- Hardened the tool/MCP path: approval disconnects expire pending prompts, `notifications/cancelled` cancels the matching in-flight MCP call, hidden `mcp-serve` uses command-context interrupt handling, writes are symlink-safe and atomic within the workspace, tool output is capped, and shell subprocesses run in a private process group.
-- Hardened subscription backend containment: Claude now refuses to run if `--tools ""` or `--strict-mcp-config` are unavailable, and a subprocess timeout wins even if the CLI emitted a partial success line before hanging.
-- Validation: `go test ./...` passes locally with the added regression tests. Current count is above the prior 109 tests; exact count not recalculated in this pass.
-- Demo readiness: rebuilt `bin/water`, installed it atomically to `/Users/kranthikoneti/.local/bin/water` and `/Users/kranthikoneti/go/bin/water`, switched `backend.preferred` to `codex-subscription` for the demo, and verified one real subscription round trip: `water run ceo "Reply exactly: WATER-SMOKE"` returned `WATER-SMOKE` with `calls 1`, `metered 0`, trace `20260915-194654-0a92b4`.
-
-## Reasoning layer — CEO pilot (2026-09-15)
-
-Status: implemented locally, tested, **not committed**. Spec: `docs/reasoning-layer-ceo-pilot-prompt.md`.
-
-- `reasoning.md` is a fourth identity-bound persona doc: `Persona.Reasoning`, loaded like soul/experience (missing = blank), rendered as `# Reasoning` after `# Experience` and before skills (its steps refer to "the Experience section above"). `identity.FileTypes`, `PersonaFiles`, `persona edit`, and the dashboard file-status list all include it.
-- `agents/ceo/reasoning.md` written (seven steps + two closing rules) and stamped with `water persona sign --no-signature`. coo/cto/design have no reasoning.md yet.
-- `Assemble()` identity line now states method application ("You reason like a CEO — not playing a character…"). This line is shared, so all four roles get the new wording; only the CEO has reasoning content.
-- Gotcha: `agents/` is `go:embed`-ed, so rebuild **after** stamping. A binary built before stamping fails role loading with a content_hash mismatch.
-- Validation: `go test ./...` passes, including the new `TestReasoningRendersAfterExperience` (order + missing-file tolerance). Live turn `20260915-211802-bfe414` (codex-subscription, 1 call, 0 metered): the call record shows the new identity line and Soul → Experience → Reasoning order. The reply named the bare situation, gave a CEO reading, cited the crisis-trust and people-decision lessons by content (no company named), bounded three options, and stated the call, tradeoff, and reversal condition. Step 6 (stated reason vs deeper driver) was **not** visibly addressed.
-
-## Reasoning layer — COO, CTO, Design rollout (2026-09-15)
-
-Status: implemented locally, **not committed**. Spec: `docs/reasoning-layer-remaining-roles-prompt.md`.
-
-- Wrote `agents/{coo,cto,design}/reasoning.md` using the spec's bodies and the `role_id`s from each `role.yaml`, stamped with `water persona sign --no-signature` (3 files touched), rebuilt afterwards; `persona verify` and `water status` load all 4 roles. No code changes.
-- Live turns (codex-subscription, 1 call each, 0 metered): COO `20260915-212535-c4b837`, CTO `20260915-212535-abcd5f`, Design `20260915-212535-07de54`. Each call record shows Experience → Reasoning → Skill order.
-- Observed: all three state the bare situation, give a role-specific reading, run an explicit Experience check that cites lessons by content (no real company named), bound the options, and close with a role-shaped step 7. COO separated verified from unconfirmed; CTO gave a feasibility range with its method and a change-my-mind condition; Design split a checked standard (WCAG contrast, 2.1:1, which is correct for #7FB3FF on white) from craft judgment and stated its coverage. **Step 6 (stated reason vs deeper driver) is missing in all three**, the same as the CEO pilot, so the gap is systematic.
-- Cosmetic: the shared identity line reads "You reason like a Design" for the design role (`role.Name` is "Design").
-
-## Persona audit fixes (2026-09-15)
-
-Status: implemented locally, tested, **not committed**.
-
-1. **Corroboration weighting is now followable (option a).** `Persona.Render` appends "(N independent cases)" to every experience paragraph. N is the number of distinct `source_id`s whose `.index.json` sentence matches the paragraph word for word (whitespace/case normalised). Only the count is rendered, never a source name; unindexed paragraphs such as the preamble get no count. `soul.md` files are unchanged because their instruction is now true. Real counts: CEO `3 3 3 3 2 2 1 1 1 1 1 1`; COO, CTO and Design are all 1s. Test: `TestExperienceShowsCorroborationCount`.
-2. **COO L1/L2 reframed** to the COO's position: flag the deputy-as-cover pattern upward and report what is observed vs. unconfirmed; name early solution imposition in the report, forward implementers' objections verbatim, then carry out the direction. The research claims are unchanged. The `.index.json` sentences were updated word for word (the two lessons still resolve to HC2004 and NUTT1999), and `coo/experience.md` was re-stamped.
-3. **Coverage gaps recorded, not filled:** `docs/known-gaps.md` (Design: accessibility; COO: sequencing/resourcing/unblocking).
-
-Validation: `persona sign` touched only `coo/experience.md`; the binary was rebuilt after stamping; `persona verify` passes for 4 roles; `go test ./...` passes. Aside: 5 `TRAIT-*` entries in `design/.index.json` match no experience paragraph, so they get no count.
-
-## Rollout-test fixes: Driver check + direct-turn framing (2026-09-15)
-
-Status: implemented locally, tested, **not committed**.
-
-1. **Step 6 is now a required labeled line** in all four `reasoning.md` files ("State a Driver check line: … Do not skip this line"). The CEO keeps its "People (and this reasoning) can be wrong about their own why" sentence. Re-stamped all 4 files, then rebuilt.
-2. **Standalone turns no longer address the COO.** `specialistNode` was not the source: `water run`/chat go through `RunSingle` → `RunTurn` and never touch the graph nodes. The "report your findings… to the COO" routing comes from the CTO and Design `soul.md` files, which describe the graph. `RunTurn`'s task now states this is a direct exchange with the user, with no other role taking part, and that the reply is addressed to the user. Souls and graph nodes are unchanged. Test: `TestDirectTurnDoesNotRouteToCOO`.
-- Validation: `go test ./...` passes. Live turns (codex-subscription, 1 call each, 0 metered): CEO `20260915-213233-324cb4`, COO `…-45a6d0`, CTO `…-0ec0a3`, Design `…-016488`. Driver check line present in 4/4 replies; "To COO:" in 0/4. All four Driver checks concluded "this is the real driver", so watch whether the line turns into a rubber stamp.
-
-## Free per-role OS voice (2026-09-16)
-
-Status: committed on `feat/build-site`. Decision note: `docs/decisions.md` → "Expressive per-role voice" follow-up.
-
-- `voice.provider: os` (default) now gives each role its own voice and pace: CEO Daniel at 172 wpm, COO Samantha at 185, CTO Rishi at 190, Design Moira at 180. If a Premium or Enhanced voice is installed, it is used first. `voice.<role>_voice` overrides the choice only when that voice is installed. Code: `internal/voice/os_roles.go`, `cli/voice.go`.
-- `Speakable()` (`internal/voice/speakable.go`) flattens markdown before either provider speaks.
-- `water voice --role <slug> "text"` tests a role's voice. `water doctor` lists each role's voice and warns about overrides that aren't installed.
-- Fixed: on darwin, `OS.Speak` rebuilt the `say` command and lost `ScrubbedEnv`.
-- Validation: `go test ./...` passes (new: `TestOSRolesResolveDistinctInstalledVoices`, `TestOSVoiceArgs`, `TestParseSayVoices`, `TestSpeakableDropsMarkup`). All 4 roles spoke through `say` on this Mac. The Linux espeak variants are unverified.
+This file used to duplicate the full build log for the four-role council
+that Water was rebuilt away from. That log is preserved at
+`docs/archive/` (see below) rather than kept here, since it describes a
+CLI, orchestrator, and persona stack that no longer exist in the tree.
+
+**Live source of truth: `docs/EVOLUTION_PLAN.md`.** It carries the current
+status line, the slice order, and a dated log entry for every slice —
+what was built, what was decided, what's left undone, and what to verify
+by hand. `docs/CONTEXT.md` is the project's current state and design
+principles. Read those two first; this file is a pointer plus a
+high-level timeline, not a restatement.
+
+## Timeline
+
+- **2026-09-14 — Phase 3 (master build v2), council era.** The four-role
+  (CEO/COO/CTO/Design) council: persona/identity/experience, hierarchy
+  orchestration with checkpointing, the MCP tool layer, per-role voice,
+  the terminal chat TUI with themes, and distribution tooling. Full detail
+  archived at `docs/archive/` (see below); none of this code remains.
+- **2026-09-15 — Judgment and rollout passes, council era.** A judgment
+  pass against public `codex`/`hermes-agent` source, a persona audit, a
+  reasoning-layer rollout across all four roles, and a Claude-Code usage
+  parity sweep — all against the council architecture above.
+- **2026-09-23 — Step 0.** Decision to rebuild Water as a single personal
+  CEO twin. `docs/CONTEXT.md`, `CLAUDE.md`, and `docs/EVOLUTION_PLAN.md`
+  written; branch `feat/ceo-twin` created.
+- **2026-09-23 — A1.** Foundation: `gate` (R/D/A/S/B levels, default deny,
+  untrusted tagging, rate/usage caps), `approvals` (payload-hash envelopes,
+  code-generated read-backs), `audit` (hash-chained, fails closed), `store`
+  (SQLite, normalized records), `connectors` (contract + fake), `vault`.
+- **2026-09-23 — Owner decision.** The council is deleted outright, not
+  kept dormant. Water is a single personal agent from here on.
+- **2026-09-23 — A2.** `water daemon` (streaming, approvals, state, cancel
+  over a 0600 Unix socket); `water chat`/`ask`/`approve`; a warm `claude`
+  subprocess reused across turns; the council code removed.
+- **2026-09-23 — A3.** Real, read-only Google Calendar/Gmail/Drive
+  connectors replace the in-memory fakes; `water connect google`;
+  background sync (P2); a taint-propagation fix and a fast-path
+  correctness fix.
+- **2026-09-24 — A4.** Incremental sync (Calendar sync-token, Gmail
+  historyId) on two independent tickers; the morning brief pipeline
+  (signals computed in code, the model only phrases them).
+- **Next: Slice B (voice and clients).** See `docs/EVOLUTION_PLAN.md`'s
+  log for current status — an interim macOS Shortcut exists; the real
+  Swift menu-bar app (text pop-up first, voice second) is not yet built.
+  Specs for the slices after B (C: decisions, M: live-meeting assistance)
+  are written and blocked on B per the owner's own sequencing: see
+  `docs/slices/C.md`, `docs/slices/M.md`, `docs/slice-c-planning.md`.
+
+## Archived council-era material
+
+Full detail on everything above the "Step 0" line, plus adjacent
+investigation/decision notes that assumed the deleted architecture, is
+kept for history rather than restated:
+
+- `docs/archive/decisions-council-era.md`
+- `docs/archive/tools-council-era.md`
+- `docs/archive/voice-council-era.md`
+- `docs/archive/judgment-pass-v2.md`
+- `docs/archive/persona-audit-prompt.md`
+- `docs/archive/reasoning-layer-ceo-pilot-prompt.md`
+- `docs/archive/reasoning-layer-remaining-roles-prompt.md`
+- `docs/archive/known-gaps-persona-council-era.md`

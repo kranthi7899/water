@@ -1,76 +1,101 @@
 # water — architecture notes
 
+Water is a single personal digital twin (the CEO twin), not a multi-role
+council. The four-role council, its persona/identity/orchestrator stack, and
+the terminal-only TUI described in earlier versions of this file are
+deleted, not dormant — see `docs/CONTEXT.md`'s amendment and
+`docs/EVOLUTION_PLAN.md`'s keep/move/retire table. This file describes what
+actually exists after A1–A4.
+
+## Shape
+
+```
+water daemon                 # HTTP over a 0600 Unix socket, single-instance
+  gate/       permission gate: manifest levels, rate/usage caps, taint
+  approvals/  envelope queue: payload-hash binding, code-generated read-back
+  audit/      append-only, hash-chained log; fails closed
+  store/      SQLite (modernc.org/sqlite), normalized record types
+  connectors/ one package per tool + the connector contract (google/*, fake)
+  runtime/    context assembly, fast path, model-call streaming, brief
+  gateway/    the daemon itself: HTTP handlers, model-tool bridge, sync
+  sync/       background refresher (P2, two tickers: mail, events)
+  tools/      MCP bridge the model's subprocess talks to (twin mode only)
+
+water chat | ask | approve | connect google | daemon ...   # CLI clients
+```
+
+Runtime data lives outside the repo in `~/.water/` (SQLite db, audit log,
+Unix socket). Secrets live in the macOS Keychain via `internal/vault`,
+reached through `/usr/bin/security`, never in files or model context.
+
 ## Invariants enforced in code
 
 | Invariant | Where enforced | Guarded by |
 |---|---|---|
-| No metered call while a non-metered backend is available | `backend.Select` (the only selection function; per-role inputs resolved inside it) | `TestGuard_MeteredLeak`, `TestPerRoleBackend` |
-| Metered keys never reach subprocesses | `backend.ScrubbedEnv` | `TestGuard_ScrubbedEnv` |
-| A node sees only its own memory and its own inbox | `agent.Assemble` is the one prompt assembler; `memory.Scoped` has no role parameter | `TestGuard_MemoryIsolation_*`, `TestConsultNoMemoryLeak` |
-| Exactly one singleton, an orchestrator, unique slugs and role_ids | `roles.LoadWith` | `TestGuard_TwoSingletonsFailLoudly` |
-| Only an orchestrator writes FinalOutput | `State.SetFinalOutput` | `TestGuard_NonOrchestratorCannotWriteFinalOutput` |
-| Messages travel only declared edges | `State.AppendMessage` → `PermissionGraph.Check` | `TestSpecialistsCannotMessageEachOther`, `TestEscalationEdge` |
-| Dissent/escalation reaches the CEO byte-identical | COO node forwards `Verbatim` messages mechanically before its own report | `TestDissentForwardedVerbatim` |
-| A node that consumed external content cannot emit an unmarked message | `State.MarkUntrusted` + `AppendMessage` | `TestUntrustedMustBeMarked` |
-| Persona files belong to their folder | `identity.Verify` in `persona.Load` | `identity` tests, `TestSkillSchemaValid` |
-| `claude` always runs with `--strict-mcp-config` and `--tools ""` | `ClaudeSubscription.BuildArgs` | `TestStrictMCPConfigSurvives` |
-| Tools: deny by default, roots explicit, symlinks/`..` confined | `tools.Policy.Authorize`, `ResolveWithinRoots` | `TestRoleWithoutToolsInvokesNothing`, `TestReadOutsideRootsFails` |
-| Interactive write/command actions require a bounded, correlated action-plan approval | `tools.applyActions` → `ApprovalBroker` → `chat.updateApproval` | `TestInteractivePlanGetsOneApprovalAndExecutesExactActions`, `TestInteractivePlanDenialDoesNotPartiallyExecute` |
-| Chat/input geometry is theme-invariant | `layout.Compute` takes no theme input | `TestThemeDoesNotMoveChat`, `TestHeroNeverCollides` |
+| A tool exists for the twin only if the manifest lists it at a stated level (default deny) | `twins.Manifest.Function`, `gate.authorize` | `TestEmbeddedCEOManifestLoads`, `TestEmbeddedCEOManifestBuildsAGate` |
+| A manifest may only tighten a function's declared level (to A or B), never loosen it | `gate.New` | gate package tests |
+| A connector can get its arguments/credential only by redeeming a one-time permit; only the gate can mint one | `permit.Permit.Open`, `gate/internal/mint` (import-restricted by Go's `internal/` rule) | a guard test that scans source to confirm only the gate imports the mint or calls `Invoke`, and every connector redeems as its first statement |
+| Level A always needs an approved envelope; level S needs one whenever taint isn't Clean | `gate.NeedsEnvelope`, `gate.authorize` | gate package tests |
+| Approvals bind the sha256 of the canonical payload; a mismatched call voids the approval; an edited envelope is a new hash | `approvals.PayloadHash`, `approvals.Queue.Decide`/`Edit` | approvals package tests |
+| The spoken/read read-back is built by code from the structured payload that the hash binds — never by the model | `approvals.ReadBack` | approvals package tests |
+| Every audit write happens before the effect it records; an audit failure fails the action; an approval that can't be audited reverts to denied | `gate.Invoke`, `approvals.Queue` | audit + gate package tests |
+| `audit.Open` refuses to extend a chain that doesn't verify | `audit.Open` | audit package tests |
+| External content is untrusted: any function marked `External: true` taints the session, sticky and never reset within it | `gateway.handleToolInvoke` → `escalateTaint` | A3 taint-fix tests |
+| Auto mode (P2) never performs an outward action: only functions on `auto_allowlist`, and only at level R or D | `gate.authorize` (`c.Origin == P2` branch) | gate package tests; see `docs/slice-c-planning.md` for why this stays strict into Slice C |
+| Rate and usage windows persist in the store, so caps survive a daemon restart | `gate.take`/`takeStoreLocked` | gate + store package tests |
+| Metered model calls never run while the subscription CLI is available; metered keys never reach subprocesses | `backend.Select`, `backend.ScrubbedEnv` | backend package tests |
+| The fast path answers schedule/approvals/brief questions from the store with zero model calls, except the one documented brief exception | `runtime.fastpath.go` | runtime package tests |
+| A background sync tick with no stored credential skips quietly (one log line), never spams denials | `internal/sync` | sync package tests |
 
-## One orchestrated run (hierarchy router)
+## One conversation turn
 
-1. `State` is created with the brief; the brief is injected as `user → ceo [brief]`.
-2. **CEO frames**: answers alone (`ROUTE: answer` → FinalOutput, run ends) or delegates
-   (`ROUTE: delegate` → `direction` to COO, with the brief appended verbatim by Water).
-3. **COO assigns**: `## cto` / `## design` sections become `assignment` messages with correlation
-   ids and deadlines; a role without a section is left out.
-4. **Specialists** run in parallel, reply with `deliverable` to COO; `DISSENT:` paragraphs become
-   `Verbatim` dissent to COO; `ESCALATE:` paragraphs go straight to the CEO.
-5. **COO verifies**: Water first forwards every verbatim message to the CEO with attribution;
-   then the COO's `status` (each item `VERIFIED:` / `UNCONFIRMED:`) goes up. Follow-up
-   assignments are allowed while rounds remain (`orchestration.max_rounds`).
-6. **CEO adjudicates**: explicit decisions with tradeoffs and reversal conditions →
-   `ROUTE: final` (or `ROUTE: redirect` once, if rounds remain).
-7. After every superstep the `FileCheckpointer` writes `~/.water/checkpoints/<run>.json`;
-   a node failure still saves completed siblings; `--resume <id>` re-derives the phase from
-   visit counts and unconsumed inboxes and re-runs only what did not complete.
+1. A client (`water chat`/`ask`, later the Swift app) sends a turn over the
+   daemon's Unix socket.
+2. `runtime` assembles context: `twins/ceo/role.md` plus a state summary from
+   the store. The fast path answers directly (no model call) for a handful
+   of deterministic question shapes (schedule, pending approvals, morning
+   brief cache hit); everything else goes to the model.
+3. A warm `claude` subprocess (one per daemon, restarted on crash/scope
+   change) streams the reply sentence by sentence back to the client.
+4. If the model calls a connector tool, the call crosses the MCP bridge
+   (`internal/tools`) to the daemon's gate, which authorizes, executes,
+   audits, and normalizes the result into the store before returning it
+   (wrapped in UNTRUSTED markers when the function is `External`).
+5. A call that needs an envelope (level A, or S while tainted) is staged
+   into the approval queue instead of executing; `water approve` (or, once
+   Slice B ships, a spoken yes/no) decides it. Deciding "yes" executes the
+   action exactly once, in that same call.
 
-Phase is derived from State (`Visits`, `Unconsumed`, pending assignments by correlation id),
-never from router-internal counters, which is what makes resume trivial. A step that changes
-nothing is a stall (`ErrStalled`); the step budget and whole-run timeout bound the rest.
+## Background plane
 
-## Interactive session
-
-`water chat` renders HEADER / HERO / CHAT / INPUT / STATUS regions computed by `layout.Compute`
-from terminal size alone. Themes (`themes/<slug>.yaml`) supply palette and hero art; art is
-scaled into a fixed hero box and dropped when the terminal is too small. Transcripts are per-role
-JSONL under `~/.water/sessions/<role>/`; `Open` reads only the tail after the last summary
-checkpoint, so compaction never needs the whole file.
-
-When launched from a directory, chat also creates a session-only local workspace policy for its
-active role. Reads/listing inside that directory are permitted; writes and shell commands must enter
-an explicit `apply_actions` plan (at most six validated effects) and one fixed-height review card in
-CHAT waits for `y`/`n` (`d` shows technical command details). The MCP child is connected to the TUI by
-a private Unix socket, so it never prints its own prompt over the terminal. The policy is copied only
-for the active role, so `/consult` cannot inherit it. Headless sessions and orchestration do not use
-this overlay.
+`internal/sync` runs two independent tickers tied to the daemon's shutdown
+context: a mail ticker (default 60s, Gmail history-based incremental fetch)
+and an events ticker (default 10m, Calendar sync-token incremental fetch;
+also drives the morning-brief background precompute once past
+`brief.ready_after`). Both call through the gate at origin P2 with Clean
+taint, and both skip quietly when no Google credential is stored.
 
 ## Extension points
 
 | Interface | Implementations | Add by |
 |---|---|---|
-| `backend.Backend` | claude-subscription, codex-subscription, api | new file + `Default.Register` |
-| `memory.Provider` | markdown | `memory.Register` |
-| Role | ceo, coo, cto, design | a folder under `agents/` (+ `themes/<slug>.yaml`) |
-| `persona.SkillSelector` | description (default), keyword | `persona.Selectors` |
-| `orchestrator.Router` | hierarchy (default), ceo-fanout | `orchestrator.RegisterRouter` |
-| `orchestrator.Checkpointer` | file (default), noop | config `orchestration.checkpointer` |
-| `voice.Provider` | os, noop | `voice.Register` |
-| `surface.Surface` | terminal, json (dashboard reads traces) | `surface.Register` |
-| `editor.InputEditor` | Bubbles v2 textarea | implement the interface |
+| `backend.Backend` | claude-subscription, codex-subscription, api (opt-in, off by default) | new file + `backend.Default.Register` |
+| `connectors.Connector` | fake, google/{gcal,gmail,gdrive} | a new package implementing the interface, registered in the twin's registry |
+| `voice.Provider` | os (free, default), openai (opt-in metered) | `voice.Register` |
+| `twins.Manifest` loader | ceo (embedded `twins/ceo/twin.yaml`) | a new twin directory; Slice E generalizes this to more than one twin |
 
 ## Exit codes
 
-0 ok · 1 error · 2 usage / prerequisite · 3 backend unavailable, metered refused, or run failed
-(checkpoint saved) · 4 unconfigured
+0 ok · 1 error · 2 usage/prerequisite · 3 backend unavailable or metered
+refused · 4 unconfigured · 5 interrupted by a subscription rate limit
+(resumable)
+
+## Superseded material
+
+The hierarchy-router orchestration model, the persona/identity/skills
+stack, the interactive local-workspace `apply_actions` approval flow, and
+the terminal TUI's theme/layout engine described in earlier revisions of
+this file no longer exist in the tree. They are not archived as design
+docs — anything not kept survives only in git history and in
+`docs/archive/*` for the adjacent prose docs (decisions, tools, voice,
+judgment-pass, persona-audit, reasoning-layer prompts) that described them.
