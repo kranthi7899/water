@@ -14,7 +14,8 @@ import (
 // ErrSendOutcomeUnknown means a POST failed in a way that leaves the actual
 // outcome unknown to the caller: a network error or timeout may have hit
 // after Google already received and started acting on the request, or
-// Google answered with a server error (5xx) after processing began. Unlike
+// Google answered with a server error (5xx) after processing began, or
+// Google answered 2xx (so it did act) but the response was lost. Unlike
 // GetJSON's read retries, PostJSON never retries this automatically — a
 // blind retry on a send_message/create_event/move_event risks doing it
 // twice. A caller must check whether the effect actually happened (e.g.
@@ -39,6 +40,16 @@ var ErrSendOutcomeUnknown = errors.New("google: send outcome unknown; check befo
 // outcomes that are ever safe to act on without checking further; anything
 // wrapping ErrSendOutcomeUnknown is neither.
 func (c *Client) PostJSON(ctx context.Context, rawURL string, query url.Values, body, out any) error {
+	return c.write(ctx, http.MethodPost, rawURL, query, body, out)
+}
+
+// PatchJSON is PostJSON with an HTTP PATCH (e.g. Calendar events.patch),
+// under the same single-attempt contract.
+func (c *Client) PatchJSON(ctx context.Context, rawURL string, query url.Values, body, out any) error {
+	return c.write(ctx, http.MethodPatch, rawURL, query, body, out)
+}
+
+func (c *Client) write(ctx context.Context, method, rawURL string, query url.Values, body, out any) error {
 	target, err := c.requestURL(rawURL, query)
 	if err != nil {
 		return err
@@ -47,22 +58,24 @@ func (c *Client) PostJSON(ctx context.Context, rawURL string, query url.Values, 
 	if err != nil {
 		return fmt.Errorf("google: encoding request: %s", c.scrub(err.Error()))
 	}
-	respBody, err := c.post(ctx, target, payload)
+	respBody, err := c.post(ctx, method, target, payload)
 	if err != nil {
 		return err
 	}
 	if out != nil {
 		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("google: decoding response: %s", c.scrub(err.Error()))
+			// Google answered 2xx: the action happened even though its
+			// answer is unreadable, so this must never read as a failure.
+			return fmt.Errorf("%w: Google accepted the request but its response could not be decoded: %s", ErrSendOutcomeUnknown, c.scrub(err.Error()))
 		}
 	}
 	return nil
 }
 
-// post makes one POST attempt, refreshing and retrying exactly once on a
+// post makes one write attempt, refreshing and retrying exactly once on a
 // 401 (see PostJSON's contract). It never loops on 5xx/429 or network
 // errors the way get's read-retry loop does.
-func (c *Client) post(ctx context.Context, target string, payload []byte) ([]byte, error) {
+func (c *Client) post(ctx context.Context, method, target string, payload []byte) ([]byte, error) {
 	refreshed := false
 	var forceStale string
 	force := false
@@ -73,7 +86,7 @@ func (c *Client) post(ctx context.Context, target string, payload []byte) ([]byt
 			return nil, err
 		}
 		force = false
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("google: %s", c.scrub(err.Error()))
 		}
@@ -91,11 +104,13 @@ func (c *Client) post(ctx context.Context, target string, payload []byte) ([]byt
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			b, err := io.ReadAll(io.LimitReader(resp.Body, c.opts.MaxBytes+1))
 			resp.Body.Close()
+			// Past a 2xx status the action happened; a lost or oversized
+			// answer must not read as a failure someone would retry.
 			if err != nil {
-				return nil, fmt.Errorf("google: reading response: %s", c.scrub(err.Error()))
+				return nil, fmt.Errorf("%w: Google accepted the request but reading its response failed: %s", ErrSendOutcomeUnknown, c.scrub(err.Error()))
 			}
 			if int64(len(b)) > c.opts.MaxBytes {
-				return nil, fmt.Errorf("google: response larger than %d bytes", c.opts.MaxBytes)
+				return nil, fmt.Errorf("%w: Google accepted the request but its response is larger than %d bytes", ErrSendOutcomeUnknown, c.opts.MaxBytes)
 			}
 			return b, nil
 		}

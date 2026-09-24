@@ -52,6 +52,7 @@ const (
 	DefaultSignalKey  = "agentmail:agent_directed"
 	DefaultMaxSignals = 20
 	defaultMailQuery  = "newer_than:1d"
+	stagedKeyPrefix   = "agentmail:staged:"
 )
 
 // Config configures a Watcher. Gate, Store, Vault, Approvals and Classifier
@@ -240,6 +241,19 @@ func (w *Watcher) stageForward(ctx context.Context, m rawMessage) {
 		w.cfg.Logf("agentmail: %q looks meant for the CEO but agent.forward_to is not configured; not staged", m.ID)
 		return
 	}
+	// A message can be listed again (a crash before the cursor persisted,
+	// a full resync): staging it twice would invite sending it twice.
+	staged := stagedKeyPrefix + m.ID
+	if m.ID == "" {
+		w.cfg.Logf("agentmail: a message with no id looks meant for the CEO; not staged")
+		return
+	}
+	if _, ok, err := w.cfg.Store.GetCursor(ctx, staged); err != nil || ok {
+		if err != nil {
+			w.cfg.Logf("agentmail: checking whether %q was staged: %v", m.ID, err)
+		}
+		return
+	}
 	body := fmt.Sprintf("Forwarded from the agent's own mailbox (addressed to it, not you) --\n\nFrom: %s\nSubject: %s\n\n%s",
 		m.From, m.Subject, m.Body)
 	payload := map[string]any{"to": []string{w.cfg.ForwardTo}, "subject": "Fwd: " + m.Subject, "body": body}
@@ -249,6 +263,9 @@ func (w *Watcher) stageForward(ctx context.Context, m rawMessage) {
 	if err != nil {
 		w.cfg.Logf("agentmail: staging forward for %q: %v", m.ID, err)
 		return
+	}
+	if err := w.cfg.Store.SetCursor(ctx, staged, env.ID); err != nil {
+		w.cfg.Logf("agentmail: recording staged forward for %q: %v", m.ID, err)
 	}
 	w.cfg.Logf("agentmail: staged forward %s for approval (%s)", env.ID, m.ID)
 }

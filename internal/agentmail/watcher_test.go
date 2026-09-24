@@ -362,3 +362,24 @@ func TestWatcherTickUsesAFullFetchTheFirstTimeThenResumesFromTheCursor(t *testin
 		t.Fatalf("second tick args = %+v, want since_history_id=42", args)
 	}
 }
+
+// A message seen again (the daemon stopped before persisting the cursor, or
+// an expired cursor forced a full resync) must not be staged a second time:
+// two identical forward envelopes invite approving, and sending, it twice.
+func TestWatcherTickNeverStagesTheSameMessageTwice(t *testing.T) {
+	r := newRig(t)
+	r.connect(t)
+	r.mbox.output = rawOutput(t, "", map[string]any{"id": "m7", "from": "dana@acme.com", "subject": "Hi", "body": "b"})
+	w := newWatcher(r, &fakeClassifier{verdict: decisions.Classification{NeedsDecision: true}}, "ceo@real.example.com")
+
+	w.Tick(context.Background())
+	w.Tick(context.Background())
+
+	pending, err := r.q.Pending(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("pending forwards = %d, want 1", len(pending))
+	}
+}

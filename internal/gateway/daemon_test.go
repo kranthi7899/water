@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,6 +75,23 @@ type slowAct struct {
 	entered  chan struct{}
 	release  chan struct{}
 	finished chan error // the ctx error seen when Invoke returned (nil = ran to completion)
+
+	// fail, when set, is returned by Invoke at once; normErr by Normalize.
+	mu            sync.Mutex
+	fail, normErr error
+	invokes       int
+}
+
+func (s *slowAct) set(fail, normErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fail, s.normErr = fail, normErr
+}
+
+func (s *slowAct) calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.invokes
 }
 
 func newSlowAct() *slowAct {
@@ -90,6 +108,16 @@ func (s *slowAct) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage,
 	if _, err := p.Open(); err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	s.invokes++
+	fail, normErr := s.fail, s.normErr
+	s.mu.Unlock()
+	if fail != nil {
+		return nil, fail
+	}
+	if normErr != nil {
+		return json.RawMessage(`{"done":true}`), nil
+	}
 	s.entered <- struct{}{}
 	select {
 	case <-s.release:
@@ -100,7 +128,11 @@ func (s *slowAct) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage,
 		return nil, ctx.Err()
 	}
 }
-func (*slowAct) Normalize(string, json.RawMessage) ([]store.Record, error) { return nil, nil }
+func (s *slowAct) Normalize(string, json.RawMessage) ([]store.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return nil, s.normErr
+}
 
 type harness struct {
 	d     *Daemon

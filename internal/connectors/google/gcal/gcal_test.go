@@ -935,10 +935,10 @@ var moveArgs = map[string]any{
 func TestMoveEventSendsGooglesRealBodyShapeAndNormalizes(t *testing.T) {
 	ts := newTokenServer(t)
 	patched := fixture(t, "patched_event.json")
-	var gotPath string
+	var gotPath, gotMethod string
 	var gotBody map[string]any
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+		gotPath, gotMethod = r.URL.Path, r.Method
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatal(err)
 		}
@@ -953,6 +953,10 @@ func TestMoveEventSendsGooglesRealBodyShapeAndNormalizes(t *testing.T) {
 	}
 	if want := "/calendar/v3/calendars/primary/events/e5"; gotPath != want {
 		t.Fatalf("path = %q, want %q", gotPath, want)
+	}
+	// events.patch is an HTTP PATCH; a POST to the event resource is refused.
+	if gotMethod != http.MethodPatch {
+		t.Fatalf("method = %s, want PATCH", gotMethod)
 	}
 	start, ok := gotBody["start"].(map[string]any)
 	if !ok || start["dateTime"] != moveArgs["new_start"] {
@@ -973,8 +977,11 @@ func TestMoveEventSendsGooglesRealBodyShapeAndNormalizes(t *testing.T) {
 	if len(res.Records) != 1 {
 		t.Fatalf("records %d, want 1", len(res.Records))
 	}
-	if rec := res.Records[0].(*store.Event); rec.External || rec.SourceID != "primary:e5" {
-		t.Fatalf("record: %+v", rec)
+	// The moved event's title, attendees and location were written by
+	// whoever created it, not the twin: moving it must not launder them
+	// into clean content.
+	if rec := res.Records[0].(*store.Event); !rec.External || rec.SourceID != "primary:e5" {
+		t.Fatalf("record: %+v, want External", rec)
 	}
 }
 

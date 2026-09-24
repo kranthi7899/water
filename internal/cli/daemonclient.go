@@ -180,10 +180,11 @@ func (c *daemonClient) EmailDecisionReport(ctx context.Context, id string, to []
 // DecisionResult mirrors gateway.DecisionResult: the envelope's final state,
 // and — when the answer was yes — whether the action actually ran.
 type DecisionResult struct {
-	Envelope approvals.Envelope `json:"envelope"`
-	Executed bool               `json:"executed"`
-	Output   json.RawMessage    `json:"output,omitempty"`
-	Error    string             `json:"error,omitempty"`
+	Envelope       approvals.Envelope `json:"envelope"`
+	Executed       bool               `json:"executed"`
+	Output         json.RawMessage    `json:"output,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	OutcomeUnknown bool               `json:"outcome_unknown,omitempty"`
 }
 
 // Decide answers a pending approval. reply is matched with the same

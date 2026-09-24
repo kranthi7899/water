@@ -59,15 +59,29 @@ func (a *App) approveCmd() *cobra.Command {
 					return exitWith(ExitError, err)
 				}
 				fmt.Printf("%s: %s\n", e.ID, result.Envelope.Status)
-				switch {
-				case result.Executed:
-					fmt.Printf("executed: %s\n", string(result.Output))
-				case result.Error != "":
-					fmt.Printf("not executed: %s\n", result.Error)
+				if line := decisionOutcome(result); line != "" {
+					fmt.Println(line)
 				}
 				return nil
 			}
 		},
 	}
 	return c
+}
+
+// decisionOutcome says what happened to an approved action. An unknown
+// outcome or a ran-but-errored one must never read as "not executed": that
+// would invite asking for the same send again.
+func decisionOutcome(r DecisionResult) string {
+	switch {
+	case r.OutcomeUnknown:
+		return "outcome unknown, it may have gone through: check (e.g. Sent mail, the calendar) before asking for it again: " + r.Error
+	case r.Executed && r.Error != "":
+		return fmt.Sprintf("executed, but: %s (output: %s)", r.Error, string(r.Output))
+	case r.Executed:
+		return "executed: " + string(r.Output)
+	case r.Error != "":
+		return "not executed: " + r.Error
+	}
+	return ""
 }

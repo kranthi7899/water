@@ -3,11 +3,13 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
 	"water/internal/approvals"
+	"water/internal/connectors/google/gapi"
 	"water/internal/gate"
 	"water/internal/meetings"
 	"water/internal/runtime"
@@ -24,6 +26,10 @@ type DecisionResult struct {
 	Executed bool               `json:"executed"`
 	Output   json.RawMessage    `json:"output,omitempty"`
 	Error    string             `json:"error,omitempty"`
+	// OutcomeUnknown means the action may have happened (e.g. a send whose
+	// response was lost): check before asking for it again, never assume
+	// it failed.
+	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
 }
 
 // handleTurn streams one turn as NDJSON: ack, delta*, sentence*,
@@ -193,7 +199,11 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		latest = e
 	}
 	if ierr != nil {
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Error: ierr.Error()})
+		// Output set means the action ran and only indexing its result
+		// failed; either that or an unknown outcome must never read as
+		// "not executed", which would invite a second, duplicate request.
+		writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: res.Output != nil, Output: res.Output,
+			Error: ierr.Error(), OutcomeUnknown: errors.Is(ierr, gapi.ErrSendOutcomeUnknown)})
 		return
 	}
 	writeJSON(w, http.StatusOK, DecisionResult{Envelope: latest, Executed: true, Output: res.Output})

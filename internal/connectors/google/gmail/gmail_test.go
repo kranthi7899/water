@@ -1049,7 +1049,7 @@ func TestDraftMessageCreatesDraftViaPost(t *testing.T) {
 	}
 }
 
-func TestSendMessageSendsExactlyOnceAndNormalizesAsOwnContent(t *testing.T) {
+func TestSendMessageSendsExactlyOnceAndNormalizesAsExternal(t *testing.T) {
 	ts := newTokenServer(t)
 	api := &gmailWriteAPI{resp: `{"id":"m9","threadId":"t9"}`}
 	srv := api.server()
@@ -1073,9 +1073,11 @@ func TestSendMessageSendsExactlyOnceAndNormalizesAsOwnContent(t *testing.T) {
 	if err != nil || len(rec) != 1 {
 		t.Fatalf("normalize: %v %d", err, len(rec))
 	}
+	// A sent body can quote someone else's mail (agentmail's forwards do,
+	// verbatim): indexing it as clean would launder that text's taint.
 	m, ok := rec[0].(*store.Message)
-	if !ok || m.External {
-		t.Fatalf("sent message record: %+v, want External=false: the agent wrote it, it didn't receive it", m)
+	if !ok || !m.External {
+		t.Fatalf("sent message record: %+v, want External", m)
 	}
 	if m.From != testAgentAddress || m.Subject != "Re: Q3 budget" || m.Body != "Sounds good." {
 		t.Fatalf("normalized record: %+v", m)

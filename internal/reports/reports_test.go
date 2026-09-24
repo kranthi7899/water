@@ -111,3 +111,21 @@ func TestRenderIncludesExactPaletteHexValues(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderEscapesUntrustedTitleAndAttributeBreakouts(t *testing.T) {
+	for _, evil := range []string{
+		`</title><script>alert(1)</script>`,
+		`"><img src=x onerror=alert(1)>`,
+		`</style><svg onload=alert(1)>`,
+	} {
+		out, err := Render(Report{Title: evil, Sections: []Section{{Heading: evil, Paragraphs: []string{evil}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range []string{"<script>", "<img", "<svg", "</title><", "</style><"} {
+			if strings.Contains(out, raw) {
+				t.Fatalf("title %q rendered raw %q:\n%s", evil, raw, out)
+			}
+		}
+	}
+}

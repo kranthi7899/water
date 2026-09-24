@@ -235,3 +235,58 @@ func readJSON(r *http.Request, out any) error {
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(out)
 }
+
+// The response is lost after Google answered 2xx: the send happened, so the
+// error must never read as a plain failure a caller (or a human) would retry.
+func TestPostJSONLostSuccessResponseIsNotAPlainFailure(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"body cut mid-stream": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(200)
+			fmt.Fprint(w, `{"id":"m1"`)
+			w.(http.Flusher).Flush()
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+		},
+		"undecodable body": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"id":`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := newTokenServer(t)
+			var calls atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				h(w, r)
+			}))
+			defer api.Close()
+			c := newClient(t, ts, api, nil)
+			var out struct{ ID string }
+			err := c.PostJSON(context.Background(), GmailBase+"/users/me/messages/send", nil, map[string]any{"raw": "abc"}, &out)
+			if !errors.Is(err, ErrSendOutcomeUnknown) {
+				t.Fatalf("got %v, want ErrSendOutcomeUnknown", err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("calls = %d, want 1", calls.Load())
+			}
+		})
+	}
+}
+
+func TestPatchJSONSendsPatchOnce(t *testing.T) {
+	ts := newTokenServer(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPatch {
+			t.Errorf("method %s, want PATCH", r.Method)
+		}
+		w.WriteHeader(503)
+	}))
+	defer api.Close()
+	c := newClient(t, ts, api, nil)
+	err := c.PatchJSON(context.Background(), CalendarBase+"/calendars/primary/events/e1", nil, map[string]any{"start": "x"}, nil)
+	if !errors.Is(err, ErrSendOutcomeUnknown) || calls.Load() != 1 {
+		t.Fatalf("err %v calls %d, want ErrSendOutcomeUnknown after exactly 1 call", err, calls.Load())
+	}
+}

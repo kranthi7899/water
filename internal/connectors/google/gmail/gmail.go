@@ -126,7 +126,7 @@ var writeMessageSchema = connectors.Schema{
 	Required: []string{"to", "subject", "body"},
 }
 
-// message is the JSON shape Invoke returns and Normalize reads back, shared Invoke returns and Normalize reads back, shared
+// message is the JSON shape Invoke returns and Normalize reads back, shared
 // by both functions. list_messages fills Body with the snippet; get_message
 // fills it with the extracted body.
 type message struct {
@@ -700,10 +700,9 @@ func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) 
 			return nil, err
 		}
 		m := message{ID: w.ID, ThreadID: w.ThreadID, From: w.From, To: w.To, Subject: w.Subject, Body: w.Body, InternalDate: strconv.FormatInt(time.Now().UnixMilli(), 10)}
-		rec := toRecord(m, true)
-		// The agent wrote this content; it isn't someone else's mail.
-		rec.(*store.Message).External = false
-		return []store.Record{rec}, nil
+		// Stays External: a sent body can quote someone else's mail
+		// verbatim (agentmail's forwards do), so it is not clean content.
+		return []store.Record{toRecord(m, true)}, nil
 	}
 	return nil, nil
 }

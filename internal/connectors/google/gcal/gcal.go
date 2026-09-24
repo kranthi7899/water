@@ -359,15 +359,10 @@ func (c *Calendar) createEvent(ctx context.Context, v permit.Call) (json.RawMess
 	return json.Marshal(toEvent(resp, calendarID))
 }
 
-// moveEvent changes an event's start/end time via a partial update
-// (events.patch on Google's real API, which expects an HTTP PATCH). gapi
-// currently exposes only PostJSON (a single POST plus its idempotency
-// contract), so this sends the patch body as a POST to the same event
-// resource URL; making this byte-for-byte correct against real Google will
-// need a small gapi addition (a PatchJSON, or a method-override option on
-// PostJSON) before this goes live against a real account. Like
-// createEvent, an ErrSendOutcomeUnknown from gapi is surfaced as-is, never
-// retried automatically.
+// moveEvent changes an event's start/end time via events.patch (an HTTP
+// PATCH, under gapi's single-attempt write contract). Like createEvent, an
+// ErrSendOutcomeUnknown from gapi is surfaced as-is, never retried
+// automatically.
 func (c *Calendar) moveEvent(ctx context.Context, v permit.Call) (json.RawMessage, error) {
 	eventID := gapi.ArgString(v.Args, "event_id")
 	newStart := gapi.ArgString(v.Args, "new_start")
@@ -393,7 +388,7 @@ func (c *Calendar) moveEvent(ctx context.Context, v permit.Call) (json.RawMessag
 	}
 	endpoint := gapi.CalendarBase + "/calendars/" + url.PathEscape(calendarID) + "/events/" + url.PathEscape(eventID)
 	var resp wireEvent
-	if err := cl.PostJSON(ctx, endpoint, nil, body, &resp); err != nil {
+	if err := cl.PatchJSON(ctx, endpoint, nil, body, &resp); err != nil {
 		return nil, err
 	}
 	return json.Marshal(toEvent(resp, calendarID))
@@ -472,9 +467,10 @@ func (c *Calendar) Normalize(fn string, raw json.RawMessage) ([]store.Record, er
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return nil, err
 		}
-		// The twin wrote this event's content (or its new time), not someone
-		// else, so unlike list_events' output it is not External.
-		return []store.Record{toEventRecord(c.Name(), e, false)}, nil
+		// The twin wrote a created event's content, so it is not External.
+		// A moved event keeps whatever its creator wrote (title, location,
+		// attendees): only its time is the twin's, so it stays External.
+		return []store.Record{toEventRecord(c.Name(), e, fn == "move_event")}, nil
 	}
 	return nil, nil
 }
