@@ -1260,11 +1260,27 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - a missing intents directory gives an empty registry; `_shared.yaml` is required when the directory exists;
     - learned-file skip-and-report and embedded-wins.
   - Flag: none.
-- [ ] **R-7 Eval harness, held-out set, legacy baseline** (`internal/nervous/eval/{eval.go,eval_test.go,testdata/ceo_eval.yaml,testdata/ceo_eval_t1.yaml}`).
+- [x] **R-7 Eval harness, held-out set, legacy baseline** (`internal/nervous/eval/{eval.go,eval_test.go,testdata/ceo_eval.yaml,testdata/ceo_eval_t1.yaml}`).
   - **Written before any CEO intent file exists.**
   - A `legacyTier` adapter wraps the still-present `runtime.FastPath`. Record its hit rate and false accepts under a new "Baseline" heading in this file, in the same commit.
   - Tests: harness mechanics against a MapFS mini-registry; counts meet §18; the Wilson helper against known values.
   - Flag: none.
+
+  **Baseline (recorded R-7, 2026-09-24), measured with `legacyTier` wrapping `runtime.FastPath` over the 298-case `ceo_eval.yaml`:**
+
+  | Metric | Value |
+  |---|---|
+  | N (total cases) | 298 |
+  | Positives / Negatives | 192 / 106 |
+  | Hit rate (correct intent on a positive) | 6.2% |
+  | Intent accuracy (of answered cases) | 42.9% |
+  | False-accept rate | 5.4% |
+  | Wilson 95% upper bound on false-accept rate | 8.5% |
+  | Escalation rate | 90.6% |
+  | Reasoning/multi-clause cases answered | 10 (informational — old `FastPath` predates the `escalate_words`/`multi_clause` eligibility gate this slice adds, so it isn't held to that bar) |
+  | p50 / p95 latency | ~1µs / ~216µs |
+
+  The old fast path only ever recognizes 3 hardcoded phrase families (schedule/approvals/brief) against a 12-read + 4-write intent eval set, so a 6.2% hit rate and 90.6% escalation rate are expected, not a bug. This is the number Tier 0's acceptance criterion ("hit rate at least the legacy baseline plus 20 points", i.e. **at least 26.2%**, well under the criterion's own separate 50% floor) measures against once R-9/R-11 build the real Tier 0.
 - [ ] **R-8 Reflex handlers** (`internal/nervous/reflex/{reflex.go,handlers.go,storeview.go,imports_test.go}`, plus `runtime.CachedBrief` in `internal/runtime/brief.go`).
   - All 12 read functions with full `FunctionSpec`s (Class, ReadOnly, Deterministic, SideEffects, QuickTool per §7), `Table()` and `Specs()`.
   - Tests:
