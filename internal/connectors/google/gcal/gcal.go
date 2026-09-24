@@ -1,5 +1,8 @@
-// Package gcal is the read-only Google Calendar connector: it lists events
-// in a time range through gapi and normalizes them into store.Event.
+// Package gcal is the Google Calendar connector: it lists events in a time
+// range, creates events and moves their times, through the shared gapi
+// HTTP client. list_events' output is External (someone else may have
+// written the title/description/attendees); create_event/move_event
+// originate their own content, so neither is.
 package gcal
 
 import (
@@ -79,12 +82,23 @@ type wireEvent struct {
 }
 
 type wireWhen struct {
-	Date     string `json:"date"`
-	DateTime string `json:"dateTime"`
+	Date     string `json:"date,omitempty"`
+	DateTime string `json:"dateTime,omitempty"`
 }
 
 type wireAttendee struct {
 	Email string `json:"email"`
+}
+
+// writeEventBody is the request body for events.insert and events.patch:
+// only the fields water ever sets. Google's events resource has many more
+// fields; omitempty keeps a patch request (start/end only) from clobbering
+// anything else on the event.
+type writeEventBody struct {
+	Summary   string         `json:"summary,omitempty"`
+	Start     *wireWhen      `json:"start,omitempty"`
+	End       *wireWhen      `json:"end,omitempty"`
+	Attendees []wireAttendee `json:"attendees,omitempty"`
 }
 
 // Calendar is the gcal connector. opts is nil in production and set in
@@ -125,7 +139,60 @@ func (*Calendar) Functions() []connectors.Function {
 				},
 			},
 		},
+		{
+			Name:        "create_event",
+			Description: "Create a calendar event and invite attendees.",
+			Level:       twins.A,
+			Risk:        connectors.RiskMedium,
+			// The twin originates this event's content on the CEO's behalf;
+			// it is not carrying content someone else wrote.
+			External: false,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{
+					"title":       {Type: "string", Description: "event title"},
+					"start":       {Type: "string", Description: "RFC 3339 start time"},
+					"end":         {Type: "string", Description: "RFC 3339 end time"},
+					"attendees":   {Type: "array", Items: &connectors.Property{Type: "string"}, Description: "attendee email addresses"},
+					"calendar_id": {Type: "string", Description: `calendar id, default "primary"`},
+				},
+				Required: []string{"title", "start", "end", "attendees"},
+			},
+		},
+		{
+			Name:        "move_event",
+			Description: "Change an existing event's start and end time.",
+			Level:       twins.A,
+			Risk:        connectors.RiskMedium,
+			External:    false,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{
+					"event_id":    {Type: "string", Description: "event id to move"},
+					"new_start":   {Type: "string", Description: "RFC 3339 new start time"},
+					"new_end":     {Type: "string", Description: "RFC 3339 new end time"},
+					"calendar_id": {Type: "string", Description: `calendar id, default "primary"`},
+				},
+				Required: []string{"event_id", "new_start", "new_end"},
+			},
+		},
 	}
+}
+
+// argStrings reads a string-array argument, accepting both []any (JSON
+// decoding's shape) and []string (what tests construct directly).
+func argStrings(args map[string]any, k string) []string {
+	switch v := args[k].(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return v
+	}
+	return nil
 }
 
 func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, error) {
@@ -133,9 +200,18 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 	if err != nil {
 		return nil, err
 	}
-	if v.Function != "list_events" {
-		return nil, fmt.Errorf("gcal: unknown function %q", v.Function)
+	switch v.Function {
+	case "list_events":
+		return c.listEvents(ctx, v)
+	case "create_event":
+		return c.createEvent(ctx, v)
+	case "move_event":
+		return c.moveEvent(ctx, v)
 	}
+	return nil, fmt.Errorf("gcal: unknown function %q", v.Function)
+}
+
+func (c *Calendar) listEvents(ctx context.Context, v permit.Call) (json.RawMessage, error) {
 	timeMin := gapi.ArgString(v.Args, "time_min")
 	timeMax := gapi.ArgString(v.Args, "time_max")
 	syncToken := gapi.ArgString(v.Args, "sync_token")
@@ -244,6 +320,85 @@ func (c *Calendar) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage
 	return json.Marshal(listEventsOutput{Events: events, NextSyncToken: nextSyncToken, Truncated: truncated})
 }
 
+// createEvent calls events.insert. A create is not naturally idempotent
+// (calling it twice makes two events), so if gapi reports
+// ErrSendOutcomeUnknown, that is surfaced as-is rather than swallowed or
+// retried: the caller must check the calendar for the expected event before
+// ever trying again with a fresh envelope.
+func (c *Calendar) createEvent(ctx context.Context, v permit.Call) (json.RawMessage, error) {
+	title := gapi.ArgString(v.Args, "title")
+	start := gapi.ArgString(v.Args, "start")
+	end := gapi.ArgString(v.Args, "end")
+	if title == "" {
+		return nil, fmt.Errorf("gcal: title is required")
+	}
+	if _, err := time.Parse(time.RFC3339, start); err != nil {
+		return nil, fmt.Errorf("gcal: start must be RFC 3339: %w", err)
+	}
+	if _, err := time.Parse(time.RFC3339, end); err != nil {
+		return nil, fmt.Errorf("gcal: end must be RFC 3339: %w", err)
+	}
+	calendarID := gapi.ArgString(v.Args, "calendar_id")
+	if calendarID == "" {
+		calendarID = "primary"
+	}
+	body := writeEventBody{Summary: title, Start: &wireWhen{DateTime: start}, End: &wireWhen{DateTime: end}}
+	for _, email := range argStrings(v.Args, "attendees") {
+		body.Attendees = append(body.Attendees, wireAttendee{Email: email})
+	}
+
+	cl, err := gapi.FromSecret(v.Credential, c.opts)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := gapi.CalendarBase + "/calendars/" + url.PathEscape(calendarID) + "/events"
+	var resp wireEvent
+	if err := cl.PostJSON(ctx, endpoint, nil, body, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(toEvent(resp, calendarID))
+}
+
+// moveEvent changes an event's start/end time via a partial update
+// (events.patch on Google's real API, which expects an HTTP PATCH). gapi
+// currently exposes only PostJSON (a single POST plus its idempotency
+// contract), so this sends the patch body as a POST to the same event
+// resource URL; making this byte-for-byte correct against real Google will
+// need a small gapi addition (a PatchJSON, or a method-override option on
+// PostJSON) before this goes live against a real account. Like
+// createEvent, an ErrSendOutcomeUnknown from gapi is surfaced as-is, never
+// retried automatically.
+func (c *Calendar) moveEvent(ctx context.Context, v permit.Call) (json.RawMessage, error) {
+	eventID := gapi.ArgString(v.Args, "event_id")
+	newStart := gapi.ArgString(v.Args, "new_start")
+	newEnd := gapi.ArgString(v.Args, "new_end")
+	if eventID == "" {
+		return nil, fmt.Errorf("gcal: event_id is required")
+	}
+	if _, err := time.Parse(time.RFC3339, newStart); err != nil {
+		return nil, fmt.Errorf("gcal: new_start must be RFC 3339: %w", err)
+	}
+	if _, err := time.Parse(time.RFC3339, newEnd); err != nil {
+		return nil, fmt.Errorf("gcal: new_end must be RFC 3339: %w", err)
+	}
+	calendarID := gapi.ArgString(v.Args, "calendar_id")
+	if calendarID == "" {
+		calendarID = "primary"
+	}
+	body := writeEventBody{Start: &wireWhen{DateTime: newStart}, End: &wireWhen{DateTime: newEnd}}
+
+	cl, err := gapi.FromSecret(v.Credential, c.opts)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := gapi.CalendarBase + "/calendars/" + url.PathEscape(calendarID) + "/events/" + url.PathEscape(eventID)
+	var resp wireEvent
+	if err := cl.PostJSON(ctx, endpoint, nil, body, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(toEvent(resp, calendarID))
+}
+
 func toEvent(w wireEvent, calendarID string) Event {
 	var attendees []string
 	for _, a := range w.Attendees {
@@ -301,25 +456,38 @@ func eventTime(s string) time.Time {
 }
 
 func (c *Calendar) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) {
-	if fn != "list_events" {
-		return nil, nil
+	switch fn {
+	case "list_events":
+		var res listEventsOutput
+		if err := json.Unmarshal(raw, &res); err != nil {
+			return nil, err
+		}
+		out := make([]store.Record, 0, len(res.Events))
+		for _, e := range res.Events {
+			out = append(out, toEventRecord(c.Name(), e, true))
+		}
+		return out, nil
+	case "create_event", "move_event":
+		var e Event
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return nil, err
+		}
+		// The twin wrote this event's content (or its new time), not someone
+		// else, so unlike list_events' output it is not External.
+		return []store.Record{toEventRecord(c.Name(), e, false)}, nil
 	}
-	var res listEventsOutput
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return nil, err
+	return nil, nil
+}
+
+func toEventRecord(source string, e Event, external bool) store.Record {
+	return &store.Event{
+		Meta:      store.Meta{Source: source, SourceID: e.CalendarID + ":" + e.ID, External: external},
+		Title:     e.Title,
+		StartAt:   eventTime(e.Start),
+		EndAt:     eventTime(e.End),
+		Location:  e.Location,
+		Attendees: e.Attendees,
+		Organizer: e.Organizer,
+		Status:    e.Status,
 	}
-	out := make([]store.Record, 0, len(res.Events))
-	for _, e := range res.Events {
-		out = append(out, &store.Event{
-			Meta:      store.Meta{Source: c.Name(), SourceID: e.CalendarID + ":" + e.ID, External: true},
-			Title:     e.Title,
-			StartAt:   eventTime(e.Start),
-			EndAt:     eventTime(e.End),
-			Location:  e.Location,
-			Attendees: e.Attendees,
-			Organizer: e.Organizer,
-			Status:    e.Status,
-		})
-	}
-	return out, nil
 }

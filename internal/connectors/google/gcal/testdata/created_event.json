@@ -1,0 +1,9 @@
+{
+  "id": "created1",
+  "summary": "Board sync",
+  "status": "confirmed",
+  "htmlLink": "https://calendar.google.com/event?eid=created1",
+  "start": {"dateTime": "2026-10-01T14:00:00-04:00"},
+  "end": {"dateTime": "2026-10-01T15:00:00-04:00"},
+  "attendees": [{"email": "dana@acme.com"}, {"email": "priya@acme.com"}]
+}

@@ -1,16 +1,22 @@
-// Package gmail is the read-only Gmail connector: it lists and reads the
-// CEO's mail through the shared gapi HTTP client. Every message it returns
-// was written by someone else, so both its functions are External.
+// Package gmail is the Gmail connector: it lists and reads the CEO's mail,
+// and drafts/sends mail as the agent, through the shared gapi HTTP client.
+// Every message list_messages/get_message return was written by someone
+// else, so both are External; draft_message/send_message originate their
+// own content, so neither is.
 package gmail
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -41,13 +47,21 @@ const maxPages = 20
 var ErrHistoryTooOld = errors.New("gmail: history too old, full resync needed")
 
 // Gmail is the connector. opts is nil in production and set in tests to
-// point at a fake server.
-type Gmail struct{ opts *gapi.Options }
+// point at a fake server. mailAddress is the agent's verified "Send mail
+// as" alias (config's agent.mail_address): draft_message/send_message
+// always set MIME From: to this address, never the primary account's own,
+// and never anything an args map supplies (there is no "from" argument).
+type Gmail struct {
+	opts        *gapi.Options
+	mailAddress string
+}
 
-func New() *Gmail { return &Gmail{} }
+func New(mailAddress string) *Gmail { return &Gmail{mailAddress: mailAddress} }
 
 // NewWithOptions builds a Gmail connector against test doubles.
-func NewWithOptions(o *gapi.Options) *Gmail { return &Gmail{opts: o} }
+func NewWithOptions(mailAddress string, o *gapi.Options) *Gmail {
+	return &Gmail{mailAddress: mailAddress, opts: o}
+}
 
 func (*Gmail) Name() string                 { return connName }
 func (*Gmail) Credential() (string, string) { return gapi.Service, gapi.DefaultAccount }
@@ -79,10 +93,40 @@ func (*Gmail) Functions() []connectors.Function {
 				Required:   []string{"id"},
 			},
 		},
+		{
+			Name:        "draft_message",
+			Description: "Create a Gmail draft from the agent alias. Nothing is sent.",
+			Level:       twins.D,
+			Risk:        connectors.RiskLow,
+			External:    false,
+			Schema:      writeMessageSchema,
+		},
+		{
+			Name:        "send_message",
+			Description: "Send a Gmail message from the agent alias. This has an external effect and cannot be undone.",
+			Level:       twins.A,
+			Risk:        connectors.RiskHigh,
+			External:    false,
+			Schema:      writeMessageSchema,
+		},
 	}
 }
 
-// message is the JSON shape Invoke returns and Normalize reads back, shared
+// writeMessageSchema is shared by draft_message and send_message: there is
+// deliberately no "from" property, so no args map can ever set it -- the
+// From address is always g.mailAddress, read from config, never from a
+// caller.
+var writeMessageSchema = connectors.Schema{
+	Properties: map[string]connectors.Property{
+		"to":              {Type: "array", Items: &connectors.Property{Type: "string"}, Description: "recipient email addresses"},
+		"subject":         {Type: "string", Description: "subject line"},
+		"body":            {Type: "string", Description: "plain-text body"},
+		"html_attachment": {Type: "string", Description: "optional pre-rendered HTML alternative body"},
+	},
+	Required: []string{"to", "subject", "body"},
+}
+
+// message is the JSON shape Invoke returns and Normalize reads back, shared Invoke returns and Normalize reads back, shared
 // by both functions. list_messages fills Body with the snippet; get_message
 // fills it with the extracted body.
 type message struct {
@@ -146,6 +190,10 @@ func (g *Gmail) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, e
 		return g.listMessages(ctx, cl, v.Args)
 	case "get_message":
 		return g.getMessage(ctx, cl, v.Args)
+	case "draft_message":
+		return g.draftMessage(ctx, cl, v.Args)
+	case "send_message":
+		return g.sendMessage(ctx, cl, v.Args)
 	}
 	return nil, fmt.Errorf("gmail: unknown function %q", v.Function)
 }
@@ -387,6 +435,155 @@ func (g *Gmail) getMessage(ctx context.Context, cl *gapi.Client, args map[string
 	return json.Marshal(m)
 }
 
+// writeMessageOutput is draft_message/send_message's JSON output: the ids
+// Gmail assigned plus the content that was actually built, since Gmail's
+// create/send responses don't echo the message back. Normalize reads this
+// to index what the agent said, not what the API returned.
+type writeMessageOutput struct {
+	ID       string   `json:"id"`
+	ThreadID string   `json:"thread_id,omitempty"`
+	DraftID  string   `json:"draft_id,omitempty"`
+	From     string   `json:"from"`
+	To       []string `json:"to"`
+	Subject  string   `json:"subject"`
+	Body     string   `json:"body"`
+}
+
+func (g *Gmail) draftMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	to, subject, body, html, err := g.readMessageArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage(g.mailAddress, to, subject, body, html)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Message struct {
+			ID       string `json:"id"`
+			ThreadID string `json:"threadId"`
+		} `json:"message"`
+	}
+	payload := map[string]any{"message": map[string]any{"raw": raw}}
+	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/drafts", nil, payload, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, From: g.mailAddress, To: to, Subject: subject, Body: body})
+}
+
+// sendMessage sends exactly once through gapi.PostJSON. A returned
+// gapi.ErrSendOutcomeUnknown is passed straight back, never swallowed into
+// a generic error, so a caller can errors.Is it and surface "uncertain,
+// check Sent folder" instead of assuming success or retrying on its own.
+func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	to, subject, body, html, err := g.readMessageArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage(g.mailAddress, to, subject, body, html)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ID       string `json:"id"`
+		ThreadID string `json:"threadId"`
+	}
+	payload := map[string]any{"raw": raw}
+	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/messages/send", nil, payload, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(writeMessageOutput{ID: resp.ID, ThreadID: resp.ThreadID, From: g.mailAddress, To: to, Subject: subject, Body: body})
+}
+
+// readMessageArgs reads to/subject/body/html_attachment from args. There is
+// no "from" argument to read: the schema declares none, and even a caller
+// that smuggled one into args (bypassing schema validation) would be
+// ignored here -- the From address is always g.mailAddress, the CEO's
+// configured agent alias, set once at connect time, not per call.
+func (g *Gmail) readMessageArgs(args map[string]any) (to []string, subject, body, html string, err error) {
+	if g.mailAddress == "" {
+		return nil, "", "", "", errors.New("gmail: agent.mail_address is not configured; verify the agent's Gmail alias and set it before sending")
+	}
+	to = argStrings(args, "to")
+	if len(to) == 0 {
+		return nil, "", "", "", errors.New("gmail: to is required")
+	}
+	return to, gapi.ArgString(args, "subject"), gapi.ArgString(args, "body"), gapi.ArgString(args, "html_attachment"), nil
+}
+
+func argStrings(args map[string]any, key string) []string {
+	switch v := args[key].(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return v
+	}
+	return nil
+}
+
+// sanitizeHeaderValue strips CR/LF so no argument can inject an extra
+// header or smuggle content past the blank line ending the header block.
+func sanitizeHeaderValue(s string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+}
+
+// buildRawMessage builds an RFC 2822 message with a fixed From, base64url
+// encoded as Gmail's drafts.create/messages.send "raw" field wants. When
+// html is empty the message is a single text/plain part; otherwise it is
+// multipart/alternative with body as the plain part and html as the html
+// part, so a client with no HTML rendering still shows the plain text.
+func buildRawMessage(from string, to []string, subject, body, html string) (string, error) {
+	var head bytes.Buffer
+	hdr := func(k, v string) { fmt.Fprintf(&head, "%s: %s\r\n", k, sanitizeHeaderValue(v)) }
+	hdr("From", from)
+	hdr("To", strings.Join(to, ", "))
+	hdr("Subject", mime.QEncoding.Encode("UTF-8", subject))
+	head.WriteString("MIME-Version: 1.0\r\n")
+
+	if html == "" {
+		head.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		head.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+		head.WriteString(body)
+		return base64.URLEncoding.EncodeToString(head.Bytes()), nil
+	}
+
+	var parts bytes.Buffer
+	mw := multipart.NewWriter(&parts)
+	plainPart, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {`text/plain; charset="UTF-8"`},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if _, err := plainPart.Write([]byte(body)); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	htmlPart, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {`text/html; charset="UTF-8"`},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	if err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if _, err := htmlPart.Write([]byte(html)); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if err := mw.Close(); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	fmt.Fprintf(&head, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", mw.Boundary())
+	head.Write(parts.Bytes())
+	return base64.URLEncoding.EncodeToString(head.Bytes()), nil
+}
+
 func headerValues(hs []header) (from, to, subject string) {
 	for _, h := range hs {
 		switch strings.ToLower(h.Name) {
@@ -497,6 +694,16 @@ func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) 
 			return nil, err
 		}
 		return []store.Record{toRecord(m, true)}, nil
+	case "send_message":
+		var w writeMessageOutput
+		if err := json.Unmarshal(raw, &w); err != nil {
+			return nil, err
+		}
+		m := message{ID: w.ID, ThreadID: w.ThreadID, From: w.From, To: w.To, Subject: w.Subject, Body: w.Body, InternalDate: strconv.FormatInt(time.Now().UnixMilli(), 10)}
+		rec := toRecord(m, true)
+		// The agent wrote this content; it isn't someone else's mail.
+		rec.(*store.Message).External = false
+		return []store.Record{rec}, nil
 	}
 	return nil, nil
 }

@@ -78,12 +78,15 @@ connectors:
   - name: gcal
     functions:
       - {name: list_events, level: R}
+      - {name: create_event, level: A}
+      - {name: move_event, level: A}
 `
 
 // harness wires one gcal connector through a real gate, the only way to mint
 // the permit Invoke needs.
 type harness struct {
 	g   *gate.Gate
+	q   *approvals.Queue
 	st  *store.Store
 	log *audit.Log
 }
@@ -116,12 +119,41 @@ func newHarness(t *testing.T, conn *Calendar) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{g: g, st: st, log: log}
+	return &harness{g: g, q: q, st: st, log: log}
 }
 
 func listEvents(t *testing.T, h *harness, args map[string]any) (gate.Result, error) {
 	t.Helper()
 	return h.g.Invoke(context.Background(), gate.Call{Function: "gcal.list_events", Args: args, Origin: gate.P0, Taint: gate.Clean})
+}
+
+// approve proposes and immediately decides yes on an envelope for action
+// with the given payload, mirroring internal/gate's own test helper: A-level
+// calls in these tests reach the connector only through this path, exactly
+// like the real approval flow.
+func (h *harness) approve(t *testing.T, action string, payload map[string]any) approvals.Envelope {
+	t.Helper()
+	ctx := context.Background()
+	e, err := h.q.Propose(ctx, approvals.Envelope{Action: action, Payload: payload, Origin: "p0", Risk: "medium"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, err = h.q.Decide(ctx, e.ID, approvals.Yes); err != nil || e.Status != approvals.Approved {
+		t.Fatalf("approve: %+v %v", e, err)
+	}
+	return e
+}
+
+func createEvent(t *testing.T, h *harness, args map[string]any) (gate.Result, error) {
+	t.Helper()
+	e := h.approve(t, "gcal.create_event", args)
+	return h.g.Invoke(context.Background(), gate.Call{Function: "gcal.create_event", Args: args, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID})
+}
+
+func moveEvent(t *testing.T, h *harness, args map[string]any) (gate.Result, error) {
+	t.Helper()
+	e := h.approve(t, "gcal.move_event", args)
+	return h.g.Invoke(context.Background(), gate.Call{Function: "gcal.move_event", Args: args, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID})
 }
 
 var basicRange = map[string]any{"time_min": "2026-09-24T00:00:00Z", "time_max": "2026-09-30T00:00:00Z"}
@@ -147,6 +179,50 @@ func TestFunctionDeclaration(t *testing.T) {
 	if New().Name() != "gcal" {
 		t.Fatal("connector name")
 	}
+}
+
+// TestWriteFunctionDeclarations checks the two write functions are level A
+// (an outward effect always needs an approved envelope, never inline
+// execution) and originate their own content rather than someone else's.
+func TestWriteFunctionDeclarations(t *testing.T) {
+	fns := New().Functions()
+	byName := map[string]connectors.Function{}
+	for _, f := range fns {
+		byName[f.Name] = f
+	}
+	ce, ok := byName["create_event"]
+	if !ok || ce.Level != twins.A || ce.External {
+		t.Fatalf("create_event: %+v", ce)
+	}
+	if err := ce.Schema.Validate(map[string]any{"title": "x", "start": "a", "end": "b", "attendees": []any{}}); err != nil {
+		t.Fatalf("create_event schema rejects its own required fields: %v", err)
+	}
+	for _, req := range []string{"title", "start", "end", "attendees"} {
+		if !contains(ce.Schema.Required, req) {
+			t.Fatalf("create_event: %q not required", req)
+		}
+	}
+	me, ok := byName["move_event"]
+	if !ok || me.Level != twins.A || me.External {
+		t.Fatalf("move_event: %+v", me)
+	}
+	if err := me.Schema.Validate(map[string]any{"event_id": "e1", "new_start": "a", "new_end": "b"}); err != nil {
+		t.Fatalf("move_event schema rejects its own required fields: %v", err)
+	}
+	for _, req := range []string{"event_id", "new_start", "new_end"} {
+		if !contains(me.Schema.Required, req) {
+			t.Fatalf("move_event: %q not required", req)
+		}
+	}
+}
+
+func contains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // TestSchemaValidation covers what the flat JSON-schema layer alone checks:
@@ -717,5 +793,237 @@ func TestTimeRangeTruncatedByMaxSeedsNoCursor(t *testing.T) {
 	}
 	if !out.Truncated || out.NextSyncToken != "" {
 		t.Fatalf("truncated=%v next_sync_token=%q, want truncated with no cursor", out.Truncated, out.NextSyncToken)
+	}
+}
+
+// decodeEvent unpacks a create_event/move_event output (a single Event).
+func decodeEvent(t *testing.T, raw json.RawMessage) Event {
+	t.Helper()
+	var e Event
+	if err := json.Unmarshal(raw, &e); err != nil {
+		t.Fatalf("decode event: %v", err)
+	}
+	return e
+}
+
+var createArgs = map[string]any{
+	"title":     "Board sync",
+	"start":     "2026-10-01T14:00:00-04:00",
+	"end":       "2026-10-01T15:00:00-04:00",
+	"attendees": []any{"dana@acme.com", "priya@acme.com"},
+}
+
+func TestCreateEventSendsGooglesRealBodyShapeAndNormalizes(t *testing.T) {
+	ts := newTokenServer(t)
+	created := fixture(t, "created_event.json")
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(created)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := createEvent(t, h, createArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/calendar/v3/calendars/primary/events" {
+		t.Fatalf("method=%s path=%s", gotMethod, gotPath)
+	}
+	// Google's real events resource nests times under start.dateTime /
+	// end.dateTime, not flat start/end fields.
+	start, ok := gotBody["start"].(map[string]any)
+	if !ok || start["dateTime"] != createArgs["start"] {
+		t.Fatalf("start = %#v", gotBody["start"])
+	}
+	end, ok := gotBody["end"].(map[string]any)
+	if !ok || end["dateTime"] != createArgs["end"] {
+		t.Fatalf("end = %#v", gotBody["end"])
+	}
+	if gotBody["summary"] != "Board sync" {
+		t.Fatalf("summary = %#v", gotBody["summary"])
+	}
+	attendees, ok := gotBody["attendees"].([]any)
+	if !ok || len(attendees) != 2 {
+		t.Fatalf("attendees = %#v", gotBody["attendees"])
+	}
+	if a0, _ := attendees[0].(map[string]any); a0["email"] != "dana@acme.com" {
+		t.Fatalf("attendees[0] = %#v", attendees[0])
+	}
+
+	if res.Untrusted {
+		t.Fatal("create_event's own output is not External/Untrusted: the twin wrote it")
+	}
+	ev := decodeEvent(t, res.Output)
+	if ev.ID != "created1" || ev.Title != "Board sync" {
+		t.Fatalf("event: %+v", ev)
+	}
+	if len(res.Records) != 1 {
+		t.Fatalf("records %d, want 1", len(res.Records))
+	}
+	rec, ok := res.Records[0].(*store.Event)
+	if !ok || rec.External {
+		t.Fatalf("record: %+v", res.Records[0])
+	}
+	if rec.SourceID != "primary:created1" {
+		t.Fatalf("source id %q", rec.SourceID)
+	}
+}
+
+func TestCreateEventInvalidTimesNeverReachTheAPI(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("API reached with an invalid time argument")
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	args := map[string]any{"title": "x", "start": "not-a-time", "end": createArgs["end"], "attendees": []any{}}
+	if _, err := createEvent(t, h, args); err == nil || !strings.Contains(err.Error(), "RFC 3339") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// TestCreateEventAmbiguousOutcomeSurfacesDistinctly: a 5xx after Google
+// received the insert must come back as ErrSendOutcomeUnknown, not a plain
+// error and not a silent retry (exactly one POST reaches the server).
+func TestCreateEventAmbiguousOutcomeSurfacesDistinctly(t *testing.T) {
+	ts := newTokenServer(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"code":500,"message":"Backend Error"}}`)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	_, err := createEvent(t, h, createArgs)
+	if !errors.Is(err, gapi.ErrSendOutcomeUnknown) {
+		t.Fatalf("got %v, want ErrSendOutcomeUnknown", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("calls %d, want exactly 1 (no blind retry on a write)", calls.Load())
+	}
+}
+
+// TestCreateEventDefiniteFailureIsNotAmbiguous: a clean 4xx is a definite,
+// safe-to-report failure and must not be confused with ErrSendOutcomeUnknown.
+func TestCreateEventDefiniteFailureIsNotAmbiguous(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":{"code":400,"message":"Invalid attendee"}}`)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	_, err := createEvent(t, h, createArgs)
+	if err == nil || errors.Is(err, gapi.ErrSendOutcomeUnknown) {
+		t.Fatalf("got %v, want a definite (non-ambiguous) failure", err)
+	}
+}
+
+var moveArgs = map[string]any{
+	"event_id":  "e5",
+	"new_start": "2026-10-02T16:00:00-04:00",
+	"new_end":   "2026-10-02T16:30:00-04:00",
+}
+
+func TestMoveEventSendsGooglesRealBodyShapeAndNormalizes(t *testing.T) {
+	ts := newTokenServer(t)
+	patched := fixture(t, "patched_event.json")
+	var gotPath string
+	var gotBody map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(patched)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := moveEvent(t, h, moveArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "/calendar/v3/calendars/primary/events/e5"; gotPath != want {
+		t.Fatalf("path = %q, want %q", gotPath, want)
+	}
+	start, ok := gotBody["start"].(map[string]any)
+	if !ok || start["dateTime"] != moveArgs["new_start"] {
+		t.Fatalf("start = %#v", gotBody["start"])
+	}
+	end, ok := gotBody["end"].(map[string]any)
+	if !ok || end["dateTime"] != moveArgs["new_end"] {
+		t.Fatalf("end = %#v", gotBody["end"])
+	}
+	if _, has := gotBody["summary"]; has {
+		t.Fatalf("move_event must not send a summary field (partial update only): %#v", gotBody)
+	}
+
+	ev := decodeEvent(t, res.Output)
+	if ev.ID != "e5" {
+		t.Fatalf("event: %+v", ev)
+	}
+	if len(res.Records) != 1 {
+		t.Fatalf("records %d, want 1", len(res.Records))
+	}
+	if rec := res.Records[0].(*store.Event); rec.External || rec.SourceID != "primary:e5" {
+		t.Fatalf("record: %+v", rec)
+	}
+}
+
+func TestMoveEventInvalidTimesNeverReachTheAPI(t *testing.T) {
+	ts := newTokenServer(t)
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("API reached with an invalid time argument")
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	args := map[string]any{"event_id": "e5", "new_start": "nope", "new_end": moveArgs["new_end"]}
+	if _, err := moveEvent(t, h, args); err == nil || !strings.Contains(err.Error(), "RFC 3339") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// TestMoveEventAmbiguousOutcomeSurfacesDistinctly mirrors create_event's:
+// a 5xx on the patch attempt must not be silently retried.
+func TestMoveEventAmbiguousOutcomeSurfacesDistinctly(t *testing.T) {
+	ts := newTokenServer(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		fmt.Fprint(w, `{"error":{"code":503,"message":"backend unavailable"}}`)
+	}))
+	defer api.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	_, err := moveEvent(t, h, moveArgs)
+	if !errors.Is(err, gapi.ErrSendOutcomeUnknown) {
+		t.Fatalf("got %v, want ErrSendOutcomeUnknown", err)
+	}
+	if gapi.Status(err) != 503 {
+		t.Fatalf("Status(err) = %d, want 503", gapi.Status(err))
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("calls %d, want exactly 1 (no blind retry on a write)", calls.Load())
+	}
+}
+
+// TestMoveEventNetworkErrorIsAmbiguous: a transport failure (no response at
+// all) is exactly what ErrSendOutcomeUnknown exists for.
+func TestMoveEventNetworkErrorIsAmbiguous(t *testing.T) {
+	ts := newTokenServer(t)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: dead.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	_, err := moveEvent(t, h, moveArgs)
+	if !errors.Is(err, gapi.ErrSendOutcomeUnknown) {
+		t.Fatalf("got %v, want ErrSendOutcomeUnknown", err)
 	}
 }

@@ -1,12 +1,18 @@
 package gmail
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +34,10 @@ import (
 const (
 	testSecret  = "GOCSPX-test-secret-xyz"
 	testRefresh = "1//test-refresh-token-abc"
+	// testAgentAddress is the configured agent.mail_address alias used
+	// throughout: draft_message/send_message must always set From to this,
+	// never anything an args map supplies.
+	testAgentAddress = "water.twin@gmail.com"
 )
 
 func noSleep(context.Context, time.Duration) error { return nil }
@@ -130,32 +140,50 @@ func getMessage(t *testing.T, h *harness, args map[string]any) (gate.Result, err
 }
 
 func TestFunctionDeclaration(t *testing.T) {
-	fns := New().Functions()
-	if len(fns) != 2 {
-		t.Fatalf("functions %d, want 2", len(fns))
+	fns := New(testAgentAddress).Functions()
+	if len(fns) != 4 {
+		t.Fatalf("functions %d, want 4", len(fns))
 	}
+	byName := map[string]connectors.Function{}
 	for _, fn := range fns {
+		byName[fn.Name] = fn
+	}
+	for _, name := range []string{"list_messages", "get_message"} {
+		fn := byName[name]
 		if fn.Level != twins.R || fn.Risk != connectors.RiskLow || !fn.External {
-			t.Fatalf("%s declaration: %+v", fn.Name, fn)
+			t.Fatalf("%s declaration: %+v", name, fn)
 		}
 	}
-	if svc, acct := New().Credential(); svc != gapi.Service || acct != gapi.DefaultAccount {
+	// draft_message/send_message originate their own content (they don't
+	// receive anyone else's), so External is false for both, unlike the
+	// read functions above.
+	if fn := byName["draft_message"]; fn.Level != twins.D || fn.Risk != connectors.RiskLow || fn.External {
+		t.Fatalf("draft_message declaration: %+v", fn)
+	}
+	if fn := byName["send_message"]; fn.Level != twins.A || fn.External {
+		t.Fatalf("send_message declaration: %+v", fn)
+	}
+	if svc, acct := New(testAgentAddress).Credential(); svc != gapi.Service || acct != gapi.DefaultAccount {
 		t.Fatalf("credential: %s/%s", svc, acct)
 	}
-	if New().Name() != "gmail" {
+	if New(testAgentAddress).Name() != "gmail" {
 		t.Fatal("connector name")
 	}
 }
 
 func TestSchemaValidation(t *testing.T) {
-	fns := New().Functions()
-	var listSchema, getSchema connectors.Schema
+	fns := New(testAgentAddress).Functions()
+	var listSchema, getSchema, draftSchema, sendSchema connectors.Schema
 	for _, fn := range fns {
 		switch fn.Name {
 		case "list_messages":
 			listSchema = fn.Schema
 		case "get_message":
 			getSchema = fn.Schema
+		case "draft_message":
+			draftSchema = fn.Schema
+		case "send_message":
+			sendSchema = fn.Schema
 		}
 	}
 	cases := []struct {
@@ -175,6 +203,15 @@ func TestSchemaValidation(t *testing.T) {
 		{"get: valid id", getSchema, map[string]any{"id": "m1"}, true},
 		{"get: id wrong type", getSchema, map[string]any{"id": 5}, false},
 		{"get: unexpected argument", getSchema, map[string]any{"id": "m1", "extra": true}, false},
+		{"draft: missing to/subject/body", draftSchema, map[string]any{}, false},
+		{"draft: valid", draftSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b"}, true},
+		{"draft: valid with html_attachment", draftSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "html_attachment": "<p>hi</p>"}, true},
+		{"draft: missing body", draftSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s"}, false},
+		{"draft: to wrong type", draftSchema, map[string]any{"to": "dana@acme.com", "subject": "s", "body": "b"}, false},
+		{"draft: from is not a schema property", draftSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "from": "attacker@evil.com"}, false},
+		{"send: missing to/subject/body", sendSchema, map[string]any{}, false},
+		{"send: valid", sendSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b"}, true},
+		{"send: from is not a schema property", sendSchema, map[string]any{"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "from": "attacker@evil.com"}, false},
 	}
 	for _, tc := range cases {
 		err := tc.schema.Validate(tc.args)
@@ -216,7 +253,7 @@ func TestNormalizesPaginatesAndMarksExternal(t *testing.T) {
 	})
 	defer api.Close()
 
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	res, err := listMessages(t, h, map[string]any{"max": json.Number("3")})
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +329,7 @@ func TestMaxCapsResultsAndStopsPaginating(t *testing.T) {
 	}))
 	defer api.Close()
 
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	res, err := listMessages(t, h, map[string]any{"max": json.Number("1")})
 	if err != nil {
 		t.Fatal(err)
@@ -324,7 +361,7 @@ func TestUnauthorizedRefreshesOnceThenRetries(t *testing.T) {
 		w.Write(full)
 	}))
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	res, err := getMessage(t, h, map[string]any{"id": "m-flat"})
 	if err != nil {
 		t.Fatal(err)
@@ -363,7 +400,7 @@ func TestBackoffOn429ThenSucceeds(t *testing.T) {
 		mu.Unlock()
 		return nil
 	}
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: sleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: sleep}))
 	res, err := getMessage(t, h, map[string]any{"id": "m-flat"})
 	if err != nil {
 		t.Fatal(err)
@@ -391,7 +428,7 @@ func TestSecretsNeverLeakInErrorsOrOutput(t *testing.T) {
 		fmt.Fprintf(w, `{"error":{"code":400,"message":"bad request for %s / %s / %s"}}`, tok, testRefresh, testSecret)
 	}))
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	_, err := listMessages(t, h, nil)
 	if err == nil {
 		t.Fatal("expected an error")
@@ -448,7 +485,7 @@ func TestMimeWalking(t *testing.T) {
 				w.Write(body)
 			}))
 			defer api.Close()
-			h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+			h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 			res, err := getMessage(t, h, map[string]any{"id": "x"})
 			if err != nil {
 				t.Fatal(err)
@@ -484,7 +521,7 @@ func TestMimeWalking(t *testing.T) {
 }
 
 func TestNormalizeUnknownFunction(t *testing.T) {
-	rec, err := New().Normalize("something_else", json.RawMessage(`{}`))
+	rec, err := New(testAgentAddress).Normalize("something_else", json.RawMessage(`{}`))
 	if err != nil || rec != nil {
 		t.Fatalf("unknown function: %v %v", rec, err)
 	}
@@ -516,7 +553,7 @@ func TestListMessagesSinceHistoryID_FetchesAddedAndDedupesAcrossPages(t *testing
 	})
 	defer api.Close()
 
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	res, err := listMessages(t, h, map[string]any{"since_history_id": "100"})
 	if err != nil {
 		t.Fatal(err)
@@ -577,7 +614,7 @@ func TestListMessagesSinceHistoryID_SkipsDeletedMessage(t *testing.T) {
 	}))
 	defer api.Close()
 
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	res, err := listMessages(t, h, map[string]any{"since_history_id": "1"})
 	if err != nil {
 		t.Fatalf("expected the deleted message to be skipped, not to fail the call: %v", err)
@@ -620,7 +657,7 @@ func TestListMessagesSinceHistoryID_TooOld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = New().listMessagesSinceHistory(context.Background(), cl, "999999", 20)
+	_, err = New(testAgentAddress).listMessagesSinceHistory(context.Background(), cl, "999999", 20)
 	if err == nil {
 		t.Fatal("expected an error")
 	}
@@ -646,7 +683,7 @@ func TestListMessagesSinceHistoryID_NoSecretLeak(t *testing.T) {
 		fmt.Fprintf(w, `{"error":{"code":400,"message":"bad request for %s / %s / %s"}}`, tok, testRefresh, testSecret)
 	}))
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 	_, err := listMessages(t, h, map[string]any{"since_history_id": "1"})
 	if err == nil {
 		t.Fatal("expected an error")
@@ -774,7 +811,7 @@ func TestListMessagesSinceHistoryID_MoreThanMaxResumesWhereItStopped(t *testing.
 	f := &fakeHistory{t: t, base: 100, n: 45, perPage: 100, latest: "9999"}
 	api := f.server()
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 
 	first, cursor := drainHistory(t, h, "100", nil, 1)
 	if len(first) != 20 || first[0] != "m1" || first[19] != "m20" {
@@ -807,7 +844,7 @@ func TestListMessagesSinceHistoryID_MaxPagesResumesWhereItStopped(t *testing.T) 
 	f := &fakeHistory{t: t, base: 100, n: maxPages + 5, perPage: 1, latest: "9999"}
 	api := f.server()
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 
 	extra := map[string]any{"max": json.Number("100")}
 	first, cursor := drainHistory(t, h, "100", extra, 1)
@@ -837,7 +874,7 @@ func TestListMessagesSinceHistoryID_SkipsSpamTrashAndDrafts(t *testing.T) {
 		noFetch: map[string]bool{"m1": true, "m2": true, "m3": true}}
 	api := f.server()
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 
 	ids, cursor := drainHistory(t, h, "100", map[string]any{"max": json.Number("2")}, 1)
 	if len(ids) != 2 || ids[0] != "m4" || ids[1] != "m5" {
@@ -859,7 +896,7 @@ func TestListDoesNotOverwriteFullBody(t *testing.T) {
 		"/gmail/v1/users/me/messages/m-flat?format=metadata": []byte(`{"id":"m-flat","threadId":"t-flat","snippet":"Confirmed","internalDate":"1758700000000","payload":{"headers":[{"name":"Subject","value":"Q3, flat (edited)"}]}}`),
 	})
 	defer api.Close()
-	h := newHarness(t, NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
 
 	if _, err := getMessage(t, h, map[string]any{"id": "m-flat"}); err != nil {
 		t.Fatal(err)
@@ -879,5 +916,349 @@ func TestListDoesNotOverwriteFullBody(t *testing.T) {
 	}
 	if !got.BodyFull {
 		t.Fatal("BodyFull should stay set once a full body has been stored")
+	}
+}
+
+// newDirectClient builds a *gapi.Client straight from gapi.New, bypassing
+// the gate. draft_message/send_message tests use this (not the harness)
+// for the same reason TestListMessagesSinceHistoryID_TooOld does: the gate
+// redacts a failed call's error into a plain new error, discarding any
+// wrapped sentinel's identity, so an errors.Is(err, ErrSendOutcomeUnknown)
+// assertion has to check at this package's own boundary.
+func newDirectClient(t *testing.T, ts *tokenServer, api *httptest.Server) *gapi.Client {
+	t.Helper()
+	cred := gapi.Credential{ClientID: "cid.apps.googleusercontent.com", ClientSecret: testSecret, RefreshToken: testRefresh}
+	cl, err := gapi.New(cred, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cl
+}
+
+// recordedRequest is one POST gmailWriteAPI captured.
+type recordedRequest struct {
+	method string
+	path   string
+	body   map[string]any
+}
+
+// gmailWriteAPI is a fixture for drafts.create/messages.send: it records
+// every request's method, path and decoded JSON body, and answers every
+// request with the same canned status/body.
+type gmailWriteAPI struct {
+	mu       sync.Mutex
+	requests []recordedRequest
+	status   int
+	resp     string
+}
+
+func (a *gmailWriteAPI) server() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		a.mu.Lock()
+		a.requests = append(a.requests, recordedRequest{method: r.Method, path: r.URL.Path, body: body})
+		status := a.status
+		a.mu.Unlock()
+		if status == 0 {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		fmt.Fprint(w, a.resp)
+	}))
+}
+
+func (a *gmailWriteAPI) calls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.requests)
+}
+
+func (a *gmailWriteAPI) last() recordedRequest {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.requests[len(a.requests)-1]
+}
+
+// rawFromBody extracts and base64url-decodes the MIME message a request
+// body carried: top-level "raw" for messages.send, "message.raw" (nested)
+// for drafts.create.
+func rawFromBody(t *testing.T, body map[string]any, draft bool) []byte {
+	t.Helper()
+	var raw string
+	if draft {
+		msg, ok := body["message"].(map[string]any)
+		if !ok {
+			t.Fatalf("body has no message object: %v", body)
+		}
+		raw, _ = msg["raw"].(string)
+	} else {
+		raw, _ = body["raw"].(string)
+	}
+	if raw == "" {
+		t.Fatalf("body has no raw field: %v", body)
+	}
+	b, err := base64.URLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("raw is not valid base64url: %v", err)
+	}
+	return b
+}
+
+func TestDraftMessageCreatesDraftViaPost(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"d1","message":{"id":"m1","threadId":"t1"}}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress)
+	out, err := g.draftMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "Q4 numbers", "body": "Could you share the breakdown?",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.calls() != 1 {
+		t.Fatalf("calls = %d, want 1", api.calls())
+	}
+	last := api.last()
+	if last.method != http.MethodPost || last.path != "/gmail/v1/users/me/drafts" {
+		t.Fatalf("request %s %s, want POST /gmail/v1/users/me/drafts", last.method, last.path)
+	}
+	raw := rawFromBody(t, last.body, true)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.Header.Get("From"); got != testAgentAddress {
+		t.Fatalf("From = %q, want %q", got, testAgentAddress)
+	}
+	var w writeMessageOutput
+	if err := json.Unmarshal(out, &w); err != nil {
+		t.Fatal(err)
+	}
+	if w.DraftID != "d1" || w.ID != "m1" || w.ThreadID != "t1" {
+		t.Fatalf("output %+v", w)
+	}
+	// A draft is not sent mail: unlike send_message, it must not be indexed
+	// as a store record (matching fake.go's draft_reply, which isn't either).
+	rec, err := (&Gmail{}).Normalize("draft_message", out)
+	if err != nil || rec != nil {
+		t.Fatalf("draft_message normalize: %v %v, want nil, nil", rec, err)
+	}
+}
+
+func TestSendMessageSendsExactlyOnceAndNormalizesAsOwnContent(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"m9","threadId":"t9"}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress)
+	out, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "Re: Q3 budget", "body": "Sounds good.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.calls() != 1 {
+		t.Fatalf("calls = %d, want exactly 1", api.calls())
+	}
+	last := api.last()
+	if last.path != "/gmail/v1/users/me/messages/send" {
+		t.Fatalf("path %s, want /gmail/v1/users/me/messages/send", last.path)
+	}
+	rec, err := (&Gmail{}).Normalize("send_message", out)
+	if err != nil || len(rec) != 1 {
+		t.Fatalf("normalize: %v %d", err, len(rec))
+	}
+	m, ok := rec[0].(*store.Message)
+	if !ok || m.External {
+		t.Fatalf("sent message record: %+v, want External=false: the agent wrote it, it didn't receive it", m)
+	}
+	if m.From != testAgentAddress || m.Subject != "Re: Q3 budget" || m.Body != "Sounds good." {
+		t.Fatalf("normalized record: %+v", m)
+	}
+}
+
+// TestSendMessageArgsCannotOverrideFrom covers the task's explicit
+// requirement: args have no "from" property, and even one smuggled past the
+// schema (as this test does, calling sendMessage directly) is never read.
+func TestSendMessageArgsCannotOverrideFrom(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress)
+	if _, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "from": "attacker@evil.com",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	raw := rawFromBody(t, api.last().body, false)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.Header.Get("From"); got != testAgentAddress {
+		t.Fatalf("From = %q, want the configured alias %q, not the args value", got, testAgentAddress)
+	}
+}
+
+// TestSendMessageAmbiguousOutcomeNotSwallowed is the task's other
+// non-negotiable: a 5xx on the one send attempt must come back as
+// gapi.ErrSendOutcomeUnknown, not a generic error, and must never be
+// retried.
+func TestSendMessageAmbiguousOutcomeNotSwallowed(t *testing.T) {
+	ts := newTokenServer(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"code":500,"message":"Backend Error"}}`)
+	}))
+	defer api.Close()
+	cl := newDirectClient(t, ts, api)
+	g := New(testAgentAddress)
+	_, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "b",
+	})
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !errors.Is(err, gapi.ErrSendOutcomeUnknown) {
+		t.Fatalf("err = %v, want ErrSendOutcomeUnknown in its chain (not swallowed into a generic error)", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("calls = %d, want exactly 1: a send must never be blindly retried", calls.Load())
+	}
+}
+
+func TestSendMessageRequiresConfiguredAddress(t *testing.T) {
+	ts := newTokenServer(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer api.Close()
+	cl := newDirectClient(t, ts, api)
+	g := New("")
+	if _, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "b",
+	}); err == nil {
+		t.Fatal("want an error: agent.mail_address is not configured")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("must not call the API before an agent alias is configured")
+	}
+}
+
+func TestBuildRawMessagePlainRoundTrip(t *testing.T) {
+	raw, err := buildRawMessage(testAgentAddress, []string{"dana@acme.com", "sam@acme.com"}, "Q3 numbers", "Hello there.", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := base64.URLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.Header.Get("From"); got != testAgentAddress {
+		t.Fatalf("From = %q, want %q", got, testAgentAddress)
+	}
+	addrs, err := msg.Header.AddressList("To")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addrs) != 2 || addrs[0].Address != "dana@acme.com" || addrs[1].Address != "sam@acme.com" {
+		t.Fatalf("To = %+v", addrs)
+	}
+	dec, err := (&mime.WordDecoder{}).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil || dec != "Q3 numbers" {
+		t.Fatalf("Subject = %q, %v", dec, err)
+	}
+	body, err := io.ReadAll(msg.Body)
+	if err != nil || string(body) != "Hello there." {
+		t.Fatalf("Body = %q, %v", body, err)
+	}
+}
+
+func TestBuildRawMessageMultipartRoundTripWithHTMLAttachment(t *testing.T) {
+	html := "<html><body><b>Hi</b></body></html>"
+	raw, err := buildRawMessage(testAgentAddress, []string{"dana@acme.com"}, "Q3 numbers", "Hello there.", html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := base64.URLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/alternative") {
+		t.Fatalf("content-type = %q, %v", mediaType, err)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	var gotPlain, gotHTML string
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.HasPrefix(part.Header.Get("Content-Type"), "text/plain"):
+			gotPlain = string(data)
+		case strings.HasPrefix(part.Header.Get("Content-Type"), "text/html"):
+			gotHTML = string(data)
+		}
+	}
+	if gotPlain != "Hello there." {
+		t.Fatalf("plain part = %q", gotPlain)
+	}
+	if gotHTML != html {
+		t.Fatalf("html part = %q", gotHTML)
+	}
+}
+
+// TestBuildRawMessageSanitizesHeaderInjection is the header-injection guard:
+// a CR/LF smuggled into subject or an address must never produce a second,
+// attacker-chosen header (e.g. Bcc) in the actual MIME message.
+func TestBuildRawMessageSanitizesHeaderInjection(t *testing.T) {
+	raw, err := buildRawMessage(testAgentAddress, []string{"dana@acme.com\r\nBcc: evil@example.com"}, "Hi\r\nX-Evil: true", "body", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := base64.URLEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerBlock, _, _ := bytes.Cut(b, []byte("\r\n\r\n"))
+	for _, bad := range []string{"\r\nBcc:", "\r\nX-Evil:"} {
+		if bytes.Contains(headerBlock, []byte(bad)) {
+			t.Fatalf("header injection succeeded: found %q in %q", bad, headerBlock)
+		}
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := msg.Header.Get("Bcc"); got != "" {
+		t.Fatalf("Bcc header injected: %q", got)
+	}
+	if got := msg.Header.Get("X-Evil"); got != "" {
+		t.Fatalf("X-Evil header injected: %q", got)
 	}
 }
