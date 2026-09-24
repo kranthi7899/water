@@ -33,11 +33,17 @@ func (s *SentenceSplitter) drain(final bool) []string {
 		r, size := utf8.DecodeRuneInString(text[i:])
 		if r == '.' || r == '!' || r == '?' || r == '\n' {
 			end := i + size
-			// Only split on a sentence terminator followed by whitespace,
-			// quote, or end of the buffered text so far, not mid-abbreviation
-			// or mid-number ("3.5", "Inc.") which have no trailing space yet.
-			atBoundary := end >= len(text) || isBoundaryByte(text[end])
-			if atBoundary && end < len(text) {
+			// Split only on a terminator followed by whitespace or a quote,
+			// and only once that next byte has arrived: a '.' inside a number
+			// ("3.5") has no space after it, and one at the very end of the
+			// buffer waits for the next delta to decide. A '.' that ends an
+			// abbreviation ("Mr.", "e.g.", "Inc.") or a list marker ("1.",
+			// "a.") is not a sentence end even with a space after it.
+			atBoundary := end < len(text) && isBoundaryByte(text[end])
+			if atBoundary && r == '.' && dotIsNotSentenceEnd(text[start:i]) {
+				atBoundary = false
+			}
+			if atBoundary {
 				sentence := strings.TrimSpace(text[start:end])
 				if sentence != "" {
 					out = append(out, sentence)
@@ -58,6 +64,48 @@ func (s *SentenceSplitter) drain(final bool) []string {
 	}
 	return out
 }
+
+// sentenceAbbrevs end in a '.' that does not end a sentence. A sentence that
+// really does end on one ("... and so on, etc.") stays open until the next
+// terminator or Flush, which only delays speech a little.
+var sentenceAbbrevs = map[string]bool{
+	"mr": true, "mrs": true, "ms": true, "dr": true, "st": true, "vs": true, "etc": true,
+	"e.g": true, "i.e": true, "inc": true, "ltd": true, "co": true, "jr": true, "sr": true,
+	"approx": true, "prof": true, "corp": true,
+}
+
+// dotIsNotSentenceEnd reports whether a '.' right after pending (the
+// current, not yet emitted sentence up to that dot) ends an abbreviation or
+// a list marker rather than the sentence. A list marker is a one- or
+// two-digit number or a single letter that opens the sentence or follows a
+// colon ("1.", "Three things: 2."); elsewhere "grew to 42." ends one.
+func dotIsNotSentenceEnd(pending string) bool {
+	tokStart := strings.LastIndexAny(pending, " \t\n") + 1
+	tok := strings.TrimLeft(pending[tokStart:], "(\"'")
+	if sentenceAbbrevs[strings.ToLower(tok)] {
+		return true
+	}
+	if tok == "" || len(tok) > 2 {
+		return false
+	}
+	marker := len(tok) == 1 && isASCIILetter(tok[0])
+	if !marker {
+		marker = true
+		for j := 0; j < len(tok); j++ {
+			if tok[j] < '0' || tok[j] > '9' {
+				marker = false
+				break
+			}
+		}
+	}
+	if !marker {
+		return false
+	}
+	before := strings.TrimSpace(pending[:tokStart])
+	return before == "" || strings.HasSuffix(before, ":")
+}
+
+func isASCIILetter(b byte) bool { return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') }
 
 func isBoundaryByte(b byte) bool {
 	return b == ' ' || b == '\n' || b == '\t' || b == '"' || b == '\''

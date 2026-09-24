@@ -76,6 +76,39 @@ func TestExtractSignalsBucketsAndTracesToSegmentText(t *testing.T) {
 	}
 }
 
+// TestExtractSignalsNeverInventsOwners is the review finding: any
+// capitalized word before "to"/"will" used to become an action item's
+// owner ("owner: Want"), and questions were swallowed as action items.
+func TestExtractSignalsNeverInventsOwners(t *testing.T) {
+	for _, tc := range []struct {
+		text     string
+		bucket   string // "action", "question" or "none"
+		wantOwnr string
+	}{
+		{"Nice to meet you all", "none", ""},
+		{"Welcome to the call", "none", ""},
+		{"Want to grab lunch after?", "question", ""},
+		{"We will see", "none", ""},
+		{"Happy to help with that", "none", ""},
+		{"Going to be late tomorrow", "none", ""},
+		{"Priya will send the deck", "action", "Priya"},
+		{"Nice to meet you, and Sam to draft the memo", "action", "Sam"},
+		{"Action item: somebody should check pricing?", "action", ""},
+	} {
+		sig := ExtractSignals([]Segment{{Channel: Mic, Text: tc.text}})
+		gotBucket, gotOwner := "none", ""
+		switch {
+		case len(sig.ActionItems) == 1:
+			gotBucket, gotOwner = "action", sig.ActionItems[0].Owner
+		case len(sig.OpenQuestions) == 1:
+			gotBucket = "question"
+		}
+		if gotBucket != tc.bucket || gotOwner != tc.wantOwnr {
+			t.Errorf("%q: bucket=%s owner=%q, want %s owner=%q", tc.text, gotBucket, gotOwner, tc.bucket, tc.wantOwnr)
+		}
+	}
+}
+
 func TestRenderRecapSignalsLabelsProjectGuessAsAGuessNeverFact(t *testing.T) {
 	sig := ExtractSignals(scriptedTranscript(time.Now()))
 	withGuess := RenderRecapSignals(sig, ProjectGuess{Available: true, TypeID: "budget_request", Confidence: 0.62})
