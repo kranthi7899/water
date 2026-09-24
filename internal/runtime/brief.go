@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"water/internal/backend"
+	"water/internal/decisions"
 	"water/internal/store"
 	"water/internal/twins"
 )
@@ -63,6 +64,10 @@ type briefSignals struct {
 	DistinctSenders  int
 	NeedsAttention   []store.Message
 	PendingApprovals int
+	// OpenCards is absent (nil) when Env.Decisions is unset or returns none:
+	// the rendered signal block then simply omits the section, rather than
+	// forcing an empty one into the prompt.
+	OpenCards []*decisions.Card
 }
 
 // computeBriefSignals reads today's events, mail since yesterday, and the
@@ -110,6 +115,17 @@ func computeBriefSignals(ctx context.Context, env Env) (briefSignals, bool, erro
 		}
 		sig.PendingApprovals = len(pend)
 	}
+
+	if env.Decisions != nil {
+		cards, err := env.Decisions.Run(ctx, now)
+		if err != nil {
+			return sig, tainted, fmt.Errorf("brief: decision cards: %w", err)
+		}
+		sig.OpenCards = decisions.Rank(cards)
+		for _, c := range sig.OpenCards {
+			tainted = tainted || c.Untrusted
+		}
+	}
 	return sig, tainted, nil
 }
 
@@ -138,6 +154,13 @@ func renderBriefSignals(s briefSignals) string {
 	}
 
 	fmt.Fprintf(&b, "\nPending approvals: %d\n", s.PendingApprovals)
+
+	if len(s.OpenCards) > 0 {
+		fmt.Fprintf(&b, "\nOpen decision cards (%d), most important first:\n", len(s.OpenCards))
+		for _, c := range s.OpenCards {
+			fmt.Fprintf(&b, "- [%s, severity %d, %s] %s\n", c.TypeID, c.Severity, c.Readiness, c.Lead)
+		}
+	}
 	return b.String()
 }
 

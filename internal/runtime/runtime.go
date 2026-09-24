@@ -13,10 +13,19 @@ import (
 
 	"water/internal/approvals"
 	"water/internal/backend"
+	"water/internal/decisions"
 	"water/internal/store"
 	"water/internal/tools"
 	"water/internal/twins"
 )
+
+// DecisionSource supplies the morning brief's ranked-open-cards signal. In
+// production this is a *decisions.Trigger (its Run method already matches
+// this shape); tests can fake it. decisions never imports runtime, so this
+// stays a one-way dependency.
+type DecisionSource interface {
+	Run(ctx context.Context, now time.Time) ([]*decisions.Card, error)
+}
 
 // Channel names a client kind, which changes how a reply is delivered.
 type Channel string
@@ -75,6 +84,10 @@ type Env struct {
 	// the twin's connector functions through the gate (Env.Tools is prepared
 	// per turn by the gateway, which mints the per-turn proxy token).
 	Tools *tools.Policy
+	// Decisions, when set, is run to produce the morning brief's ranked
+	// open-cards signal. Nil (no decision registry wired) leaves that signal
+	// absent rather than erroring.
+	Decisions DecisionSource
 	// Timeout bounds one model call.
 	Timeout time.Duration
 	Now     func() time.Time

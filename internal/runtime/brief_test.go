@@ -1,13 +1,31 @@
 package runtime
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"water/internal/backend"
+	"water/internal/decisions"
 	"water/internal/store"
 )
+
+var errBoom = errors.New("boom")
+
+// fakeDecisionSource is a minimal runtime.DecisionSource stand-in for tests,
+// so the brief's open-cards signal can be exercised without a real gate,
+// registry or backend.
+type fakeDecisionSource struct {
+	cards []*decisions.Card
+	err   error
+}
+
+func (f fakeDecisionSource) Run(context.Context, time.Time) ([]*decisions.Card, error) {
+	return f.cards, f.err
+}
 
 func TestComputeAndCacheBriefReturnsCachedInstantlyWithNoBackendCall(t *testing.T) {
 	env, ctx := testEnv(t)
@@ -117,6 +135,72 @@ func TestBriefAnswerPropagatesTaintForExternalMessages(t *testing.T) {
 	}
 	if !gotTaint {
 		t.Fatal("taint should be true: an External message was in the brief's signals")
+	}
+}
+
+// TestBriefSignalsRankOpenCardsAndOmitTheSectionWhenEmpty covers both the
+// morning brief's new signal (task 3) and its explicit "absent, not an
+// empty section" rule: no Env.Decisions at all renders no cards section,
+// while a Decisions source that finds cards renders them ranked by severity
+// (decisions.Rank), highest first.
+func TestBriefSignalsRankOpenCardsAndOmitTheSectionWhenEmpty(t *testing.T) {
+	env, ctx := testEnv(t)
+
+	sig, _, err := computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sig.OpenCards != nil {
+		t.Fatalf("OpenCards = %v, want nil with no Env.Decisions set", sig.OpenCards)
+	}
+	if strings.Contains(renderBriefSignals(sig), "Open decision cards") {
+		t.Fatal("rendered signals should not mention open decision cards when there are none")
+	}
+
+	low := &decisions.Card{ID: "card-low", TypeID: "generic", Severity: 1, Lead: "Low severity item", Readiness: decisions.Ready}
+	high := &decisions.Card{ID: "card-high", TypeID: "budget_request", Severity: 3, Lead: "High severity item", Readiness: decisions.MissingInfo}
+	env.Decisions = fakeDecisionSource{cards: []*decisions.Card{low, high}}
+
+	sig, _, err = computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sig.OpenCards) != 2 || sig.OpenCards[0].ID != "card-high" || sig.OpenCards[1].ID != "card-low" {
+		t.Fatalf("OpenCards = %+v, want [card-high, card-low]", sig.OpenCards)
+	}
+	rendered := renderBriefSignals(sig)
+	if !strings.Contains(rendered, "High severity item") || !strings.Contains(rendered, "Low severity item") {
+		t.Fatalf("rendered signals missing a card's lead: %q", rendered)
+	}
+	if strings.Index(rendered, "High severity item") > strings.Index(rendered, "Low severity item") {
+		t.Fatalf("higher-severity card should render before the lower one: %q", rendered)
+	}
+}
+
+// TestBriefSignalsPropagateUntrustedCards checks that an Untrusted open card
+// escalates the brief's taint, the same rule External events/messages get.
+func TestBriefSignalsPropagateUntrustedCards(t *testing.T) {
+	env, ctx := testEnv(t)
+	env.Decisions = fakeDecisionSource{cards: []*decisions.Card{{ID: "card-1", TypeID: "generic", Untrusted: true}}}
+
+	_, tainted, err := computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tainted {
+		t.Fatal("an Untrusted open card should taint the brief's signals")
+	}
+}
+
+// TestBriefSignalsSurfaceDecisionSourceErrors confirms a failing Decisions
+// source fails signal computation loudly rather than silently omitting the
+// section.
+func TestBriefSignalsSurfaceDecisionSourceErrors(t *testing.T) {
+	env, ctx := testEnv(t)
+	env.Decisions = fakeDecisionSource{err: errBoom}
+
+	if _, _, err := computeBriefSignals(ctx, env); err == nil {
+		t.Fatal("expected computeBriefSignals to surface the Decisions source's error")
 	}
 }
 

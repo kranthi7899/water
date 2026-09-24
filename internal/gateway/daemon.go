@@ -20,6 +20,7 @@ import (
 	"water/internal/audit"
 	"water/internal/backend"
 	"water/internal/connectors"
+	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -39,6 +40,11 @@ type Config struct {
 	Backend   backend.Backend
 	Warm      *backend.WarmSession // optional; preferred for fast-tier turns
 	RoleMD    string
+	// Decisions runs the classification-trigger orchestration (see
+	// internal/decisions.Trigger) over today's candidate items. Optional: a
+	// nil Decisions makes /v1/decisions report no cards and the morning
+	// brief's open-cards signal stay absent, rather than erroring.
+	Decisions *decisions.Trigger
 	Clients   *Clients
 	// SocketPath is this daemon's own socket, handed to the twin-mode MCP
 	// bridge so a model-initiated tool call can reach back in.
@@ -82,6 +88,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/approvals", d.auth(d.handleListApprovals))
 	mux.Handle("POST /v1/approvals/{id}/decision", d.auth(d.handleDecideApproval))
 	mux.Handle("GET /v1/state", d.auth(d.handleState))
+	mux.Handle("GET /v1/decisions", d.auth(d.handleListDecisions))
 	mux.Handle("POST /v1/tasks/{id}/cancel", d.auth(d.handleCancel))
 	// /v1/tools/invoke is authenticated separately (a per-turn token, not a
 	// client token): it is called by the MCP bridge subprocess, not a client.
@@ -344,7 +351,7 @@ func Listen(paths Paths) (net.Listener, func(), error) {
 // system prompt, GET /v1/state): no tool policy, since nothing here lets the
 // model call a connector function.
 func (d *Daemon) baseEnv() runtime.Env {
-	return runtime.Env{
+	env := runtime.Env{
 		Manifest:  d.cfg.Manifest,
 		Store:     d.cfg.Store,
 		Approvals: d.cfg.Approvals,
@@ -355,6 +362,13 @@ func (d *Daemon) baseEnv() runtime.Env {
 		// escalates the session the same way a tainted model turn does.
 		OnTaint: d.escalateTaint,
 	}
+	// Assigned only when non-nil: a nil *decisions.Trigger boxed into the
+	// runtime.DecisionSource interface would be a non-nil interface holding
+	// a nil pointer, which Env.Decisions != nil checks would miss.
+	if d.cfg.Decisions != nil {
+		env.Decisions = d.cfg.Decisions
+	}
+	return env
 }
 
 // turnEnv builds the runtime.Env for one turn, with the twin's tool policy

@@ -80,10 +80,16 @@ func (a *App) runDaemon(ctx context.Context) error {
 		defer warm.Close()
 	}
 
+	// trigger wires the decision registry loaded in buildTwinDeps to this
+	// process's own gate/store/backend; shared between the daemon's
+	// /v1/decisions endpoint and the morning brief's open-cards signal so
+	// both see the same in-memory classification cache.
+	trigger := buildDecisionsTrigger(deps, sel.Backend)
+
 	d := gateway.New(gateway.Config{
 		Manifest: deps.manifest, Store: deps.store, Audit: deps.audit, Approvals: deps.approvals,
 		Gate: deps.gate, Registry: deps.registry, Backend: sel.Backend, Warm: warm, RoleMD: deps.roleMD,
-		Clients: clients, SocketPath: paths.SocketPath(),
+		Decisions: trigger, Clients: clients, SocketPath: paths.SocketPath(),
 	})
 
 	srv := &http.Server{Handler: d.Mux()}
@@ -97,6 +103,12 @@ func (a *App) runDaemon(ctx context.Context) error {
 	briefEnv := runtime.Env{
 		Manifest: deps.manifest, Store: deps.store, Approvals: deps.approvals,
 		RoleMD: deps.roleMD, Backend: sel.Backend, Warm: warm,
+	}
+	// A nil *decisions.Trigger boxed straight into the DecisionSource
+	// interface would be a non-nil interface over a nil pointer; only set
+	// the field when trigger is actually non-nil (see buildDecisionsTrigger).
+	if trigger != nil {
+		briefEnv.Decisions = trigger
 	}
 
 	// The background Google refresh (internal/sync): P2, gate-mediated, skips

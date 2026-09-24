@@ -15,6 +15,7 @@ import (
 
 	"water/internal/approvals"
 	"water/internal/config"
+	"water/internal/decisions"
 	"water/internal/gateway"
 	"water/internal/runtime"
 )
@@ -124,6 +125,25 @@ func (c *daemonClient) Pending(ctx context.Context) ([]approvals.Envelope, error
 		return nil, err
 	}
 	return envs, nil
+}
+
+// Decisions runs today's classification-trigger orchestration on the daemon
+// and returns every card it built, already ranked by severity then deadline
+// (decisions.Rank).
+func (c *daemonClient) Decisions(ctx context.Context) ([]*decisions.Card, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/decisions", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpError(resp)
+	}
+	var cards []*decisions.Card
+	if err := json.NewDecoder(resp.Body).Decode(&cards); err != nil {
+		return nil, err
+	}
+	return cards, nil
 }
 
 // DecisionResult mirrors gateway.DecisionResult: the envelope's final state,
