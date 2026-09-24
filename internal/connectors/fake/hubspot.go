@@ -62,6 +62,18 @@ func DefaultHubSpotContacts() []HubSpotContact {
 	}
 }
 
+// dealOutput is what list_deals actually returns to the model. AmountUSD is
+// computed here, in code, from AmountCents — a model reading a raw
+// "amount_cents" integer has no reliable reason to divide by 100 before
+// treating it as a dollar figure, and in practice doesn't: it read
+// amount_cents:4200000 as "$4.2M" instead of $42,000. AmountCents stays in
+// the payload (Normalize still reads it for store.Transaction.AmountMinor),
+// but the model is never the one doing that division.
+type dealOutput struct {
+	HubSpotDeal
+	AmountUSD float64 `json:"amount_usd"`
+}
+
 // HubSpot is the fake connector.
 type HubSpot struct {
 	mu       sync.Mutex
@@ -103,7 +115,11 @@ func (h *HubSpot) Invoke(_ context.Context, p permit.Permit) (json.RawMessage, e
 			}
 			out = append(out, d)
 		}
-		return json.Marshal(out)
+		views := make([]dealOutput, len(out))
+		for i, d := range out {
+			views[i] = dealOutput{HubSpotDeal: d, AmountUSD: float64(d.AmountCents) / 100}
+		}
+		return json.Marshal(views)
 	case "list_contacts":
 		var out []HubSpotContact
 		for _, c := range h.contacts {
