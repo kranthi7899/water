@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"water/internal/agentmail"
 	"water/internal/backend"
 	"water/internal/decisions"
 	"water/internal/store"
@@ -71,6 +72,13 @@ type briefSignals struct {
 	// CardsUnavailable is set when the decision source failed: open cards
 	// are an optional signal, so the brief says so instead of failing.
 	CardsUnavailable bool
+	// AgentMail is internal/agentmail's rolling list of messages its
+	// inbound-triage watcher judged were addressed to the agent itself
+	// (not the CEO) since it last cleared them -- code-computed, like
+	// every other signal here, from the watcher's own persisted record
+	// (RecentSignals), never a live call. Empty when agentmail has not
+	// run yet, or the agent's own mailbox is not connected.
+	AgentMail []agentmail.Signal
 }
 
 // computeBriefSignals reads today's events, mail since yesterday, and the
@@ -120,6 +128,16 @@ func computeBriefSignals(ctx context.Context, env Env) (briefSignals, bool, erro
 		}
 		sig.PendingApprovals = len(pend)
 	}
+
+	am, err := agentmail.RecentSignals(ctx, env.Store, "")
+	if err != nil {
+		return sig, tainted, fmt.Errorf("brief: agent mail: %w", err)
+	}
+	sig.AgentMail = am
+	// Every entry is a message someone else wrote, addressed to the agent's
+	// own mailbox: the same taint rule as any other external content (mail,
+	// an invited event).
+	tainted = tainted || len(am) > 0
 	return sig, tainted, nil
 }
 
@@ -183,6 +201,13 @@ func renderBriefSignals(s briefSignals) string {
 	}
 
 	fmt.Fprintf(&b, "\nPending approvals: %d\n", s.PendingApprovals)
+
+	if len(s.AgentMail) > 0 {
+		fmt.Fprintf(&b, "\nMail addressed to the agent itself, not you (%d):\n", len(s.AgentMail))
+		for _, m := range s.AgentMail {
+			fmt.Fprintf(&b, "- from %s: %s\n", m.From, m.Subject)
+		}
+	}
 
 	if s.CardsUnavailable {
 		b.WriteString("\nOpen decision cards: unavailable right now.\n")

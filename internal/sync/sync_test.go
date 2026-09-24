@@ -319,6 +319,51 @@ func TestTwoIntervalsFireIndependently(t *testing.T) {
 	}
 }
 
+// TestAgentMailRunsAsAThirdIndependentTick confirms Config.AgentMail, when
+// set, runs as a third loop exactly like mail/events (ticks immediately,
+// then on its own interval), and that leaving it nil (every other test in
+// this file) changes nothing about Run's existing two-loop behavior.
+func TestAgentMailRunsAsAThirdIndependentTick(t *testing.T) {
+	r := newRig(t)
+	r.connect(t)
+	var mu sync.Mutex
+	var calls int
+	ref := watersync.New(watersync.Config{
+		Gate: r.g, Vault: r.v, Service: fake.MailService, Account: fake.MailAccount,
+		EventsFunction: "fake_calendar.list_events", MailFunction: "fake_mail.list_messages",
+		EventsArgs: noArgs, MailArgs: noArgs,
+		// Slow mail/events intervals so only AgentMail's own fast ticker
+		// explains more than one or two calls.
+		EventsInterval: time.Hour, MailInterval: time.Hour,
+		AgentMail: func(context.Context) {
+			mu.Lock()
+			calls++
+			mu.Unlock()
+		},
+		AgentMailInterval: 5 * time.Millisecond,
+		Logf:              r.logf,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ref.Run(ctx)
+		close(done)
+	}()
+	time.Sleep(60 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after its context was cancelled")
+	}
+	mu.Lock()
+	n := calls
+	mu.Unlock()
+	if n < 2 {
+		t.Fatalf("AgentMail ticked %d times in 60ms at a 5ms interval, want several", n)
+	}
+}
+
 // TestEventsCursorPersistedAfterSuccessAndReused checks the incremental
 // contract end to end: a first call with no stored cursor persists the one
 // the connector reports, and the next call passes that cursor back.

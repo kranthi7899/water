@@ -133,6 +133,17 @@ type Config struct {
 	// with no attendees). Defaults build a Gmail "from:a OR from:b" query
 	// from attendees, and a Drive keyword query from the event title.
 	PrefetchMailArgs, PrefetchDocsArgs func(store.Event) map[string]any
+
+	// AgentMail, when set, is called on its own independent ticker, a third
+	// loop next to events and mail: internal/agentmail's inbound-triage
+	// watcher polling the agent's own second mailbox. Left nil (the
+	// default), Run behaves exactly as before this existed -- two loops,
+	// not three -- so every test and caller that doesn't set it is
+	// unaffected.
+	AgentMail func(ctx context.Context)
+	// AgentMailInterval defaults to MailInterval (or DefaultMailInterval)
+	// when AgentMail is set and this is unset.
+	AgentMailInterval time.Duration
 }
 
 func (c *Config) setDefaults() {
@@ -200,6 +211,9 @@ func (c *Config) setDefaults() {
 	if c.PrefetchDocsArgs == nil {
 		c.PrefetchDocsArgs = defaultPrefetchDocsArgs
 	}
+	if c.AgentMailInterval <= 0 {
+		c.AgentMailInterval = c.MailInterval
+	}
 }
 
 func defaultEventsArgs(now time.Time, cursor string) map[string]any {
@@ -240,6 +254,10 @@ func (r *Refresher) Run(ctx context.Context) {
 	wg.Add(2)
 	go func() { defer wg.Done(); r.loop(ctx, r.cfg.MailInterval, r.RunOnceMail) }()
 	go func() { defer wg.Done(); r.loop(ctx, r.cfg.EventsInterval, r.RunOnceEvents) }()
+	if r.cfg.AgentMail != nil {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.loop(ctx, r.cfg.AgentMailInterval, r.cfg.AgentMail) }()
+	}
 	wg.Wait()
 }
 

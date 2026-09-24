@@ -2,12 +2,14 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"water/internal/agentmail"
 	"water/internal/backend"
 	"water/internal/decisions"
 	"water/internal/store"
@@ -227,5 +229,64 @@ func TestBriefAnswerNoTaintWhenNothingExternal(t *testing.T) {
 	}
 	if gotTaint {
 		t.Fatal("taint should be false: nothing in the signals is External")
+	}
+}
+
+// TestBriefIncludesAgentMailSignalAndTaintsIt confirms internal/agentmail's
+// rolling agent-directed list reaches the brief as a plain, code-computed
+// signal (never a live call: computeBriefSignals only reads what the
+// watcher already persisted via RecentSignals), and that its presence
+// taints the brief like any other externally-sourced content.
+func TestBriefIncludesAgentMailSignalAndTaintsIt(t *testing.T) {
+	env, ctx := testEnv(t)
+	sigs := []agentmail.Signal{{From: "notify@service.com", Subject: "Your weekly digest", SeenAt: env.now()}}
+	b, err := json.Marshal(sigs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.Store.SetCursor(ctx, agentmail.DefaultSignalKey, string(b)); err != nil {
+		t.Fatal(err)
+	}
+
+	sig, tainted, err := computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tainted {
+		t.Fatal("a non-empty agent-mail signal must taint the brief")
+	}
+	if len(sig.AgentMail) != 1 || sig.AgentMail[0].Subject != "Your weekly digest" {
+		t.Fatalf("AgentMail = %+v, want the one recorded signal", sig.AgentMail)
+	}
+
+	fk := backend.NewFake("fake")
+	fk.Reply = func(backend.Request) string { return "ok" }
+	env.Backend = fk
+	if _, ok := FastPath(ctx, env, "what's my morning brief"); !ok {
+		t.Fatal("expected a fast-path match")
+	}
+	reqs := fk.Requests()
+	if len(reqs) != 1 || !strings.Contains(reqs[0].Prompt, "Your weekly digest") {
+		t.Fatalf("brief signal block should carry the agent-mail signal: %+v", reqs)
+	}
+}
+
+// TestBriefOmitsAgentMailSectionWhenThereIsNothingToShow confirms the
+// section is simply absent, not an empty header, when RecentSignals has
+// nothing (the watcher never ran, or the agent mailbox isn't connected).
+func TestBriefOmitsAgentMailSectionWhenThereIsNothingToShow(t *testing.T) {
+	env, ctx := testEnv(t)
+	sig, tainted, err := computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tainted {
+		t.Fatal("no agent-mail signal should not taint the brief")
+	}
+	if len(sig.AgentMail) != 0 {
+		t.Fatalf("AgentMail = %+v, want none", sig.AgentMail)
+	}
+	if strings.Contains(renderBriefSignals(sig), "addressed to the agent") {
+		t.Fatal("the agent-mail section must not render when there is nothing to show")
 	}
 }

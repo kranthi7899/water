@@ -14,12 +14,15 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"water/internal/agentmail"
 	"water/internal/backend"
 	"water/internal/config"
 	"water/internal/connectors/google/gapi"
+	"water/internal/gate"
 	"water/internal/gateway"
 	"water/internal/runtime"
 	watersync "water/internal/sync"
+	"water/internal/twins"
 )
 
 // daemonCmd is the top-level `water daemon` command group.
@@ -53,7 +56,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	defer unlock()
 	defer l.Close()
 
-	deps, err := buildTwinDeps(a.twinID())
+	deps, err := buildTwinDeps(a.twinID(), cfg.Agent.MailAddress)
 	if err != nil {
 		return exitWith(ExitError, err)
 	}
@@ -124,16 +127,35 @@ func (a *App) runDaemon(ctx context.Context) error {
 		briefEnv.Decisions = trigger
 	}
 
+	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) }
+
+	// The agent-mailbox inbound-triage watcher (internal/agentmail): its own
+	// vault credential (account "agent"), its own model classification
+	// (charged against the same usage cap every other model call uses), its
+	// own tick (see AgentMail below). ForwardTo empty just means a
+	// CEO-directed message is logged, never staged, until the CEO sets
+	// agent.forward_to.
+	agentWatcher := agentmail.NewWatcher(agentmail.Config{
+		Gate: deps.gate, Store: deps.store, Vault: deps.vault, Approvals: deps.approvals,
+		Classifier: &agentmail.Classifier{
+			Backend: sel.Backend, Model: deps.manifest.ModelFor(twins.TierFast),
+			Charge: func() error { return deps.gate.ModelCall(gate.P1) },
+		},
+		ForwardTo: cfg.Agent.ForwardTo,
+		Logf:      logf,
+	})
+
 	// The background Google refresh (internal/sync): P2, gate-mediated, skips
 	// quietly if nothing is connected, and stops with the rest of the daemon
 	// because it shares sigCtx. Mail and calendar refresh on independent
 	// intervals; the (slower) calendar tick also drives the morning brief's
-	// background precompute once it's past brief.ready_after.
+	// background precompute once it's past brief.ready_after. AgentMail is a
+	// third, independent tick following the exact same pattern.
 	refresher := watersync.New(watersync.Config{
 		Gate: deps.gate, Vault: deps.vault, Store: deps.store,
 		Service: gapi.Service, Account: gapi.DefaultAccount,
 		EventsInterval: cfg.Sync.Interval(), MailInterval: cfg.Sync.MailInterval(),
-		Logf: func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) },
+		Logf: logf,
 		Brief: func(ctx context.Context) error {
 			// Bounded even though each model call is: the background
 			// precompute must never hold the refresher loop indefinitely.
@@ -143,6 +165,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 			return err
 		},
 		BriefReadyAfter: cfg.Brief.ReadyAfter,
+		AgentMail:       agentWatcher.Tick,
 	})
 	go refresher.Run(sigCtx)
 
