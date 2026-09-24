@@ -1,0 +1,39 @@
+id: investor_request
+title: Investor request
+trigger: >-
+  An investor asks for something — an update, a meeting, information, a
+  commitment, a follow-up — that needs a CEO decision on how or whether to
+  respond.
+needs:
+  - name: investor_history
+    fetch: gmail.list_messages
+    kind: lookup
+    args: {query: "from:{sender}"}
+  - name: related_documents
+    fetch: gdrive.search_files
+    kind: research
+    args: {query: "{keywords}"}
+default_rule: >-
+  No auto-approval: every investor request routes to the CEO with whatever
+  correspondence history and related documents were found. Investor
+  relationships are too high-stakes for a threshold rule.
+staged_actions:
+  - gmail.send_email
+severity_weight: 3
+---
+Stub type for Slice C-base (`docs/slices/C.md` section 5): a valid,
+schema-complete registry entry so `Classify` can match investor
+correspondence as its own type instead of falling through to `generic`,
+without yet building anything investor-specific. Both `needs` are the same
+kind of keyword/sender lookup `generic`'s own needs use — there is no
+computation here, so a card of this type is usually `missing_info` (no
+`internal://` figure to source a recommendation from) until a later slice
+adds one (e.g. a running summary of what was last promised to this
+investor, or a code check against `role.md`'s People section for who they
+are and what they expect).
+
+Distinguish from `budget_request` (money going out) and `inbound_decision`
+(a request from someone not recognized as an investor). `severity_weight`
+is set above `budget_request`'s: an unanswered or mishandled investor ask
+tends to cost more in relationship terms than a routine spend, even before
+either card's actual content is known.

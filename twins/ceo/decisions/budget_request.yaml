@@ -1,0 +1,60 @@
+id: budget_request
+title: Budget request
+trigger: >-
+  Someone is asking for money: a purchase, a renewal, a headcount budget, a
+  raise, or any other spend that needs the CEO's approval.
+needs:
+  - name: requester_history
+    fetch: gmail.list_messages
+    kind: lookup
+    args: {query: "from:{sender}"}
+  - name: budget_spreadsheet
+    fetch: gdrive.read_file
+    kind: lookup
+    args: {id: "CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet"}
+  - name: runway_and_burn
+    fetch: internal://budget_request.compute_runway
+    kind: computation
+  - name: comparable_requests
+    fetch: gdrive.search_files
+    kind: research
+    args: {query: "{keywords}"}
+default_rule: >-
+  Approve if the amount is under $2,000 and runway stays above 6 months
+  after it; otherwise route to the CEO with the full packet.
+staged_actions:
+  - gmail.send_message
+  - gmail.draft_message
+severity_weight: 2
+---
+The threshold in `default_rule` follows the board policy in
+`twins/ceo/role.md`'s "Budget structure" section; update both together if
+that policy changes.
+
+`budget_spreadsheet` names a fixed Drive file, not a per-item lookup: the
+runway/burn sheet doesn't change from one budget request to the next, so its
+id is a constant here, the same way `role.md`'s "Runway source" line names
+it. **The owner must replace the placeholder id above with the real Drive
+file id of their runway spreadsheet** (`water twin` has no command yet to
+verify this; a wrong or placeholder id makes `budget_spreadsheet` fail at
+the gate, which the card reports as a gap and blocks on, per C.md's
+readiness rule — it never fails silently or invents a number). The sheet is
+expected to be exported as CSV with a header row naming a cash column
+(`cash`, `cash_on_hand`, ...) and a monthly burn column (`burn`,
+`monthly_burn`, ...); `internal://budget_request.compute_runway` reads the
+last row with both columns parseable and computes runway = cash / burn in
+code. A missing, unreadable, or zero-burn sheet yields `missing_info`, not a
+crash or a guessed number.
+
+`comparable_requests` is a keyword search over Drive for similar past asks,
+the same pattern `generic`'s own needs use; it is research, not part of the
+runway math.
+
+This type is classified, not run on every synced message: the daemon only
+offers an item to `Classify` when the brief's existing "needs attention"
+heuristic (`internal/runtime/brief.go`) already flagged it as worth a human
+look, and each item is classified at most once (cached by its
+`store.Meta` `Source`+`SourceID`, forgotten only if the upstream item is
+later re-ingested with real changes). Classification itself still decides
+whether the flagged item is a budget request at all, or something else, or
+nothing needing a decision.
