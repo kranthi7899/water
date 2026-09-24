@@ -9,6 +9,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +24,7 @@ import (
 	"water/internal/connectors"
 	"water/internal/decisions"
 	"water/internal/gate"
+	"water/internal/meetings"
 	"water/internal/runtime"
 	"water/internal/store"
 	"water/internal/tools"
@@ -45,7 +48,12 @@ type Config struct {
 	// nil Decisions makes /v1/decisions report no cards and the morning
 	// brief's open-cards signal stay absent, rather than erroring.
 	Decisions *decisions.Trigger
-	Clients   *Clients
+	// ProactiveCues gates GET /v1/meetings/{id}/cues (docs/slices/M.md
+	// section 6, config key meetings.proactive_cues). Off by default: the
+	// endpoint still exists and always answers 200, just with an empty,
+	// enabled:false body, so a client can probe for the feature safely.
+	ProactiveCues bool
+	Clients       *Clients
 	// SocketPath is this daemon's own socket, handed to the twin-mode MCP
 	// bridge so a model-initiated tool call can reach back in.
 	SocketPath string
@@ -62,7 +70,8 @@ type turnAuth struct {
 
 // Daemon serves the HTTP API described in docs/slices/A2.md.
 type Daemon struct {
-	cfg Config
+	cfg      Config
+	meetings *meetings.Manager
 
 	mu           sync.Mutex
 	tasks        map[string]context.CancelFunc
@@ -74,7 +83,7 @@ type Daemon struct {
 }
 
 func New(cfg Config) *Daemon {
-	return &Daemon{cfg: cfg, tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{}, sinks: map[string]*turnSink{}}
+	return &Daemon{cfg: cfg, meetings: meetings.New(cfg.Store), tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{}, sinks: map[string]*turnSink{}}
 }
 
 // turnSink is one open POST /v1/turns stream. Writes from the turn itself
@@ -151,6 +160,10 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/state", d.auth(d.handleState))
 	mux.Handle("GET /v1/decisions", d.auth(d.handleListDecisions))
 	mux.Handle("POST /v1/tasks/{id}/cancel", d.auth(d.handleCancel))
+	mux.Handle("POST /v1/meetings/start", d.auth(d.handleMeetingStart))
+	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))
+	mux.Handle("POST /v1/meetings/{id}/stop", d.auth(d.handleMeetingStop))
+	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
 	// /v1/tools/invoke is authenticated separately (a per-turn token, not a
 	// client token): it is called by the MCP bridge subprocess, not a client.
 	mux.HandleFunc("POST /v1/tools/invoke", d.handleToolInvoke)
@@ -216,6 +229,98 @@ func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	cancel()
 	writeJSON(w, http.StatusOK, map[string]any{"cancelled": id})
+}
+
+// maxMeetingBody bounds a meetings request body: a segment is a sentence or
+// two of text, never audio.
+const maxMeetingBody = 64 << 10
+
+func (d *Daemon) handleMeetingStart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMeetingBody)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s, err := d.meetings.Start(r.Context(), body.EventID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": s.ID, "started_at": s.StartedAt})
+}
+
+// handleMeetingSegment records one transcript segment. Meeting speech is
+// untrusted on both channels, the CEO's own mic included (a hot mic hears
+// anyone near it): the session is escalated to tainted first, before the
+// body is even read, so no failure path can skip it. Only an explicit
+// /v1/turns request is ever an instruction to the twin.
+func (d *Daemon) handleMeetingSegment(w http.ResponseWriter, r *http.Request) {
+	d.escalateTaint(true)
+	var body struct {
+		At      time.Time `json:"at"`
+		Channel string    `json:"channel"`
+		Text    string    `json:"text"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMeetingBody)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	err := d.meetings.AddSegment(r.Context(), r.PathValue("id"), meetings.Segment{At: body.At, Channel: meetings.Channel(body.Channel), Text: body.Text})
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (d *Daemon) handleMeetingStop(w http.ResponseWriter, r *http.Request) {
+	s, err := d.meetings.Stop(r.Context(), r.PathValue("id"))
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": s.ID, "ended_at": s.EndedAt})
+}
+
+// handleMeetingCues serves docs/slices/M.md section 6's quiet proactive
+// cues, behind the meetings.proactive_cues config flag (default false).
+// This is a read of already-tainted meeting content for the client's own
+// side panel, not a new instruction and not a model call, so unlike
+// handleMeetingSegment it does not escalate taint. Disabled answers 200
+// with enabled:false and no items, so a client can probe for the feature
+// safely; an unknown or malformed id 404s exactly like the other meeting
+// endpoints.
+func (d *Daemon) handleMeetingCues(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !d.cfg.ProactiveCues {
+		writeJSON(w, http.StatusOK, map[string]any{"session_id": id, "enabled": false, "items": []meetings.CueItem{}})
+		return
+	}
+	cs, err := d.meetings.Cues(r.Context(), id, time.Now())
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	items := cs.Items
+	if items == nil {
+		items = []meetings.CueItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": cs.SessionID, "enabled": true, "items": items})
+}
+
+func meetingError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, meetings.ErrNotFound):
+		http.Error(w, "no such meeting session", http.StatusNotFound)
+	case errors.Is(err, meetings.ErrEnded):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, meetings.ErrBadSegment):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 // mintTurnToken issues a short-lived token scoped to one turn's origin and

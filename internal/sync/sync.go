@@ -118,6 +118,21 @@ type Config struct {
 	Brief func(ctx context.Context) error
 	// BriefReadyAfter is "HH:MM" local time; default "07:00".
 	BriefReadyAfter string
+
+	// PrefetchLeadTime is how far ahead of a calendar event's start
+	// maybePrefetch looks; default DefaultPrefetchLeadTime. Skipped
+	// entirely (no prefetch call ever made) when Store is nil.
+	PrefetchLeadTime time.Duration
+	// PrefetchMailFunction/PrefetchDocsFunction default to
+	// "gmail.list_messages"/"gdrive.search_files"; tests point them at fake
+	// connectors instead. Either may be left "" to skip that half of the
+	// prefetch.
+	PrefetchMailFunction, PrefetchDocsFunction string
+	// PrefetchMailArgs/PrefetchDocsArgs build one call's arguments from the
+	// event being prefetched; a nil return skips that call (e.g. an event
+	// with no attendees). Defaults build a Gmail "from:a OR from:b" query
+	// from attendees, and a Drive keyword query from the event title.
+	PrefetchMailArgs, PrefetchDocsArgs func(store.Event) map[string]any
 }
 
 func (c *Config) setDefaults() {
@@ -170,6 +185,21 @@ func (c *Config) setDefaults() {
 	if c.BriefReadyAfter == "" {
 		c.BriefReadyAfter = DefaultBriefReadyAfter
 	}
+	if c.PrefetchLeadTime <= 0 {
+		c.PrefetchLeadTime = DefaultPrefetchLeadTime
+	}
+	if c.PrefetchMailFunction == "" {
+		c.PrefetchMailFunction = defaultMailFunction
+	}
+	if c.PrefetchDocsFunction == "" {
+		c.PrefetchDocsFunction = "gdrive.search_files"
+	}
+	if c.PrefetchMailArgs == nil {
+		c.PrefetchMailArgs = defaultPrefetchMailArgs
+	}
+	if c.PrefetchDocsArgs == nil {
+		c.PrefetchDocsArgs = defaultPrefetchDocsArgs
+	}
 }
 
 func defaultEventsArgs(now time.Time, cursor string) map[string]any {
@@ -189,12 +219,15 @@ func defaultMailArgs(_ time.Time, cursor string) map[string]any {
 }
 
 // Refresher runs Config's periodic sync.
-type Refresher struct{ cfg Config }
+type Refresher struct {
+	cfg      Config
+	prefetch *prefetchState
+}
 
 // New builds a Refresher, filling in defaults.
 func New(cfg Config) *Refresher {
 	cfg.setDefaults()
-	return &Refresher{cfg: cfg}
+	return &Refresher{cfg: cfg, prefetch: newPrefetchState()}
 }
 
 // Run syncs immediately, then keeps mail and events refreshing on their own
@@ -241,6 +274,7 @@ func (r *Refresher) RunOnceEvents(ctx context.Context) {
 	}
 	r.tick(ctx, r.cfg.EventsFunction, r.cfg.EventsCursorKey, r.cfg.EventsCursorField, r.cfg.EventsExpiredErr, r.cfg.EventsArgs)
 	r.maybePrecomputeBrief(ctx)
+	r.maybePrefetch(ctx)
 }
 
 // RunOnceMail runs one mail sync pass.

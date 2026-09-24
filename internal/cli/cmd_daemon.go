@@ -92,7 +92,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	d := gateway.New(gateway.Config{
 		Manifest: deps.manifest, Store: deps.store, Audit: deps.audit, Approvals: deps.approvals,
 		Gate: deps.gate, Registry: deps.registry, Backend: sel.Backend, Warm: warm, RoleMD: deps.roleMD,
-		Decisions: trigger, Clients: clients, SocketPath: paths.SocketPath(),
+		Decisions: trigger, ProactiveCues: cfg.Meetings.ProactiveCues, Clients: clients, SocketPath: paths.SocketPath(),
 	})
 
 	// Every request context derives from baseCtx, which shutdown cancels

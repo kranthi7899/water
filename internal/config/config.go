@@ -21,13 +21,14 @@ const CurrentSchema = 1
 
 // Config is the typed, fully-resolved configuration.
 type Config struct {
-	Schema  int           `yaml:"schema"`
-	Backend BackendConfig `yaml:"backend"`
-	Voice   VoiceConfig   `yaml:"voice"`
-	API     APIConfig     `yaml:"api"`
-	Onboard OnboardConfig `yaml:"onboard"`
-	Sync    SyncConfig    `yaml:"sync"`
-	Brief   BriefConfig   `yaml:"brief"`
+	Schema   int            `yaml:"schema"`
+	Backend  BackendConfig  `yaml:"backend"`
+	Voice    VoiceConfig    `yaml:"voice"`
+	API      APIConfig      `yaml:"api"`
+	Onboard  OnboardConfig  `yaml:"onboard"`
+	Sync     SyncConfig     `yaml:"sync"`
+	Brief    BriefConfig    `yaml:"brief"`
+	Meetings MeetingsConfig `yaml:"meetings"`
 }
 
 // SyncConfig configures the daemon's background Google refresh
@@ -53,6 +54,15 @@ type BriefConfig struct {
 	// time is past this, so it doesn't try before the CEO's day realistically
 	// starts.
 	ReadyAfter string `yaml:"ready_after"`
+}
+
+// MeetingsConfig configures Slice M's live-meeting features.
+type MeetingsConfig struct {
+	// ProactiveCues gates GET /v1/meetings/{id}/cues (docs/slices/M.md
+	// section 6): quiet, rate-limited related-item suggestions surfaced
+	// from a live session's recent transcript. Off by default, following
+	// this package's existing plain-bool-flag convention.
+	ProactiveCues bool `yaml:"proactive_cues"`
 }
 
 // OnboardConfig records the last verified round trip.
@@ -121,6 +131,7 @@ func defaults() map[string]string {
 		"sync.interval_minutes":      "10",
 		"sync.mail_interval_seconds": "60",
 		"brief.ready_after":          "07:00",
+		"meetings.proactive_cues":    "false",
 	}
 }
 
@@ -236,6 +247,7 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Sync.IntervalMinutes = atoi("sync.interval_minutes")
 	r.Sync.MailIntervalSeconds = atoi("sync.mail_interval_seconds")
 	r.Brief.ReadyAfter = flat["brief.ready_after"]
+	r.Meetings.ProactiveCues = abool("meetings.proactive_cues")
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -251,7 +263,7 @@ func (r *Resolved) apply(flat map[string]string) error {
 // merely looks numeric or boolean ("0123", "t") is kept verbatim.
 var (
 	intKeys  = map[string]bool{"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true}
-	boolKeys = map[string]bool{"backend.allow_metered": true, "voice.allow_metered": true}
+	boolKeys = map[string]bool{"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true}
 )
 
 // Flat returns the resolved values as dotted keys (for `water config`).
@@ -270,6 +282,7 @@ func (r *Resolved) Flat() map[string]string {
 		"sync.interval_minutes":      strconv.Itoa(r.Sync.IntervalMinutes),
 		"sync.mail_interval_seconds": strconv.Itoa(r.Sync.MailIntervalSeconds),
 		"brief.ready_after":          r.Brief.ReadyAfter,
+		"meetings.proactive_cues":    strconv.FormatBool(r.Meetings.ProactiveCues),
 	}
 }
 

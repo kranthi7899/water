@@ -216,7 +216,7 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 		switch {
 		case k == "schema":
 			continue
-		case strings.HasSuffix(k, ".allow_metered"):
+		case boolKeys[k]:
 			flags[k] = "true"
 		case strings.HasPrefix(k, "sync."):
 			flags[k] = strconv.Itoa(1000 + i)
