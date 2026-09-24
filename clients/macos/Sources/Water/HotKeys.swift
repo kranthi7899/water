@@ -8,7 +8,7 @@ import ApplicationServices
 enum HotKeyConfig {
     /// Opens the text pop-up bar.
     static let textBar = HotKey(keyCode: 49, modifiers: [.control, .option], label: "⌃⌥Space")
-    /// Push-to-talk: press once to start listening, again to send.
+    /// Push-to-talk: hold to record, release to send.
     static let voice = HotKey(keyCode: 9, modifiers: [.control, .option], label: "⌃⌥V")
     /// Starts or stops capturing a meeting (manual only, never automatic).
     static let meeting = HotKey(keyCode: 46, modifiers: [.control, .option], label: "⌃⌥M")
@@ -39,6 +39,11 @@ final class HotKeyMonitor {
     private var trustPoll: Timer?
     private let handler: (HotKey) -> Void
     var onTrustChange: ((Bool) -> Void)?
+    /// Fires when the voice hotkey's key is physically released, for
+    /// push-to-talk. Matched by key code alone, not modifiers: a user
+    /// commonly releases ⌃/⌥ a beat before or after the letter key, and the
+    /// release must still register as "stop recording" either way.
+    var onVoiceKeyUp: (() -> Void)?
 
     init(handler: @escaping (HotKey) -> Void) {
         self.handler = handler
@@ -47,10 +52,9 @@ final class HotKeyMonitor {
     static var isTrusted: Bool { AXIsProcessTrusted() }
 
     func start() {
-        local = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self, let k = self.match(e) else { return e }
-            self.handler(k)
-            return nil // swallow it
+        local = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
+            guard let self else { return e }
+            return self.handle(e, swallow: true)
         }
         installGlobal()
         if !Self.isTrusted { pollForTrust() }
@@ -60,11 +64,23 @@ final class HotKeyMonitor {
         HotKeyConfig.all.first { $0.matches(e) }
     }
 
+    /// Returns the event to pass through, or nil to swallow it (local monitor only).
+    @discardableResult
+    private func handle(_ e: NSEvent, swallow: Bool) -> NSEvent? {
+        if e.type == .keyUp {
+            guard e.keyCode == HotKeyConfig.voice.keyCode else { return e }
+            onVoiceKeyUp?()
+            return swallow ? nil : e
+        }
+        guard let k = match(e) else { return e }
+        handler(k)
+        return swallow ? nil : e
+    }
+
     private func installGlobal() {
         if let global { NSEvent.removeMonitor(global) }
-        global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard let self, let k = self.match(e) else { return }
-            self.handler(k)
+        global = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
+            self?.handle(e, swallow: false)
         }
     }
 

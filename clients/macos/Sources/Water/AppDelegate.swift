@@ -28,9 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch key {
             case HotKeyConfig.textBar: self.toggleTextBar()
             case HotKeyConfig.meeting: self.meeting.toggle()
-            default: self.voice.toggle()
+            default: self.voice.startHold() // key went down: start recording
             }
         }
+        // Voice is push-to-talk by holding, so "stop" is the key going back
+        // up, not a second press — a separate signal from the keyDown above.
+        hotkeys.onVoiceKeyUp = { [weak self] in self?.voice.endHold() }
         hotkeys.onTrustChange = { [weak self] _ in self?.refreshAccessibilityItem() }
         hotkeys.start()
         refreshAccessibilityItem()
@@ -146,7 +149,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.runner.cancel()
             self.panel.setInput("")
-            self.panel.show(placeholder: "Listening… press \(HotKeyConfig.voice.label) again to send")
+            self.panel.show(placeholder: "Listening… release \(HotKeyConfig.voice.label) to send")
             self.panel.setStatus("● Listening")
         }
         voice.onPartial = { [weak self] text in self?.panel.setInput(text) }

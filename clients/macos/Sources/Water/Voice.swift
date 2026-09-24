@@ -2,8 +2,10 @@ import AVFoundation
 import Foundation
 import Speech
 
-/// Push-to-talk: first press starts listening, second press stops and hands
-/// the transcript over. Recognition is on-device only
+/// Push-to-talk: hold the hotkey to record, release to send — `startHold`/
+/// `endHold` are the hold-gesture entry points the hotkey uses; `toggle`
+/// stays available for a plain click (e.g. the menu item), where there's no
+/// "hold" to track. Recognition is on-device only
 /// (`requiresOnDeviceRecognition`): if this Mac can't recognize on-device,
 /// voice refuses to run rather than send audio to Apple's servers.
 final class VoiceController {
@@ -31,6 +33,21 @@ final class VoiceController {
         case .listening: finish()
         case .finishing: break
         }
+    }
+
+    /// Hold gesture: key went down. No-op if a capture is already in
+    /// progress (e.g. a stray repeat) — only .idle actually starts one.
+    func startHold() {
+        guard state == .idle else { return }
+        begin()
+    }
+
+    /// Hold gesture: key went up. No-op unless we're actually listening —
+    /// guards a release with no matching press (e.g. focus changed
+    /// mid-hold) from tearing down a capture that never started.
+    func endHold() {
+        guard state == .listening else { return }
+        finish()
     }
 
     /// Speaks one reply sentence. AVSpeechSynthesizer queues utterances, so
@@ -107,8 +124,12 @@ final class VoiceController {
         state = .finishing
         teardownAudio()
         request?.endAudio()
-        // The final result usually lands within a moment; don't hang on it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.deliver() }
+        // endAudio() only has already-buffered audio left to decode, so
+        // isFinal normally arrives in well under a second — this is a worst
+        // case backstop, not the typical path. Most of the old toggle-mode
+        // latency was never recognition speed; it was the user having to
+        // decide to press the hotkey a second time. Holding removes that.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.deliver() }
     }
 
     private func deliver() {
