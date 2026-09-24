@@ -510,7 +510,7 @@ The sous chef answers only on a **positive, certain match**. Before any quick ti
 |---|---|---|---|---|
 | `schedule.on_date` | `store.calendar_events` | `when: daterange, default today` | | `quick.calendar` |
 | `schedule.next_event` | `store.next_event` | none | | `quick.next_event` |
-| `schedule.free_time` | `store.free_slots` | `when: date, default today`; `part: part_of_day` | 09:00–18:00 is a handler constant (known gap) | `quick.free_time` |
+| `schedule.free_time` | `store.free_slots` | `when: date, default today`; `part: part_of_day` | 09:00–18:00 is a handler constant (known gap) | none — corrected in R-8: `QuickEligible()` (§5.2) requires `Class == lookup`, and `free_slots` is `ClassCompute` (it derives gaps, doesn't just fetch data); exposing it to the main agent as a raw tool would blur "the model gets lookups, not derived judgment calls" |
 | `mail.latest` | `store.latest_messages` | `n: count, default 5, 1..20` | | `quick.latest_mail` |
 | `mail.unread_count` | `store.unread_count` | none | says truthfully that unread state isn't synced, and gives today's received count as a separate fact | none (the answer is non-informative to the model) |
 | `mail.latest_from` | `store.latest_from` | `who: person, required` | | `quick.mail_from` |
@@ -1281,7 +1281,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
   | p50 / p95 latency | ~1µs / ~216µs |
 
   The old fast path only ever recognizes 3 hardcoded phrase families (schedule/approvals/brief) against a 12-read + 4-write intent eval set, so a 6.2% hit rate and 90.6% escalation rate are expected, not a bug. This is the number Tier 0's acceptance criterion ("hit rate at least the legacy baseline plus 20 points", i.e. **at least 26.2%**, well under the criterion's own separate 50% floor) measures against once R-9/R-11 build the real Tier 0.
-- [ ] **R-8 Reflex handlers** (`internal/nervous/reflex/{reflex.go,handlers.go,storeview.go,imports_test.go}`, plus `runtime.CachedBrief` in `internal/runtime/brief.go`).
+- [x] **R-8 Reflex handlers** (`internal/nervous/reflex/{reflex.go,handlers.go,storeview.go,imports_test.go}`, plus `runtime.CachedBrief` in `internal/runtime/brief.go`).
   - All 12 read functions with full `FunctionSpec`s (Class, ReadOnly, Deterministic, SideEffects, QuickTool per §7), `Table()` and `Specs()`.
   - Tests:
     - `handlers_test.go`: each handler against a temp-dir store opened read-only; taint from External records, including the tomorrow-schedule regression; `approvals.bind_pending` leaves queue and audit unchanged; `status.overview` never touches the vault;
