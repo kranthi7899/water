@@ -17,6 +17,9 @@ public enum Channel: String {
 /// decide it via POST /v1/approvals/{id}/decision) and is best-effort: it
 /// covers only approvals this turn's own model queued while it was running.
 /// Refresh GET /v1/approvals on `done` for everything else.
+///
+/// Every stream ends with exactly one terminal event, `done` or `error`;
+/// nothing follows it (the daemon's turnSink closes after it).
 public struct TurnEvent: Decodable, Equatable {
     public enum Kind: Equatable {
         case ack, delta, sentence, approvalRequired, done, error
@@ -70,6 +73,16 @@ public struct TurnEvent: Decodable, Equatable {
         risk = try c.decodeIfPresent(String.self, forKey: .risk)
         payloadHash = try c.decodeIfPresent(String.self, forKey: .payloadHash)
         error = try c.decodeIfPresent(String.self, forKey: .error)
+    }
+
+    /// For `approval_required`: the queued action's name (e.g.
+    /// "gmail.send_message") — `action`, or `text` from a daemon that only
+    /// sent the action there. Nil when neither is set.
+    public var approvalAction: String? {
+        for v in [action, text] {
+            if let s = v?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty { return s }
+        }
+        return nil
     }
 
     /// Decodes one NDJSON line; nil for a line that isn't a valid event
