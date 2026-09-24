@@ -1298,7 +1298,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - `TestNoEscalateWordInTemplates`;
     - `TestDemoTwinLoads` (`ceo-demo` → empty registry, default style).
   - Flag: Tier 0 on. It is not reachable until R-15.
-- [ ] **R-10 Turn state machine** (`internal/nervous/turn/{turn.go,turn_test.go}`).
+- [x] **R-10 Turn state machine** (`internal/nervous/turn/{turn.go,turn_test.go}`).
   - Tests:
     - the transition table, including illegal transitions;
     - `Route` CAS under 50 goroutines, where exactly one wins;
