@@ -64,6 +64,25 @@ func TestOSVoiceArgs(t *testing.T) {
 	}
 }
 
+// spd-say only reads the text from stdin in pipe mode (-e); without it,
+// Speak's stdin text is ignored and spd-say exits 1 with its usage.
+func TestOSDetectSpdSayUsesPipeMode(t *testing.T) {
+	o := &OS{Look: func(name string) (string, error) { return "/usr/bin/" + name, nil }}
+	o.detectFor("linux")
+	if o.bin != "/usr/bin/spd-say" {
+		t.Fatalf("bin = %q, want spd-say first on linux", o.bin)
+	}
+	hasPipe := false
+	for _, a := range o.args {
+		if a == "-e" || a == "--pipe-mode" {
+			hasPipe = true
+		}
+	}
+	if !hasPipe {
+		t.Fatalf("spd-say args %v lack -e: stdin text would never be spoken", o.args)
+	}
+}
+
 func TestParseSayVoices(t *testing.T) {
 	out := "Albert              en_US    # Hello! My name is Albert.\n" +
 		"Eddy (English (UK)) en_GB    # Hello! My name is Eddy.\n" +

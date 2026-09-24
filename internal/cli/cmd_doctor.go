@@ -94,9 +94,12 @@ func (a *App) doctorCmd() *cobra.Command {
 
 			// The daemon.
 			paths := gateway.Paths{Home: config.Home()}
-			if _, err := os.Stat(paths.SocketPath()); err == nil {
-				add("daemon", "ok", "socket present at "+paths.SocketPath())
-			} else {
+			switch probeDaemon(paths.SocketPath()) {
+			case daemonUp:
+				add("daemon", "ok", "responding at "+paths.SocketPath())
+			case daemonStale:
+				add("daemon", "warn", "stale socket at "+paths.SocketPath()+" (daemon not responding); start it with `water daemon`")
+			default:
 				add("daemon", "warn", "not running; start it with `water daemon`")
 			}
 

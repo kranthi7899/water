@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,6 +14,7 @@ import (
 	"water/internal/auth"
 	"water/internal/backend"
 	"water/internal/config"
+	"water/internal/gateway"
 )
 
 func (a *App) onboardCmd() *cobra.Command {
@@ -24,7 +26,7 @@ func (a *App) onboardCmd() *cobra.Command {
 	}
 	c.Flags().Bool("no-login", false, "never launch a login flow; only detect")
 	c.Flags().Bool("headless", false, "force the no-browser login path (setup-token / device code)")
-	c.Flags().Bool("no-picker", false, "do not open the agent picker after success")
+	c.Flags().Bool("no-picker", false, "do not open chat after success")
 	return c
 }
 
@@ -96,7 +98,16 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 		}
 	}
 
-	sel, selErr := backend.Select(ctx, backend.Default, backend.SelectConfig{Preferred: "auto", AllowMetered: false})
+	sel, selWarn, selErr := onboardSelect(ctx, backend.Default, a.flags.backend, cfg.Backend.Preferred)
+	if selErr != nil && isExplicitBackend(a.flags.backend) {
+		if a.jsonMode() {
+			_ = json.NewEncoder(os.Stdout).Encode(rep)
+		}
+		return exitWith(ExitBackend, selErr)
+	}
+	if selWarn != "" {
+		rep.Warnings = append(rep.Warnings, selWarn)
+	}
 	if selErr != nil {
 		msg := "no subscription CLI is installed and logged in.\n" +
 			"  install one and sign in with your plan:\n" +
@@ -152,10 +163,54 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	}
 	fmt.Fprintf(os.Stderr, "\n  %s\n", styleDim.Render("next: water daemon · water chat · water ask \"<prompt>\" · water status"))
 	if interactive && !noPicker && isTTY(os.Stdout) {
-		a.cfg = nil
-		return a.runChat(ctx)
+		return a.chatAfterOnboard(ctx)
 	}
 	return nil
+}
+
+// chatAfterOnboard opens chat once setup is verified, but only when a daemon
+// is actually answering: chat is a daemon client, and on a first-run onboard
+// nothing has started one yet. Setup succeeded either way, so a missing
+// daemon is a next-step hint, not a failed exit.
+func (a *App) chatAfterOnboard(ctx context.Context) error {
+	sock := gateway.Paths{Home: config.Home()}.SocketPath()
+	if probeDaemon(sock) != daemonUp {
+		fmt.Fprintf(os.Stderr, "\n  %s start the daemon with `water daemon` (or `water daemon install`), then run `water` to chat\n", styleDim.Render("next"))
+		return nil
+	}
+	a.cfg = nil
+	return a.runChat(ctx)
+}
+
+func isExplicitBackend(v string) bool {
+	v = strings.TrimSpace(strings.ToLower(v))
+	return v != "" && v != "auto"
+}
+
+// onboardSelect picks the backend onboard verifies and then writes back to
+// backend.preferred. It never allows a metered backend. An explicit
+// --backend is honoured, and its failure returned as is. A stored
+// backend.preferred is honoured too, but when it is no longer usable onboard
+// (which is how a user repairs setup) falls back to auto and says so in the
+// returned warning.
+func onboardSelect(ctx context.Context, reg *backend.Registry, flag, preferred string) (backend.Selection, string, error) {
+	if isExplicitBackend(flag) {
+		sel, err := backend.Select(ctx, reg, backend.SelectConfig{Flag: flag, AllowMetered: false})
+		return sel, "", err
+	}
+	if !isExplicitBackend(preferred) {
+		sel, err := backend.Select(ctx, reg, backend.SelectConfig{Preferred: "auto", AllowMetered: false})
+		return sel, "", err
+	}
+	sel, err := backend.Select(ctx, reg, backend.SelectConfig{Preferred: preferred, AllowMetered: false})
+	if err == nil {
+		return sel, "", nil
+	}
+	sel, aerr := backend.Select(ctx, reg, backend.SelectConfig{Preferred: "auto", AllowMetered: false})
+	if aerr != nil {
+		return sel, "", aerr
+	}
+	return sel, fmt.Sprintf("%v; verified %s instead", err, sel.Backend.Name()), nil
 }
 
 func (a *App) printBackends(rep onboardReport) {
