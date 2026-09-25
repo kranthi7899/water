@@ -135,27 +135,52 @@ want tainted". Not fixed here: root cause is in the fixture's fixed
 `+1h` offset versus `store.calendar_events`'s actual default window, not
 anything R-22 touches (`internal/nervous/promote`, `mainpath.go`'s
 BeginMain/EndMain wiring, or the new `/v1/route/candidates` endpoint).
-
-## Slice R: FunctionGemma's warm p95 latency (1313ms) fails the 400ms eval-gate threshold on this Mac
-
-Measured live during Slice R's Phase 4 verification (`docs/slices/R-verification.md`):
-a real `water model pull functiongemma --accept-gemma-terms` plus `water route
-eval --tier1` against the real, owner-approved Homebrew `llama-server` sidecar
-produced 0 false accepts (0.00%, Wilson 95% upper bound 0.93%) over 410 cases —
-every safety criterion clears its threshold with margin — but warm p95 latency
-came in at 1313ms against the plan's 400ms ceiling. The eval-gate mechanism
-(R-17/R-25) correctly refused to start the sidecar in response (`water daemon:
-tier1 not started: eval_failed`, confirmed live even with
-`router.tier1.enabled` explicitly set to `true`), so Tier 1 stays inert — this
-is the intended fail-safe behavior working correctly, not a bug. Not
-investigated in this pass: whether different `llama-server` startup flags
-(thread count, an explicit Metal-offload flag, a smaller `--ctx-size`) would
-bring warm p95 under 400ms on Apple Silicon CPU/GPU. Revisit before ever
-setting `router.tier1.enabled=true` in real use.
 Whoever next touches `quick_test.go` or the `store.calendar_events`
 handler should pin the fixture's event time to a fixed, mid-day instant
 (the way `internal/nervous/promote/candidates_test.go`'s `day1`/`day2`
 fixtures do) rather than an offset from `time.Now()`.
+
+## Slice R: FunctionGemma/Tier 1 fails its own eval gate — for real reasons now
+
+Measured live during Slice R's Phase 4 verification
+(`docs/slices/R-verification.md`), across two live-eval runs. The first run
+(before `internal/nervous/t1`'s parsing bug below was found and fixed)
+showed 0% false accepts but 1313ms warm p95 — a pure-looking latency
+failure. Investigating that latency surfaced a much more serious problem:
+`parseResponse` only ever read `llama-server`'s structured `tool_calls`
+field, which `llama-server` never populates for this model (it returns the
+model's own raw `<start_function_call>call:NAME{args}<end_function_call>`
+text in `message.content` instead), so every real answer was silently
+discarded as `ErrTextReply` — **Tier 1 had never answered a single
+utterance in its entire existence**, and the first run's "0% false
+accepts" was vacuously true (0 accepts out of 0 real answers), not a
+safety measurement. Fixed (commit `b246bd9`): a raw-format fallback
+parser, plus a request-level `stop` sequence that also cut latency 7-10x
+(the model was hallucinating fabricated extra calls out to `max_tokens`
+without one). Re-run after the fix, against the same 410 cases:
+
+```
+9 false accepts (fa_rate 2.20%, wilson95 upper 4.12%), warm p95 558ms
+hit_rate=0.464 intent_acc=0.940 escalation_rate=0.634 reasoning_answered=0
+```
+
+This is the trustworthy number, and it still correctly fails the gate
+(false-accept rate ≤1%/Wilson≤2% and warm p95≤400ms both miss, though
+latency is now much closer). `water daemon: tier1 not started: eval_failed`
+confirmed live again post-fix, even with `router.tier1.enabled=true`. Not
+investigated in this pass, worth a follow-up before ever setting
+`router.tier1.enabled=true` in real use:
+- **Hardware:** the Homebrew `llama.cpp` bottle used here is confirmed
+  CPU-only (`otool -L` on `libggml-base.dylib` shows no `Metal.framework`
+  linkage). A from-source build with Metal enabled would very likely close
+  most or all of the remaining 558ms→400ms latency gap, but building from
+  source is a different decision than "the Homebrew bottle" the owner
+  approved.
+- **Accuracy:** whether the 2.2% false-accept rate is close to this
+  270M-parameter model's practical ceiling without fine-tuning (explicitly
+  deferred by the plan), or whether prompt/grounding-check tuning in
+  `internal/nervous/tier1.go` could bring it under 1% without a bigger
+  model.
 
 ## Slice R: deliberate design choices, recorded so they aren't re-litigated
 
