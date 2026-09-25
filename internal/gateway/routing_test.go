@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"water/internal/gate"
 	"water/internal/nervous"
 	"water/internal/nervous/intents"
+	"water/internal/nervous/promote"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
 	"water/internal/runtime"
@@ -213,5 +215,84 @@ func TestRouterHealthAndReportEndpoints(t *testing.T) {
 	resp.Body.Close()
 	if _, ok := profile["tts"]; !ok {
 		t.Fatalf("/v1/voice/profile response missing tts: %+v", profile)
+	}
+}
+
+// insertCandidateFixture writes n route_log rows directly to h.st, all
+// sharing sig and landing on the same instant at — the same shape
+// internal/nervous/promote/candidates_test.go builds fixtures with,
+// reused here to exercise the HTTP contract rather than the grouping logic
+// itself.
+func insertCandidateFixture(t *testing.T, h *harness, prefix string, at time.Time, sig string, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		row := store.RouteRow{
+			TurnID:          fmt.Sprintf("%s-%d", prefix, i),
+			At:              at,
+			Channel:         "cli",
+			Utterance:       "what's on my calendar and when's my next meeting",
+			Owner:           "main",
+			AnsweredBy:      "main",
+			Outcome:         "answered",
+			ToolsUsed:       []string{"quick.calendar", "quick.next_event"},
+			ToolsAttributed: true,
+			QuickOnly:       true,
+			ToolSignature:   sig,
+		}
+		if _, err := h.st.InsertRoute(context.Background(), row); err != nil {
+			t.Fatalf("InsertRoute: %v", err)
+		}
+	}
+}
+
+// TestRouteCandidatesEndpoint: GET /v1/route/candidates groups qualifying
+// route_log rows into candidates over HTTP, honors explicit since/min query
+// params, and is never gated on router.promotion.enabled — that config key
+// does not exist yet (R-25's job to wire it), and even once it does, only
+// drafting/promoting a candidate is gated (R-23), never listing one (Design
+// §16 item 1: "works even with the flag off").
+func TestRouteCandidatesEndpoint(t *testing.T) {
+	h := newRoutingHarness(t)
+	now := time.Now()
+	day1 := now.Add(-48 * time.Hour)
+	day2 := now.Add(-24 * time.Hour)
+	const sig = "quick.calendar+quick.next_event"
+	insertCandidateFixture(t, h, "d1", day1, sig, 3)
+	insertCandidateFixture(t, h, "d2", day2, sig, 2)
+
+	// Default since (30d) and min (5): 3+2=5 repeats over 2 days qualifies.
+	resp := h.get(t, "/v1/route/candidates", h.token)
+	var cands []promote.Candidate
+	if err := json.NewDecoder(resp.Body).Decode(&cands); err != nil {
+		t.Fatalf("decode /v1/route/candidates: %v", err)
+	}
+	resp.Body.Close()
+	if len(cands) != 1 || cands[0].Signature != sig || cands[0].Repeats != 5 || cands[0].Days != 2 {
+		t.Fatalf("candidates = %+v, want one 5-repeat/2-day candidate", cands)
+	}
+	if cands[0].ID == "" || len(cands[0].SampleTurnIDs) == 0 {
+		t.Fatalf("candidate missing id or samples: %+v", cands[0])
+	}
+
+	// A narrow explicit since excludes both fixture days.
+	resp = h.get(t, "/v1/route/candidates?since=12h&min=1", h.token)
+	var narrow []promote.Candidate
+	if err := json.NewDecoder(resp.Body).Decode(&narrow); err != nil {
+		t.Fatalf("decode narrowed /v1/route/candidates: %v", err)
+	}
+	resp.Body.Close()
+	if len(narrow) != 0 {
+		t.Fatalf("narrowed candidates = %+v, want none (since=12h excludes both fixture days)", narrow)
+	}
+
+	// An explicit min above the fixture's repeat count excludes it too.
+	resp = h.get(t, "/v1/route/candidates?min=100", h.token)
+	var tooHigh []promote.Candidate
+	if err := json.NewDecoder(resp.Body).Decode(&tooHigh); err != nil {
+		t.Fatalf("decode high-min /v1/route/candidates: %v", err)
+	}
+	resp.Body.Close()
+	if len(tooHigh) != 0 {
+		t.Fatalf("high-min candidates = %+v, want none", tooHigh)
 	}
 }

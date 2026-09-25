@@ -226,6 +226,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
 	mux.Handle("GET /v1/router", d.auth(d.handleRouterHealth))
 	mux.Handle("GET /v1/route/report", d.auth(d.handleRouteReport))
+	mux.Handle("GET /v1/route/candidates", d.auth(d.handleRouteCandidates))
 	mux.Handle("GET /v1/voice/profile", d.auth(d.handleVoiceProfile))
 	mux.Handle("POST /v1/turns/{id}/partial", d.auth(d.handleTurnPartial))
 	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))

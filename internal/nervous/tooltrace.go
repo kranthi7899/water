@@ -6,16 +6,28 @@ import (
 	"sync"
 )
 
+// quickToolPrefix is the id prefix every sous-chef quick.* tool carries
+// (reflex.FunctionSpec.QuickTool, e.g. "quick.calendar" — the dotted
+// function id gateway/quick.go's handleQuickInvoke actually records via
+// RecordToolUse, not the "quick__" MCP-safe tool name a model-facing
+// definition uses). It is the prefix routelog.go's finish() passes to
+// QuickOnlySignature when deciding a main turn's quick_only/tool_signature
+// fields.
+const quickToolPrefix = "quick."
+
 // ToolTracer attributes a tool call to whichever main-path turn(s) are
 // currently in flight (Design §14, "Tool attribution"). The warm session
 // serializes main-path turns in practice, so exactly one is normally in
 // flight — but nothing here assumes that, since a future multi-conversation
 // scheduler could change it, and the rule already covers 0/1/2+ explicitly.
 //
-// Nothing calls RecordUse yet: the model's tool-call path isn't wired to
-// report into this until quick tools exist (task R-16). The attribution
-// rule itself doesn't depend on that caller, so it's built and tested here;
-// R-16 only has to wire a call site, not design this.
+// RecordUse has had a real caller since R-16 (gateway/quick.go's
+// handleQuickInvoke, via Nervous.RecordToolUse), but until this task
+// (R-22) nothing ever called BeginMain/EndMain to register a turn as in
+// flight — so every RecordUse call found tt.inFlight empty and silently
+// dropped, and no real route_log row ever got a populated tools_used,
+// tools_attributed, quick_only or tool_signature. mainpath.go's answerMain
+// now brackets the main path with BeginMain/EndMain, closing that gap.
 type ToolTracer struct {
 	mu         sync.Mutex
 	inFlight   map[string]bool

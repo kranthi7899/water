@@ -27,10 +27,13 @@ func ms(d time.Duration) int64 { return d.Milliseconds() }
 // then writes exactly one store.RouteRow when finish runs — on the normal
 // path, on a handler error, on context cancellation, or (having set
 // outcome="error" first) on a recovered panic. Fields that depend on
-// mechanisms later tasks build (partials/speculation: R-19; quick-tool
-// attribution details: R-16; action/decision fields: R-20/R-21) are simply
-// left at their zero value here — there is nothing yet to populate them
-// with, and fabricating a value would be worse than an honest zero.
+// mechanisms later tasks build (partials/speculation: R-19; action/decision
+// fields: R-20/R-21) are simply left at their zero value here — there is
+// nothing yet to populate them with, and fabricating a value would be worse
+// than an honest zero. Quick-tool attribution (tools_used/tools_attributed/
+// quick_only/tool_signature) is populated for real as of this task (R-22):
+// answerMain (mainpath.go) sets toolsUsed/toolsAttributed/quickOnly/
+// toolSignature on this recorder before finish ever runs.
 type routeRecorder struct {
 	n         *Nervous
 	turnID    string
@@ -52,6 +55,17 @@ type routeRecorder struct {
 	warnings         []string
 	ackMS            *int64
 	firstSentenceMS  *int64
+
+	// toolsUsed/toolsAttributed/quickOnly/toolSignature are set only for a
+	// main-path turn, by answerMain's BeginMain/EndMain bracket (tooltrace.go,
+	// R-14/R-16 built the mechanism; this task, R-22, is the first real
+	// caller). A quick-tier turn (owner=quick) never touches these, so they
+	// stay at their zero value for it — which is correct, since a quick
+	// answer never calls a main-agent tool at all.
+	toolsUsed       []string
+	toolsAttributed bool
+	quickOnly       bool
+	toolSignature   string
 }
 
 func (n *Nervous) newRouteRecorder(id string, ch runtime.Channel, utterance string, at time.Time) *routeRecorder {
@@ -139,6 +153,10 @@ func (r *routeRecorder) finish(ctx context.Context) {
 		SpeculationModelCalls: 0,
 		AckMS:                 r.ackMS,
 		FirstSentenceMS:       r.firstSentenceMS,
+		ToolsUsed:             r.toolsUsed,
+		ToolsAttributed:       r.toolsAttributed,
+		QuickOnly:             r.quickOnly,
+		ToolSignature:         r.toolSignature,
 	}
 
 	// The "previous row" must be found BEFORE this one is inserted, or it

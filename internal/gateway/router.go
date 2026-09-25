@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"water/internal/nervous"
+	"water/internal/nervous/promote"
 )
 
 // turnPartialIDPattern is the client-generated turn id's required shape
@@ -176,6 +177,40 @@ func (d *Daemon) handleRouteReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, nervous.BuildReport(rows))
+}
+
+// handleRouteCandidates lists repeated main-agent quick-tool-usage patterns
+// that could become a learned Tier 0 intent (Design §16, `promote.Candidates`
+// — detection only, R-22). This is deliberately never gated on
+// router.promotion.enabled: listing candidates is read-only over route_log
+// and always available, unlike drafting or promoting one (R-23).
+// ?since=<Go duration, e.g. "720h"> bounds the lookback (default 30 days);
+// ?min=<n> sets the minimum distinct-turn repeat count (default
+// promote.DefaultMinRepeats).
+func (d *Daemon) handleRouteCandidates(w http.ResponseWriter, r *http.Request) {
+	lookback := 30 * 24 * time.Hour
+	if s := r.URL.Query().Get("since"); s != "" {
+		if dur, err := time.ParseDuration(s); err == nil && dur > 0 {
+			lookback = dur
+		}
+	}
+	minRepeats := promote.DefaultMinRepeats
+	if s := r.URL.Query().Get("min"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			minRepeats = n
+		}
+	}
+	if d.cfg.Store == nil || d.cfg.Nervous == nil {
+		writeJSON(w, http.StatusOK, []promote.Candidate{})
+		return
+	}
+	sh := d.cfg.Nervous.Registry().Shared()
+	cands, err := promote.Candidates(r.Context(), d.cfg.Store, sh, time.Now().Add(-lookback), minRepeats)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, cands)
 }
 
 // handleVoiceProfile serves the twin's voice/TTS settings (name, tone,

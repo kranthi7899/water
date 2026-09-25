@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +21,7 @@ import (
 	"water/internal/config"
 	"water/internal/decisions"
 	"water/internal/gateway"
+	"water/internal/nervous/promote"
 	"water/internal/runtime"
 )
 
@@ -238,4 +241,35 @@ func (c *daemonClient) Decide(ctx context.Context, id, payloadHash, reply string
 		return DecisionResult{}, err
 	}
 	return out, nil
+}
+
+// RouteCandidates lists repeated main-agent quick-tool-usage patterns that
+// could become a learned Tier 0 intent (Design §16's growth loop, detection
+// only — R-22). Always available: GET /v1/route/candidates is never gated
+// on router.promotion.enabled.
+func (c *daemonClient) RouteCandidates(ctx context.Context, since time.Duration, minRepeats int) ([]promote.Candidate, error) {
+	q := url.Values{}
+	if since > 0 {
+		q.Set("since", since.String())
+	}
+	if minRepeats > 0 {
+		q.Set("min", strconv.Itoa(minRepeats))
+	}
+	path := "/v1/route/candidates"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpError(resp)
+	}
+	var cands []promote.Candidate
+	if err := json.NewDecoder(resp.Body).Decode(&cands); err != nil {
+		return nil, err
+	}
+	return cands, nil
 }

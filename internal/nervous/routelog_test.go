@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"water/internal/approvals"
+	"water/internal/backend"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/render"
 	"water/internal/runtime"
@@ -170,6 +171,66 @@ func TestRouteLogExactlyOneRowPerOutcome(t *testing.T) {
 		row := lastRoute(t, env.Store, start)
 		if row.Outcome != "cancelled" {
 			t.Fatalf("outcome = %q, want cancelled (row=%+v)", row.Outcome, row)
+		}
+	})
+}
+
+// TestRouteLogQuickToolAttribution proves the gap this task (R-22) closed:
+// before it, nothing ever called ToolTracer.BeginMain/EndMain, so
+// RecordToolUse's calls (wired to gateway/quick.go since R-16) always found
+// no turn in flight and were silently dropped — every real route_log row's
+// tools_used/tools_attributed/quick_only/tool_signature stayed at their Go
+// zero value forever. answerMain now brackets the main path with
+// BeginMain/EndMain (mainpath.go), so a main turn that calls only quick.*
+// tools is correctly attributed and marked quick_only, with a stable,
+// sorted signature.
+func TestRouteLogQuickToolAttribution(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule": tier0ScheduleYAML})
+
+	t.Run("quick-only tool calls are attributed and grouped", func(t *testing.T) {
+		env, ctx, fk := nervousTestEnv(t)
+		n := nervousWithLoggingFor(t, reg, env.Store, nil)
+		fk.Reply = func(req backend.Request) string {
+			// Recorded out of alphabetical order deliberately: the
+			// signature must come back sorted regardless of call order.
+			n.RecordToolUse("quick.next_event")
+			n.RecordToolUse("quick.calendar")
+			return "Sure."
+		}
+		start := tier0FixedNow.Add(-time.Second)
+		handleAndWait(n, ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i prioritize today", TaskID: "t-quickonly"})
+
+		row := lastRoute(t, env.Store, start)
+		if row.Owner != "main" {
+			t.Fatalf("Owner = %q, want main (row=%+v)", row.Owner, row)
+		}
+		if !row.ToolsAttributed {
+			t.Fatalf("ToolsAttributed = false, want true (row=%+v)", row)
+		}
+		if !row.QuickOnly {
+			t.Fatalf("QuickOnly = false, want true (row=%+v)", row)
+		}
+		if row.ToolSignature != "quick.calendar+quick.next_event" {
+			t.Fatalf("ToolSignature = %q, want sorted \"quick.calendar+quick.next_event\"", row.ToolSignature)
+		}
+		if len(row.ToolsUsed) != 2 {
+			t.Fatalf("ToolsUsed = %v, want 2 entries", row.ToolsUsed)
+		}
+	})
+
+	t.Run("a main turn that calls no tools is attributed but never quick_only", func(t *testing.T) {
+		env, ctx, fk := nervousTestEnv(t)
+		n := nervousWithLoggingFor(t, reg, env.Store, nil)
+		fk.Reply = func(req backend.Request) string { return "Sure." }
+		start := tier0FixedNow.Add(-time.Second)
+		handleAndWait(n, ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i prioritize today", TaskID: "t-notools"})
+
+		row := lastRoute(t, env.Store, start)
+		if row.Owner != "main" || !row.ToolsAttributed {
+			t.Fatalf("row = %+v, want owner=main, attributed", row)
+		}
+		if row.QuickOnly || row.ToolSignature != "" || len(row.ToolsUsed) != 0 {
+			t.Fatalf("row = %+v, want quick_only=false and no tools", row)
 		}
 	})
 }

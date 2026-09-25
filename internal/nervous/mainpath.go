@@ -42,6 +42,24 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 		emit(runtime.Event{Kind: runtime.EventError, Error: "nervous: " + err.Error()})
 		return
 	}
+	// Mark this turn in flight for tool-call attribution (tooltrace.go,
+	// R-14) the moment it actually owns the turn, and always resolve it on
+	// every exit path below (success, error, brief-cache-miss, disabled):
+	// EndMain hands back whichever quick.* tools this turn's own calls to
+	// gateway/quick.go's handleQuickInvoke recorded, plus whether
+	// attribution stayed unambiguous the whole time. Nothing called
+	// BeginMain/EndMain before this task (R-14/R-16 built the mechanism and
+	// its one real call site into RecordToolUse, but never registered a
+	// turn as in flight for it to attribute to), so tools_used/
+	// tools_attributed/quick_only/tool_signature never reached a real
+	// route_log row until now.
+	n.toolTracer.BeginMain(id)
+	defer func() {
+		used, attributed := n.toolTracer.EndMain(id)
+		rec.toolsUsed = used
+		rec.toolsAttributed = attributed
+		rec.quickOnly, rec.toolSignature = QuickOnlySignature(used, quickToolPrefix)
+	}()
 	// The handoff acknowledgement must be visible before any main-path
 	// output: stop the timer (it may already have fired) and fire it now
 	// if it hasn't, via the same sync.Once so it's never emitted twice.

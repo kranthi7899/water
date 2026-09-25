@@ -81,6 +81,24 @@ Result/template path at all). Fixing the general case means either giving
 `empty` template that reflects a bound envelope — a small, independent
 change for whichever task next touches this handler's rendering.
 
+## Slice R: `TestQuickInvokeTaintedResultEscalatesSession` is time-of-day flaky
+
+Found while building R-22 (pre-existing: reproduces identically on
+R-21's tick commit, `29dc2b9`, before this task's changes). The test
+(`internal/gateway/quick_test.go`) upserts an event at `time.Now().Add(time.Hour)`
+and expects `quick.calendar`'s default "when" range to include it and mark
+the session tainted. Whenever the test runs late enough in the local day
+that `+1h` crosses local midnight, the event falls outside `quick.calendar`'s
+default range and the assertion fails with "session taint after = clean,
+want tainted". Not fixed here: root cause is in the fixture's fixed
+`+1h` offset versus `store.calendar_events`'s actual default window, not
+anything R-22 touches (`internal/nervous/promote`, `mainpath.go`'s
+BeginMain/EndMain wiring, or the new `/v1/route/candidates` endpoint).
+Whoever next touches `quick_test.go` or the `store.calendar_events`
+handler should pin the fixture's event time to a fixed, mid-day instant
+(the way `internal/nervous/promote/candidates_test.go`'s `day1`/`day2`
+fixtures do) rather than an offset from `time.Now()`.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
