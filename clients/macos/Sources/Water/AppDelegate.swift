@@ -14,6 +14,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var meeting: MeetingController!
     private var meetingItem: NSMenuItem!
     private var hotkeys: HotKeyMonitor!
+    /// Live only while push-to-talk is listening (R-27): streams
+    /// SFSpeechRecognizer's partial results to the daemon, and hands its
+    /// turn id to the final `send(_:channel:turnID:)` call so the daemon can
+    /// reuse whatever speculative work it already did.
+    private var partialStreamer: PartialStreamer?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         setUpStatusItem()
@@ -29,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         setUpVoice()
         setUpMeeting()
+        fetchVoiceProfile()
 
         hotkeys = HotKeyMonitor { [weak self] key in
             guard let self else { return }
@@ -123,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         voice.stopSpeaking()
     }
 
-    private func send(_ text: String, channel: Channel) {
+    private func send(_ text: String, channel: Channel, turnID: String? = nil) {
         interruptSpeech() // runner.run cancels the old stream; this silences it
         let turn = speakingTurn
         panel.beginReply()
@@ -131,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // During meeting capture every question is about the meeting: the
         // daemon adds its recent transcript (untrusted, and it taints the turn).
         let meetingID = meeting.state == .active ? meeting.session?.id : nil
-        runner.run(channel: channel, prompt: text, meetingID: meetingID, onEvent: { [weak self] e in
+        runner.run(channel: channel, prompt: text, meetingID: meetingID, turnID: turnID, onEvent: { [weak self] e in
             guard let self else { return }
             switch e.kind {
             case .ack:
@@ -143,6 +149,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if channel == .voice, turn == self.speakingTurn { self.voice.speak(e.text ?? "") }
             case .approvalRequired:
                 self.panel.appendApproval(id: e.approvalID, action: e.approvalAction, risk: e.risk)
+            case .handoff:
+                // Safe-decode only for now (R-27): no code path emits this
+                // kind yet (the daemon still sends a zero-text `ack` for the
+                // same moment, see Events.swift's doc comment on
+                // TurnEvent.Kind.handoff), and it isn't clear the plan wants
+                // dedicated UI beyond that existing "Thinking…" status line
+                // once it does. Flagged as a follow-up rather than guessed.
+                break
             case .done:
                 // Terminal: nothing follows done or error on a turn stream.
                 self.clearStatus()
@@ -173,19 +187,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.panel.setInput("")
             self.panel.show(placeholder: "Listening… release \(HotKeyConfig.voice.label) to send")
             self.panel.setStatus("● Listening")
+            // A fresh turn id for this capture (R-27): SFSpeechRecognizer's
+            // partial results stream to the daemon under it as they arrive,
+            // fire-and-forget, so the daemon can start speculative work
+            // before the final transcript is ready.
+            self.partialStreamer = PartialStreamer(channel: .voice, tokenProvider: self.runner.tokens.token,
+                                                    transport: self.runner.client)
         }
-        voice.onPartial = { [weak self] text in self?.panel.setInput(text) }
+        voice.onPartial = { [weak self] text in
+            self?.panel.setInput(text)
+            self?.partialStreamer?.post(text)
+        }
         voice.onTranscript = { [weak self] text in
             guard let self else { return }
             self.panel.setInput(text)
-            self.send(text, channel: .voice)
+            let turnID = self.partialStreamer?.turnID
+            self.partialStreamer = nil
+            self.send(text, channel: .voice, turnID: turnID)
         }
         voice.onFailure = { [weak self] message in
             guard let self else { return }
+            self.partialStreamer = nil
             self.clearStatus()
             self.panel.show()
             self.panel.beginReply()
             self.panel.appendError(message)
+        }
+    }
+
+    /// Fetches the twin's TTS profile once at launch (`GET
+    /// /v1/voice/profile`, R-27) and applies it to the voice controller.
+    /// Best-effort: the daemon may not be reachable yet (or ever, until the
+    /// user runs `water daemon`), and `VoiceController.speak` already falls
+    /// back to `AVSpeechUtterance`'s own defaults when no profile is
+    /// applied — so any failure here is silently ignored rather than
+    /// blocking or erroring app startup.
+    private func fetchVoiceProfile() {
+        let client = runner.client
+        let tokens = runner.tokens
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let token = try? tokens.token(), let profile = try? client.fetchVoiceProfile(token: token) else { return }
+            DispatchQueue.main.async { self?.voice.applyVoiceProfile(profile) }
         }
     }
 

@@ -14,6 +14,11 @@ final class VoiceController {
 
     private let session: VoiceSession
     private let synth = AVSpeechSynthesizer()
+    /// Set by `applyVoiceProfile`, from `GET /v1/voice/profile` (R-27).
+    /// Nil leaves `speak(_:)` on `AVSpeechUtterance`'s own defaults, exactly
+    /// as before this profile existed.
+    private var ttsVoice: AVSpeechSynthesisVoice?
+    private var ttsRate: Float?
 
     var state: State { session.state }
 
@@ -61,7 +66,31 @@ final class VoiceController {
     func speak(_ sentence: String) {
         let s = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { return }
-        synth.speak(AVSpeechUtterance(string: s))
+        let utterance = AVSpeechUtterance(string: s)
+        if let ttsVoice { utterance.voice = ttsVoice }
+        if let ttsRate { utterance.rate = ttsRate }
+        synth.speak(utterance)
+    }
+
+    /// Applies `GET /v1/voice/profile` (R-27, fetched once at launch): an
+    /// empty `tts.voice`, an unmatched voice name, or a non-positive
+    /// `tts.rate_wpm` leaves the corresponding setting untouched, so
+    /// `speak(_:)` falls back to `AVSpeechUtterance`'s own defaults exactly
+    /// as it did before this profile existed. `tts.voice` is matched
+    /// case-insensitively against `AVSpeechSynthesisVoice.speechVoices()`'s
+    /// `.name` — the same voice-name space `say -v`/`internal/voice.OS`
+    /// already uses, since the daemon serves one TTS profile to every
+    /// client. Never throws; meant to be called best-effort.
+    func applyVoiceProfile(_ profile: VoiceProfile) {
+        if !profile.tts.voice.isEmpty,
+           let match = AVSpeechSynthesisVoice.speechVoices().first(where: {
+               $0.name.compare(profile.tts.voice, options: .caseInsensitive) == .orderedSame
+           }) {
+            ttsVoice = match
+        }
+        if profile.tts.rateWPM > 0 {
+            ttsRate = Float(TTSRateMapping.rate(forWPM: profile.tts.rateWPM))
+        }
     }
 
     /// Stops the current utterance and drops every queued one.

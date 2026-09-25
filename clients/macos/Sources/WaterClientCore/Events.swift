@@ -22,7 +22,16 @@ public enum Channel: String {
 /// nothing follows it (the daemon's turnSink closes after it).
 public struct TurnEvent: Decodable, Equatable {
     public enum Kind: Equatable {
-        case ack, delta, sentence, approvalRequired, done, error
+        case ack, delta, sentence, approvalRequired
+        /// The router's handoff acknowledgement on a non-voice channel
+        /// (Design §11.4 step 6, internal/nervous/nervous.go's emitHandoff
+        /// doc comment): today the daemon still sends a zero-text `ack` for
+        /// this instead (no code path emits the literal "handoff" kind yet),
+        /// but this decodes it the moment one does, matching the Go CLI's
+        /// own R-26 treatment (`cmd_ask.go`: an unrecognized-but-documented
+        /// future kind, safely ignored rather than erroring).
+        case handoff
+        case done, error
         case unknown(String)
 
         init(_ raw: String) {
@@ -31,6 +40,7 @@ public struct TurnEvent: Decodable, Equatable {
             case "delta": self = .delta
             case "sentence": self = .sentence
             case "approval_required": self = .approvalRequired
+            case "handoff": self = .handoff
             case "done": self = .done
             case "error": self = .error
             default: self = .unknown(raw)

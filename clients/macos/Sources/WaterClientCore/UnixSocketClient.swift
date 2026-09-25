@@ -157,6 +157,11 @@ public final class UnixSocketClient {
     /// - meetingID: a meeting session's id (Slice M). The daemon extends the
     ///   turn with that session's recent transcript (and taints the turn);
     ///   an unknown id is silently ignored. Nil or empty sends none.
+    /// - turnID: when this turn's push-to-talk capture already posted
+    ///   partials under a `PartialStreamer`'s turn id (R-27), pass that same
+    ///   id here as `turn_id` so the daemon can correlate this final turn
+    ///   with whatever speculative work it already did (R-19). Nil or empty
+    ///   sends none — existing, unchanged behavior.
     /// - onTaskID: called once, before any event, with the daemon's
     ///   `X-Water-Task-Id` — the id `cancelTask(id:token:)` takes. Closing
     ///   the stream (`cancel`) also cancels the turn; this is for a caller
@@ -167,11 +172,13 @@ public final class UnixSocketClient {
     /// this returns without waiting for the socket to close.
     public func streamTurn(channel: Channel, prompt: String, token: String, clear: Bool = false,
                            meetingID: String? = nil,
+                           turnID: String? = nil,
                            cancel: CancelToken? = nil,
                            onTaskID: ((String) -> Void)? = nil,
                            onEvent: @escaping (TurnEvent) -> Void) throws {
         var body: [String: Any] = ["channel": channel.rawValue, "prompt": prompt, "clear": clear]
         if let m = meetingID?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty { body["meeting_id"] = m }
+        if let t = turnID?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { body["turn_id"] = t }
         let req = try HTTPRequest.json("POST", "/v1/turns", token: token, body)
         var status = 0
         var errBody = Data()
