@@ -92,9 +92,22 @@ func newIntentsHarness(t *testing.T, promotionEnabled bool) (*harness, *nervous.
 	}
 
 	// reload mirrors internal/cli/cmd_daemon.go's daemonIntentsReloader,
-	// scoped to this test's fixed fsys/manifest.
+	// scoped to this test's fixed fsys/manifest: the learned overlay only
+	// when promotionEnabled, and the store's disabled-intent rows always
+	// (needed by R-26's promote/demote/enable HTTP tests to actually
+	// observe their own writes on the next reload, the same way a real
+	// daemon does).
 	reload := func(ctx context.Context) error {
-		fresh, err := intents.LoadRegistry(fsys, m, fns, intents.LoadOptions{})
+		opts := intents.LoadOptions{}
+		if promotionEnabled {
+			opts.Learned = os.DirFS(promote.LearnedDir(dir, m.ID))
+		}
+		disabled, err := st.ListIntentStates(ctx)
+		if err != nil {
+			return err
+		}
+		opts.Disabled = disabled
+		fresh, err := intents.LoadRegistry(fsys, m, fns, opts)
 		if err != nil {
 			return err
 		}

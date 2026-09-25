@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"water"
 	"water/internal/config"
+	"water/internal/nervous"
 	"water/internal/nervous/eval"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/promote"
@@ -20,14 +22,91 @@ import (
 	"water/internal/twins"
 )
 
-// routeCmd is the top-level `water route` command group. `eval --tier1`
-// (task R-18) and `candidates` (task R-22) exist; `report` is a later
-// task's addition (docs/slices/R.md's R-26).
+// routeCmd is the top-level `water route` command group: `eval --tier1`
+// (task R-18), `candidates` (task R-22) and `report` (task R-26).
 func (a *App) routeCmd() *cobra.Command {
 	c := &cobra.Command{Use: "route", Short: "The sous chef's routing: live evaluation and the growth loop"}
 	c.AddCommand(a.routeEvalCmd())
 	c.AddCommand(a.routeCandidatesCmd())
+	c.AddCommand(a.routeReportCmd())
 	return c
+}
+
+// routeReportCmd implements `water route report [--since 7d] [--json]`:
+// GET /v1/route/report, the same route_log aggregation nervous.BuildReport
+// (R-14) computes — tier distribution, escalation reasons, latency
+// percentiles and recent possible misses.
+func (a *App) routeReportCmd() *cobra.Command {
+	var since string
+	c := &cobra.Command{
+		Use:   "report",
+		Short: "Summarize recent routing: tiers, escalations, latency, possible misses",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := parseSinceFlag(since)
+			if err != nil {
+				return exitWith(ExitUsage, err)
+			}
+			dc, err := newDaemonClient()
+			if err != nil {
+				return exitWith(ExitError, err)
+			}
+			rep, err := dc.RouteReport(cmd.Context(), d)
+			if err != nil {
+				return exitWith(ExitError, err)
+			}
+			if a.jsonMode() {
+				return printJSON(rep)
+			}
+			fmt.Print(renderRouteReport(rep))
+			return nil
+		},
+	}
+	c.Flags().StringVar(&since, "since", "7d", "lookback window: a plain Go duration (168h) or an <N>d shorthand (7d)")
+	return c
+}
+
+// renderRouteReport formats a nervous.Report for a human terminal.
+func renderRouteReport(rep nervous.Report) string {
+	var b strings.Builder
+	if rep.N == 0 {
+		return styleDim.Render("no route_log rows in this window") + "\n"
+	}
+	fmt.Fprintf(&b, "%s %d\n", styleDim.Render("turns          "), rep.N)
+	fmt.Fprintf(&b, "%s %s\n", styleDim.Render("tiers          "), formatCounts(rep.TierCounts))
+	fmt.Fprintf(&b, "%s %s\n", styleDim.Render("owners         "), formatCounts(rep.OwnerCounts))
+	fmt.Fprintf(&b, "%s %s\n", styleDim.Render("outcomes       "), formatCounts(rep.OutcomeCounts))
+	if len(rep.EscalationReasons) > 0 {
+		fmt.Fprintf(&b, "%s %s\n", styleDim.Render("escalations    "), formatCounts(rep.EscalationReasons))
+	}
+	fmt.Fprintf(&b, "%s total p50=%s p95=%s  ack p50=%s p95=%s\n",
+		styleDim.Render("latency        "), rep.TotalP50, rep.TotalP95, rep.AckP50, rep.AckP95)
+	if len(rep.QuickToolUsageCounts) > 0 {
+		fmt.Fprintf(&b, "%s %s\n", styleDim.Render("quick tools    "), formatCounts(rep.QuickToolUsageCounts))
+	}
+	fmt.Fprintf(&b, "%s %d\n", styleDim.Render("possible misses"), rep.PossibleMissCount)
+	if len(rep.InactiveIntentNearMiss) > 0 {
+		fmt.Fprintf(&b, "%s %s\n", styleDim.Render("inactive hits  "), formatCounts(rep.InactiveIntentNearMiss))
+	}
+	return b.String()
+}
+
+// formatCounts renders a count map as "key=n, key=n, ...", sorted by key for
+// stable output.
+func formatCounts(m map[string]int) string {
+	if len(m) == 0 {
+		return "(none)"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // routeCandidatesCmd implements `water route candidates [--since 30d]

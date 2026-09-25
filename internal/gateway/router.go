@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -151,6 +153,11 @@ func (d *Daemon) handleRouterHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		out["learned_skipped"] = skipped
 	}
+	// promotion_enabled mirrors router.promotion.enabled (R-25), so `water
+	// intent promote` (R-26) can refuse with a helpful message before ever
+	// prompting for confirmation, instead of discovering the gate only after
+	// the owner has already said yes.
+	out["promotion_enabled"] = d.cfg.PromotionEnabled
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -389,4 +396,173 @@ func (d *Daemon) handleVoiceProfile(w http.ResponseWriter, r *http.Request) {
 			"rate_wpm": v.TTS.RateWPM,
 		},
 	})
+}
+
+// intentListItem is one row of GET /v1/intents (`water intent list`, R-26):
+// enough to tell an embedded intent from a learned one, and to say exactly
+// why an inactive or manually-disabled one currently cannot answer.
+type intentListItem struct {
+	ID             string `json:"id"`
+	Origin         string `json:"origin"` // "embedded" or "learned"
+	Active         bool   `json:"active"`
+	InactiveReason string `json:"inactive_reason,omitempty"`
+	Disabled       string `json:"disabled,omitempty"`
+}
+
+// handleIntentsList reports every intent the twin's registry currently
+// holds — embedded and learned, active and shadow — for `water intent list`
+// (R-26). Read-only and always available, unlike drafting or promoting one.
+func (d *Daemon) handleIntentsList(w http.ResponseWriter, r *http.Request) {
+	if d.cfg.Nervous == nil {
+		writeJSON(w, http.StatusOK, []intentListItem{})
+		return
+	}
+	reg := d.cfg.Nervous.Registry()
+	items := make([]intentListItem, 0, len(reg.Intents()))
+	for _, it := range reg.Intents() {
+		origin := it.Origin
+		if origin == "" {
+			origin = "embedded"
+		}
+		items = append(items, intentListItem{
+			ID:             it.ID,
+			Origin:         origin,
+			Active:         it.Active,
+			InactiveReason: it.InactiveReason,
+			Disabled:       it.Disabled,
+		})
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// intentsPromoteRequest is POST /v1/intents/promote's body: the same
+// candidate id `water intent draft` was given, whose reviewed pending file
+// (Design §16 item 2's PendingDir) this now moves into the live learned
+// overlay.
+type intentsPromoteRequest struct {
+	CandidateID string `json:"candidate_id"`
+}
+
+// intentsPromoteResponse reports where the promoted file now lives and
+// whether the reload that follows succeeded.
+type intentsPromoteResponse struct {
+	ID       string `json:"id"`
+	Path     string `json:"path"`
+	Reloaded bool   `json:"reloaded"`
+}
+
+// handleIntentsPromote is the last step of the promotion loop (Design §16
+// item 2, R-26): it re-reads the exact pending file `water intent draft`
+// wrote and the owner reviewed (never trusting a client-supplied YAML body —
+// the only input here is the candidate id already on disk), re-validates it
+// against the CURRENT live registry (never the one draft time saw — the
+// registry may have changed since), writes it into the learned overlay
+// (promote.WriteLearned) only on a passing validation, and reloads the
+// daemon's live registry so the newly learned intent can answer the very
+// next turn. Requires router.promotion.enabled, exactly like draft.
+func (d *Daemon) handleIntentsPromote(w http.ResponseWriter, r *http.Request) {
+	if !d.cfg.PromotionEnabled {
+		http.Error(w, "the promotion loop is disabled (router.promotion.enabled=false)", http.StatusForbidden)
+		return
+	}
+	if d.cfg.Home == "" || d.cfg.Manifest == nil || d.cfg.Nervous == nil {
+		http.Error(w, "promotion is not available on this daemon", http.StatusServiceUnavailable)
+		return
+	}
+	var body intentsPromoteRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.CandidateID) == "" {
+		http.Error(w, "bad request: candidate_id is required", http.StatusBadRequest)
+		return
+	}
+	// Reject anything that isn't candidateID's own 12-hex-character shape
+	// BEFORE it ever reaches a filepath.Join: a client-supplied
+	// candidate_id must never be trusted to build a path on disk (the same
+	// posture handleIntentsDraft takes, by re-deriving the id from its own
+	// live candidate list rather than joining the client's string
+	// directly).
+	if !promote.ValidCandidateID(body.CandidateID) {
+		http.Error(w, "bad request: candidate_id is not a valid candidate id", http.StatusBadRequest)
+		return
+	}
+
+	pendingPath := filepath.Join(promote.PendingDir(d.cfg.Home, d.cfg.Manifest.ID), body.CandidateID+".yaml")
+	fileBytes, err := os.ReadFile(pendingPath)
+	if err != nil {
+		http.Error(w, "no pending draft for that candidate id; run `water intent draft "+body.CandidateID+"` first", http.StatusNotFound)
+		return
+	}
+
+	if err := promote.ValidateLearned(fileBytes, d.cfg.Nervous.Registry(), eval.Negatives(), d.cfg.MaxLearned); err != nil {
+		http.Error(w, "the draft no longer validates: "+err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+
+	id := promote.ExtractID(fileBytes)
+	path, err := promote.WriteLearned(d.cfg.Home, d.cfg.Manifest.ID, fileBytes, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := intentsPromoteResponse{ID: id, Path: path}
+	if d.cfg.ReloadIntents != nil {
+		if err := d.cfg.ReloadIntents(r.Context()); err != nil {
+			http.Error(w, "promoted, but reload failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		resp.Reloaded = true
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// intentsStateRequest is POST /v1/intents/demote|enable's body.
+type intentsStateRequest struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// handleIntentsDemote manually disables one intent (`water intent demote`,
+// R-26) via store.SetIntentState — the same store/registry round trip R-23
+// proved at the Go level (TestManualDemoteAndEnableRoundTrip) — then
+// reloads the live registry. This is deliberately not gated on
+// router.promotion.enabled: an owner may want to silence a misbehaving
+// EMBEDDED intent too, not only a learned one, and the flag only ever
+// governs the draft/promote half of the growth loop.
+func (d *Daemon) handleIntentsDemote(w http.ResponseWriter, r *http.Request) {
+	d.setIntentState(w, r, true)
+}
+
+// handleIntentsEnable re-enables a manually (or auto-) demoted intent
+// (`water intent enable`, R-26).
+func (d *Daemon) handleIntentsEnable(w http.ResponseWriter, r *http.Request) {
+	d.setIntentState(w, r, false)
+}
+
+func (d *Daemon) setIntentState(w http.ResponseWriter, r *http.Request, disabled bool) {
+	if d.cfg.Store == nil {
+		http.Error(w, "intent state is not available on this daemon", http.StatusServiceUnavailable)
+		return
+	}
+	var body intentsStateRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.ID) == "" {
+		http.Error(w, "bad request: id is required", http.StatusBadRequest)
+		return
+	}
+	reason := body.Reason
+	if disabled && reason == "" {
+		reason = "manual"
+	}
+	if err := d.cfg.Store.SetIntentState(r.Context(), body.ID, disabled, reason, time.Now()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := map[string]any{"id": body.ID, "disabled": disabled}
+	if d.cfg.ReloadIntents != nil {
+		if err := d.cfg.ReloadIntents(r.Context()); err != nil {
+			http.Error(w, "state saved, but reload failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		out["reloaded"] = true
+	}
+	writeJSON(w, http.StatusOK, out)
 }

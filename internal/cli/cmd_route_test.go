@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"water/internal/nervous"
 	"water/internal/nervous/promote"
 )
 
@@ -84,4 +85,58 @@ func TestRenderCandidatesFromCannedJSON(t *testing.T) {
 			t.Fatalf("got %d lines, want 3 (header + 2 rows):\n%s", len(lines), got)
 		}
 	})
+}
+
+// TestRenderRouteReportFromCannedJSON exercises `water route report`'s
+// rendering directly against a hand-built nervous.Report, the same
+// "rendering from canned JSON" pattern as TestRenderCandidatesFromCannedJSON
+// above.
+func TestRenderRouteReportFromCannedJSON(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		got := renderRouteReport(nervous.Report{})
+		if !strings.Contains(got, "no route_log rows") {
+			t.Fatalf("renderRouteReport(zero) = %q, want a no-rows message", got)
+		}
+	})
+
+	t.Run("populated", func(t *testing.T) {
+		rep := nervous.Report{
+			N:                 42,
+			TierCounts:        map[string]int{"tier0": 30, "main": 12},
+			OwnerCounts:       map[string]int{"main": 42},
+			OutcomeCounts:     map[string]int{"answered": 40, "escalated": 2},
+			EscalationReasons: map[string]int{"ambiguous_match": 2},
+			TotalP50:          120 * time.Millisecond,
+			TotalP95:          400 * time.Millisecond,
+			AckP50:            20 * time.Millisecond,
+			AckP95:            60 * time.Millisecond,
+			QuickToolUsageCounts: map[string]int{
+				"quick.calendar": 10,
+			},
+			PossibleMissCount: 3,
+			InactiveIntentNearMiss: map[string]int{
+				"control.stop": 1,
+			},
+		}
+		got := renderRouteReport(rep)
+		for _, want := range []string{
+			"42", "tier0=30", "main=12", "answered=40", "escalated=2",
+			"ambiguous_match=2", "quick.calendar=10", "possible misses", "3",
+			"control.stop=1",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("renderRouteReport output missing %q:\n%s", want, got)
+			}
+		}
+	})
+}
+
+func TestFormatCounts(t *testing.T) {
+	if got := formatCounts(nil); got != "(none)" {
+		t.Fatalf("formatCounts(nil) = %q, want (none)", got)
+	}
+	got := formatCounts(map[string]int{"b": 2, "a": 1})
+	if got != "a=1, b=2" {
+		t.Fatalf("formatCounts = %q, want sorted a=1, b=2", got)
+	}
 }

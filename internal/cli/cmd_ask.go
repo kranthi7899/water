@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -44,35 +45,87 @@ func (a *App) askCmd() *cobra.Command {
 				return exitWith(ExitError, err)
 			}
 			ctx := context.Background()
-			var turnErr error
-			err = client.Turn(ctx, string(ch), prompt, false, func(e runtime.Event) {
-				switch e.Kind {
-				case runtime.EventDelta:
-					if !speak {
-						fmt.Fprint(os.Stdout, e.Text)
-					}
-				case runtime.EventSentence:
-					if speak && speaker != nil {
-						_ = speaker.Speak(ctx, e.Text)
-					}
-				case runtime.EventError:
-					turnErr = errors.New(e.Error)
-				case runtime.EventDone:
-					if speak {
-						fmt.Fprintln(os.Stdout, e.Text)
-					} else {
-						fmt.Fprintln(os.Stdout)
-					}
+			if speak {
+				// Best-effort: the twin's TTS profile (R-15's GET
+				// /v1/voice/profile) picks the voice/rate style.yaml
+				// declares, so every client sounds the same regardless of
+				// which tier answered. A profile that can't be fetched, or
+				// that leaves tts.voice empty, is not an error — the
+				// already-resolved voice.ceo_voice-based speaker from
+				// replySpeaker above is a complete fallback on its own.
+				if profile, perr := client.VoiceProfile(ctx); perr == nil {
+					applyVoiceProfile(speaker, profile)
 				}
-			})
+			}
+			h := &askEventHandler{ctx: ctx, speak: speak, speaker: speaker, out: os.Stdout}
+			err = client.Turn(ctx, string(ch), prompt, false, h.handle)
 			if err != nil {
 				return exitWith(ExitError, err)
 			}
-			if turnErr != nil {
-				return exitWith(ExitError, turnErr)
+			if h.err != nil {
+				return exitWith(ExitError, h.err)
 			}
 			return nil
 		},
 	}
 	return c
+}
+
+// applyVoiceProfile overrides an already-resolved voice.OS speaker's
+// voice/rate with the daemon's twin-wide TTS profile. Only voice.OS carries
+// a settable voice/rate today (the OpenAI provider is metered and opt-in,
+// out of R-26's scope); any other provider, or an empty tts.voice, is left
+// exactly as replySpeaker resolved it — voice.ceo_voice remains the
+// fallback.
+func applyVoiceProfile(speaker voice.Provider, profile VoiceProfileResult) {
+	osVoice, ok := speaker.(*voice.OS)
+	if !ok {
+		return
+	}
+	if profile.TTS.Voice != "" {
+		osVoice.SetVoice(profile.TTS.Voice)
+	}
+	if profile.TTS.RateWPM > 0 {
+		osVoice.SetRate(profile.TTS.RateWPM)
+	}
+}
+
+// askEventHandler consumes one turn's NDJSON event stream (daemonClient.Turn
+// already tolerates any Kind value at the JSON-decode layer, since
+// runtime.EventKind is just a string; this switch is the second half of
+// that tolerance — an event kind this build doesn't recognize yet, such as
+// a future "handoff" event, simply matches no case and is ignored, rather
+// than erroring or aborting the turn). Kept as its own type (not an inline
+// closure) so both cases are directly unit-testable without a real daemon.
+type askEventHandler struct {
+	ctx     context.Context
+	speak   bool
+	speaker voice.Provider
+	out     io.Writer
+	err     error
+}
+
+func (h *askEventHandler) handle(e runtime.Event) {
+	switch e.Kind {
+	case runtime.EventDelta:
+		if !h.speak {
+			fmt.Fprint(h.out, e.Text)
+		}
+	case runtime.EventSentence:
+		if h.speak && h.speaker != nil {
+			_ = h.speaker.Speak(h.ctx, e.Text)
+		}
+	case runtime.EventError:
+		h.err = errors.New(e.Error)
+	case runtime.EventDone:
+		if h.speak {
+			fmt.Fprintln(h.out, e.Text)
+		} else {
+			fmt.Fprintln(h.out)
+		}
+	default:
+		// Unknown/future event kinds (e.g. "handoff") are ignored by
+		// design: a client must never fail a turn over an event it simply
+		// doesn't understand yet.
+	}
 }

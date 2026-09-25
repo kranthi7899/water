@@ -21,6 +21,7 @@ import (
 	"water/internal/config"
 	"water/internal/decisions"
 	"water/internal/gateway"
+	"water/internal/nervous"
 	"water/internal/nervous/promote"
 	"water/internal/runtime"
 )
@@ -272,4 +273,213 @@ func (c *daemonClient) RouteCandidates(ctx context.Context, since time.Duration,
 		return nil, err
 	}
 	return cands, nil
+}
+
+// RouteReport summarizes recent route_log rows (tier distribution,
+// escalation reasons, latency percentiles, possible misses) — `water route
+// report` (R-26), GET /v1/route/report (R-14).
+func (c *daemonClient) RouteReport(ctx context.Context, since time.Duration) (nervous.Report, error) {
+	q := url.Values{}
+	if since > 0 {
+		q.Set("since", since.String())
+	}
+	path := "/v1/route/report"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nervous.Report{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nervous.Report{}, httpError(resp)
+	}
+	var rep nervous.Report
+	if err := json.NewDecoder(resp.Body).Decode(&rep); err != nil {
+		return nervous.Report{}, err
+	}
+	return rep, nil
+}
+
+// RouterHealth mirrors GET /v1/router's JSON: Tier 0's breaker state, every
+// intent the registry knows about but currently cannot answer from (and
+// why), every learned overlay file that failed to load, and whether the
+// promotion loop is enabled (router.promotion.enabled) — the one field
+// `water intent promote` checks before ever prompting for confirmation.
+type RouterHealth struct {
+	Tier0 struct {
+		State  string    `json:"state"`
+		Reason string    `json:"reason"`
+		Since  time.Time `json:"since"`
+	} `json:"tier0"`
+	InactiveIntents []struct {
+		ID     string `json:"id"`
+		Reason string `json:"reason"`
+	} `json:"inactive_intents"`
+	LearnedSkipped []struct {
+		File   string `json:"file"`
+		Reason string `json:"reason"`
+	} `json:"learned_skipped"`
+	PromotionEnabled bool `json:"promotion_enabled"`
+}
+
+// RouterHealth calls GET /v1/router.
+func (c *daemonClient) RouterHealth(ctx context.Context) (RouterHealth, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/router", nil)
+	if err != nil {
+		return RouterHealth{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return RouterHealth{}, httpError(resp)
+	}
+	var h RouterHealth
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return RouterHealth{}, err
+	}
+	return h, nil
+}
+
+// VoiceProfileResult mirrors GET /v1/voice/profile's JSON (R-15): the
+// twin's name, handoff phrases and TTS voice/rate, so every client's voice
+// output matches regardless of which tier answered.
+type VoiceProfileResult struct {
+	Name    string   `json:"name"`
+	Handoff []string `json:"handoff"`
+	TTS     struct {
+		Voice   string `json:"voice"`
+		RateWPM int    `json:"rate_wpm"`
+	} `json:"tts"`
+}
+
+// VoiceProfile calls GET /v1/voice/profile.
+func (c *daemonClient) VoiceProfile(ctx context.Context) (VoiceProfileResult, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/voice/profile", nil)
+	if err != nil {
+		return VoiceProfileResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return VoiceProfileResult{}, httpError(resp)
+	}
+	var v VoiceProfileResult
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		return VoiceProfileResult{}, err
+	}
+	return v, nil
+}
+
+// IntentListItem is one row of GET /v1/intents: enough to tell an embedded
+// intent from a learned one, and to say exactly why an inactive or disabled
+// one currently cannot answer.
+type IntentListItem struct {
+	ID             string `json:"id"`
+	Origin         string `json:"origin"`
+	Active         bool   `json:"active"`
+	InactiveReason string `json:"inactive_reason,omitempty"`
+	Disabled       string `json:"disabled,omitempty"`
+}
+
+// IntentList calls GET /v1/intents.
+func (c *daemonClient) IntentList(ctx context.Context) ([]IntentListItem, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/intents", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpError(resp)
+	}
+	var items []IntentListItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// IntentDraftResult mirrors POST /v1/intents/draft's response.
+type IntentDraftResult struct {
+	ID              string `json:"id"`
+	YAML            string `json:"yaml"`
+	Path            string `json:"path"`
+	Valid           bool   `json:"valid"`
+	ValidationError string `json:"validation_error,omitempty"`
+}
+
+// IntentDraft calls POST /v1/intents/draft for candidateID.
+func (c *daemonClient) IntentDraft(ctx context.Context, candidateID string) (IntentDraftResult, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/intents/draft", map[string]string{"candidate_id": candidateID})
+	if err != nil {
+		return IntentDraftResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return IntentDraftResult{}, httpError(resp)
+	}
+	var out IntentDraftResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return IntentDraftResult{}, err
+	}
+	return out, nil
+}
+
+// IntentPromoteResult mirrors POST /v1/intents/promote's response.
+type IntentPromoteResult struct {
+	ID       string `json:"id"`
+	Path     string `json:"path"`
+	Reloaded bool   `json:"reloaded"`
+}
+
+// IntentPromote calls POST /v1/intents/promote for candidateID: the daemon
+// re-reads and re-validates the pending file `water intent draft` wrote,
+// writes it into the learned overlay only on a passing validation, and
+// reloads the live registry.
+func (c *daemonClient) IntentPromote(ctx context.Context, candidateID string) (IntentPromoteResult, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/intents/promote", map[string]string{"candidate_id": candidateID})
+	if err != nil {
+		return IntentPromoteResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return IntentPromoteResult{}, httpError(resp)
+	}
+	var out IntentPromoteResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return IntentPromoteResult{}, err
+	}
+	return out, nil
+}
+
+// IntentStateResult mirrors POST /v1/intents/demote|enable's response.
+type IntentStateResult struct {
+	ID       string `json:"id"`
+	Disabled bool   `json:"disabled"`
+	Reloaded bool   `json:"reloaded"`
+}
+
+// IntentDemote calls POST /v1/intents/demote, disabling id.
+func (c *daemonClient) IntentDemote(ctx context.Context, id, reason string) (IntentStateResult, error) {
+	return c.intentState(ctx, "/v1/intents/demote", id, reason)
+}
+
+// IntentEnable calls POST /v1/intents/enable, re-enabling id.
+func (c *daemonClient) IntentEnable(ctx context.Context, id string) (IntentStateResult, error) {
+	return c.intentState(ctx, "/v1/intents/enable", id, "")
+}
+
+func (c *daemonClient) intentState(ctx context.Context, path, id, reason string) (IntentStateResult, error) {
+	resp, err := c.do(ctx, http.MethodPost, path, map[string]string{"id": id, "reason": reason})
+	if err != nil {
+		return IntentStateResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return IntentStateResult{}, httpError(resp)
+	}
+	var out IntentStateResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return IntentStateResult{}, err
+	}
+	return out, nil
 }

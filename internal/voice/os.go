@@ -58,6 +58,15 @@ func (o *OS) detectFor(goos string) {
 
 func (o *OS) Name() string { return "os" }
 
+// SetVoice overrides the resolved voice directly (e.g. from the daemon's
+// GET /v1/voice/profile, R-26's `water ask --voice`), bypassing
+// applyProfile's installed-voice lookup: the caller is trusting a name the
+// daemon itself already resolved from style.yaml, not raw owner input.
+func (o *OS) SetVoice(v string) { o.voice = v }
+
+// SetRate overrides the resolved speaking rate (words per minute) directly.
+func (o *OS) SetRate(wpm int) { o.rate = wpm }
+
 // Available reports whether a TTS binary was found.
 func (o *OS) Available() bool { return o.bin != "" }
 

@@ -68,13 +68,15 @@ type Config struct {
 	SocketPath string
 
 	// Home is $WATER_HOME, used only to locate the promotion loop's
-	// pending/learned intent directories (POST /v1/intents/draft, R-23).
+	// pending/learned intent directories (POST /v1/intents/draft|promote,
+	// R-23/R-26).
 	Home string
 	// PromotionEnabled mirrors router.promotion.enabled: it gates both
-	// POST /v1/intents/draft and (once R-26 builds it) `water intent
-	// promote`, exactly like drafting/promoting are gated everywhere else
-	// in Design §16 item 2 ("Draft (flag on)"). Candidate listing (GET
-	// /v1/route/candidates, R-22) is never gated by this.
+	// POST /v1/intents/draft and POST /v1/intents/promote (`water intent
+	// promote`, R-26), exactly like drafting/promoting are gated everywhere
+	// else in Design §16 item 2 ("Draft (flag on)"). Candidate listing (GET
+	// /v1/route/candidates, R-22) and manual demote/enable are never gated
+	// by this.
 	PromotionEnabled bool
 	// MaxLearned bounds promote.ValidateLearned's active-learned-intent
 	// cap; <= 0 uses promote.DefaultMaxLearned.
@@ -250,6 +252,10 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/route/candidates", d.auth(d.handleRouteCandidates))
 	mux.Handle("POST /v1/intents/draft", d.auth(d.handleIntentsDraft))
 	mux.Handle("POST /v1/intents/reload", d.auth(d.handleIntentsReload))
+	mux.Handle("GET /v1/intents", d.auth(d.handleIntentsList))
+	mux.Handle("POST /v1/intents/promote", d.auth(d.handleIntentsPromote))
+	mux.Handle("POST /v1/intents/demote", d.auth(d.handleIntentsDemote))
+	mux.Handle("POST /v1/intents/enable", d.auth(d.handleIntentsEnable))
 	mux.Handle("GET /v1/voice/profile", d.auth(d.handleVoiceProfile))
 	mux.Handle("POST /v1/turns/{id}/partial", d.auth(d.handleTurnPartial))
 	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))

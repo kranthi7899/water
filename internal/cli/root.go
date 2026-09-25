@@ -78,6 +78,7 @@ subscription you already pay for.`,
 		a.configCmd(), a.versionCmd(), a.voiceCmd(), a.mcpServeCmd(),
 		a.daemonCmd(), a.auditCmd(), a.askCmd(), a.approveCmd(),
 		a.connectCmd(), a.decisionsCmd(), a.twinCmd(), a.modelCmd(), a.routeCmd(),
+		a.intentCmd(),
 	)
 	root.CompletionOptions.HiddenDefaultCmd = true
 	return root

@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -193,3 +194,18 @@ func candidateID(signature string) string {
 	sum := sha256.Sum256([]byte(signature))
 	return fmt.Sprintf("%x", sum)[:12]
 }
+
+// candidateIDPattern matches candidateID's own output shape exactly: 12
+// lowercase hex characters, nothing else — no path separators, no ".",
+// nothing that could escape a directory join.
+var candidateIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// ValidCandidateID reports whether id has the shape candidateID produces.
+// Any caller that turns a client- or owner-supplied candidate id into a
+// filesystem path (WritePending's name argument, or a
+// PendingDir/<id>.yaml read, R-26's `water intent promote` and its daemon
+// endpoint) must check this BEFORE the join: rejecting anything that isn't
+// exactly 12 hex characters rules out path traversal (e.g.
+// "../../../etc/passwd") by construction, rather than trying to blocklist
+// "..".
+func ValidCandidateID(id string) bool { return candidateIDPattern.MatchString(id) }
