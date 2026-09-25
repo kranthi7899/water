@@ -37,6 +37,41 @@ func TestBuildReportPercentilesByHand(t *testing.T) {
 	}
 }
 
+// TestPercentile pins Percentile's exact formula directly (not just through
+// BuildReport), including the specific n=10, p=0.95 case where this
+// implementation (index int(p*(n-1)) = 8, the 9th value) and the formerly
+// duplicate implementation deleted from internal/nervous/eval (index
+// int(ceil(p*n))-1 = 9, the 10th value) provably disagreed — Percentile is
+// now the one shared implementation both packages call, so this is what
+// pins the canonical answer for both.
+func TestPercentile(t *testing.T) {
+	if got := Percentile(nil, 0.5); got != 0 {
+		t.Errorf("Percentile(nil, 0.5) = %v, want 0 (empty input must not panic)", got)
+	}
+	one := []time.Duration{42 * time.Millisecond}
+	if got := Percentile(one, 0.95); got != 42*time.Millisecond {
+		t.Errorf("Percentile([42ms], 0.95) = %v, want 42ms", got)
+	}
+
+	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
+	unsorted := []time.Duration{ms(100), ms(10), ms(80), ms(30), ms(60), ms(20), ms(90), ms(50), ms(70), ms(40)}
+	orig := append([]time.Duration(nil), unsorted...)
+
+	if got, want := Percentile(unsorted, 0.50), ms(50); got != want {
+		t.Errorf("Percentile(p50) = %v, want %v", got, want)
+	}
+	// The n=10, p=0.95 case: this formula's index 8 (the 9th value, 90ms),
+	// not the deleted duplicate's index 9 (the 10th value, 100ms).
+	if got, want := Percentile(unsorted, 0.95), ms(90); got != want {
+		t.Errorf("Percentile(p95) = %v, want %v (index int(0.95*9)=8, not the deleted duplicate's ceil-based index 9)", got, want)
+	}
+	for i, d := range unsorted {
+		if d != orig[i] {
+			t.Fatalf("Percentile mutated its input slice at index %d: got %v, want %v (must operate on a copy)", i, d, orig[i])
+		}
+	}
+}
+
 func TestBuildReportHistogramsAndCounts(t *testing.T) {
 	rows := []store.RouteRow{
 		{Owner: "quick", AnsweredBy: "t0", Outcome: "answered", TiersAttempted: []string{"t0"}},

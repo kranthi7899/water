@@ -371,10 +371,23 @@ func now(env runtime.Env) time.Time {
 // person-typed slot, from recent message senders. A read error yields an
 // empty list (an unresolved person slot escalates, which is the safe
 // direction — it never treats a store error as "no such person exists").
+//
+// The store fallback is ReadStore, then env.Store, then n.cfg.Store —
+// unlike n.deps (env.Store only), this one also has to work from Partial's
+// speculative call, which passes a zero-value runtime.Env{} (no per-turn
+// env.Store to fall back to) since a partial transcript isn't a full turn.
+// Without the n.cfg.Store fallback, a daemon with only Config.Store set
+// (no optional Config.ReadStore) silently got an empty entity list on
+// every speculative call, defeating person-slotted speculative prefetch
+// without ever erroring — see specStore's identical fallback chain, which
+// this now actually matches (its doc comment already claimed it did).
 func (n *Nervous) entities(ctx context.Context, env runtime.Env, at time.Time) slots.Entities {
 	st := n.cfg.ReadStore
 	if st == nil {
 		st = env.Store
+	}
+	if st == nil {
+		st = n.cfg.Store
 	}
 	if st == nil {
 		return slots.Entities{}
@@ -533,10 +546,18 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 		} else if result != nil {
 			n.tier0Breaker.RecordSuccess()
 			answeredTier = "t0"
+		} else {
+			// A clean "escalate, no match" outcome (no_match/ambiguous_match/
+			// slot_unresolved/action_word) is not itself a Tier 0 failure —
+			// only an actual handler error counts against the breaker. But a
+			// half-open trial must still be resolved one way or the other:
+			// Breaker.trialInFlight only ever clears inside RecordSuccess or
+			// RecordFailure (breaker.go), so leaving neither uncalled here
+			// would strand a half-open trial forever, permanently refusing
+			// Tier 0 from this point on. RecordSuccess is a no-op unless a
+			// trial is actually in flight.
+			n.tier0Breaker.RecordSuccess()
 		}
-		// A clean "escalate, no match" outcome (no_match/ambiguous_match/
-		// slot_unresolved/action_word) is not itself a Tier 0 failure —
-		// only an actual handler error counts against the breaker.
 	} else if eligible && n.cfg.Tier0Enabled {
 		escReason = "breaker_open"
 	}
@@ -560,11 +581,18 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 			} else if result != nil {
 				n.tier1Breaker.RecordSuccess()
 				answeredTier = "t1"
+			} else {
+				// A clean Tier 1 escalation (t1_no_call/t1_multi_call/t1_text/
+				// t1_unknown_intent/t1_ungrounded/action_word/slot_unresolved/
+				// ambiguous_match) is not itself a Tier 1 failure, exactly like
+				// Tier 0's own clean escalations above — but, exactly like
+				// Tier 0, a half-open trial still has to be resolved or it
+				// strands trialInFlight forever (breaker.go). Unlike Tier 0,
+				// nothing else in this package ever calls RecordSuccess/
+				// RecordFailure on tier1Breaker, so this is the only place
+				// that can resolve it.
+				n.tier1Breaker.RecordSuccess()
 			}
-			// A clean Tier 1 escalation (t1_no_call/t1_multi_call/t1_text/
-			// t1_unknown_intent/t1_ungrounded/action_word/slot_unresolved/
-			// ambiguous_match) is not itself a Tier 1 failure, exactly like
-			// Tier 0's own clean escalations above.
 		} else {
 			escReason = "t1_breaker_open"
 		}

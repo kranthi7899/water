@@ -633,6 +633,18 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	// event, a shared doc): every later call this session makes must be
 	// treated as tainted too, per escalateTaint's doc comment.
 	d.escalateTaint(res.Untrusted)
+	// A real connector call just executed (res.Output != nil is guaranteed
+	// here: the res.Output == nil case already returned above), so — like
+	// handleQuickInvoke's own RecordToolUse call — attribute it to whichever
+	// main-path turn is in flight. Without this, route_log's quick_only
+	// classification can't tell a turn that also performed a real,
+	// non-quick connector write (e.g. gmail.draft_message) from one that
+	// only ever called read-only quick.* tools, and promote/candidates.go
+	// treats QuickOnly as a hard safety gate for auto-promoting a pattern
+	// into a learned Tier-0 intent.
+	if d.cfg.Nervous != nil {
+		d.cfg.Nervous.RecordToolUse(body.Function)
+	}
 	if err != nil {
 		// The action ran (a draft was created, a note saved) and only
 		// something after it failed: its audit record, or indexing its

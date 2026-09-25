@@ -100,6 +100,21 @@ func stripOrdinal(s string) (int, bool) {
 	return n, true
 }
 
+// buildCalendarDate constructs year-month-day and reports whether it names
+// a real calendar date. time.Date silently normalizes an invalid one (e.g.
+// February 30 becomes March 2, or February 29 in a non-leap year becomes
+// March 1) instead of erroring, so this checks the constructed date's own
+// month still matches what was asked for rather than trusting it blindly —
+// day/month range checks alone (1-31, 1-12) don't catch a day that doesn't
+// exist in that specific month.
+func buildCalendarDate(year int, month time.Month, day int, loc *time.Location) (time.Time, bool) {
+	d := time.Date(year, month, day, 0, 0, 0, 0, loc)
+	if d.Month() != month {
+		return time.Time{}, false
+	}
+	return d, true
+}
+
 // parseMonthDay parses "<month> <day>" or "<day> <month>", rolling to next
 // year when the resulting date has already passed this year.
 func parseMonthDay(toks []string, year int, today time.Time) (time.Time, bool) {
@@ -119,9 +134,18 @@ func parseMonthDay(toks []string, year int, today time.Time) (time.Time, bool) {
 	if !haveMonth || !haveDay || day < 1 || day > 31 {
 		return time.Time{}, false
 	}
-	d := time.Date(year, month, day, 0, 0, 0, 0, today.Location())
+	d, ok := buildCalendarDate(year, month, day, today.Location())
+	if !ok {
+		return time.Time{}, false
+	}
 	if d.Before(dayStart(today)) {
-		d = time.Date(year+1, month, day, 0, 0, 0, 0, today.Location())
+		// The rolled-forward year can itself change validity (February 29
+		// only exists in a leap year), so this must be checked too, not
+		// just the first construction.
+		d, ok = buildCalendarDate(year+1, month, day, today.Location())
+		if !ok {
+			return time.Time{}, false
+		}
 	}
 	return d, true
 }
@@ -138,9 +162,15 @@ func parseSlashDate(tok string, year int, today time.Time) (time.Time, bool) {
 	if err1 != nil || err2 != nil || m < 1 || m > 12 || d < 1 || d > 31 {
 		return time.Time{}, false
 	}
-	dt := time.Date(year, time.Month(m), d, 0, 0, 0, 0, today.Location())
+	dt, ok := buildCalendarDate(year, time.Month(m), d, today.Location())
+	if !ok {
+		return time.Time{}, false
+	}
 	if dt.Before(dayStart(today)) {
-		dt = time.Date(year+1, time.Month(m), d, 0, 0, 0, 0, today.Location())
+		dt, ok = buildCalendarDate(year+1, time.Month(m), d, today.Location())
+		if !ok {
+			return time.Time{}, false
+		}
 	}
 	return dt, true
 }

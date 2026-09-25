@@ -116,13 +116,13 @@ func BuildReport(rows []store.RouteRow) Report {
 	}
 
 	for tier, ds := range latencies {
-		r.LatencyP50[tier] = percentile(ds, 0.50)
-		r.LatencyP95[tier] = percentile(ds, 0.95)
-		r.LatencyP99[tier] = percentile(ds, 0.99)
+		r.LatencyP50[tier] = Percentile(ds, 0.50)
+		r.LatencyP95[tier] = Percentile(ds, 0.95)
+		r.LatencyP99[tier] = Percentile(ds, 0.99)
 	}
-	r.TotalP50, r.TotalP95 = percentile(totals, 0.50), percentile(totals, 0.95)
-	r.AckP50, r.AckP95 = percentile(acks, 0.50), percentile(acks, 0.95)
-	r.FirstSentenceP50, r.FirstSentenceP95 = percentile(firstSentences, 0.50), percentile(firstSentences, 0.95)
+	r.TotalP50, r.TotalP95 = Percentile(totals, 0.50), Percentile(totals, 0.95)
+	r.AckP50, r.AckP95 = Percentile(acks, 0.50), Percentile(acks, 0.95)
+	r.FirstSentenceP50, r.FirstSentenceP95 = Percentile(firstSentences, 0.50), Percentile(firstSentences, 0.95)
 	if specAttempted > 0 {
 		r.SpeculationReuseRate = float64(specReused) / float64(specAttempted)
 	}
@@ -130,10 +130,17 @@ func BuildReport(rows []store.RouteRow) Report {
 	return r
 }
 
-// percentile uses nearest-rank on a copy of ds (ds itself is never mutated).
-// An empty input reports zero rather than panicking, since most tiers won't
-// have data in every window.
-func percentile(ds []time.Duration, p float64) time.Duration {
+// Percentile uses nearest-rank on a copy of ds (ds itself is never mutated,
+// and it need not already be sorted). An empty input reports zero rather
+// than panicking, since most tiers won't have data in every window.
+// Exported so internal/nervous/eval shares this exact implementation
+// instead of maintaining its own — the two independently drifted apart
+// before this (a different index formula, ceil(p*n)-1 vs this file's
+// int(p*(n-1)), provably disagree for the same input; e.g. n=10, p=0.95
+// gives index 9 vs 8) — a real risk if a duplicate is ever reused or
+// surfaced elsewhere, even though neither had a currently-visible
+// incorrect-output bug from it.
+func Percentile(ds []time.Duration, p float64) time.Duration {
 	if len(ds) == 0 {
 		return 0
 	}

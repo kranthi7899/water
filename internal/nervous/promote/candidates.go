@@ -25,6 +25,16 @@ import (
 // /v1/route/candidates' default min= (Design §16: 5).
 const DefaultMinRepeats = 5
 
+// DefaultMaxRows bounds how many quick_only route_log rows Candidates scans
+// per call, so DB I/O and unmarshal cost stay bounded even on a daemon with
+// a very high turn volume over the lookback window, rather than scaling
+// unboundedly with route_log's own size. Generous for any realistic single-
+// user personal-assistant workload (500 turns/day for 30 days is 15,000);
+// a caller scanning past this many quick_only rows in the window undercounts
+// older ones, an acceptable degradation for a background detection
+// heuristic, not a safety-relevant path.
+const DefaultMaxRows = 20000
+
 // MinCandidateDays is the fewest distinct local calendar days a qualifying
 // signature group must span, regardless of minRepeats (Design §16: "at
 // least 2 distinct local days" — a pattern that only ever happened in one
@@ -70,12 +80,15 @@ type Candidate struct {
 // one deliberate addition over the plan's originally sketched signature
 // (which took no such parameter) — Eligible cannot be evaluated without
 // the twin's actual shared config, and nothing else in this package's
-// inputs carries it.
-func Candidates(ctx context.Context, s *store.Store, sh intents.Shared, since time.Time, minRepeats int) ([]Candidate, error) {
+// inputs carries it. maxRows <= 0 means DefaultMaxRows.
+func Candidates(ctx context.Context, s *store.Store, sh intents.Shared, since time.Time, minRepeats, maxRows int) ([]Candidate, error) {
 	if minRepeats <= 0 {
 		minRepeats = DefaultMinRepeats
 	}
-	rows, err := s.QuickOnlyRoutes(ctx, since)
+	if maxRows <= 0 {
+		maxRows = DefaultMaxRows
+	}
+	rows, err := s.QuickOnlyRoutes(ctx, since, maxRows)
 	if err != nil {
 		return nil, err
 	}

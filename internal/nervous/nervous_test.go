@@ -12,6 +12,7 @@ import (
 	"water/internal/backend"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/render"
+	"water/internal/nervous/t1"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -512,5 +513,150 @@ func TestHandoffAckBeforeMainOutput(t *testing.T) {
 	}
 	if fk.Calls() != 1 {
 		t.Fatalf("backend calls = %d, want 1", fk.Calls())
+	}
+}
+
+// TestTier0BreakerResolvesOnCleanEscalation is a regression test for the
+// narrower of the two breaker bugs: mainpath.go's answerMain calls
+// tier0Breaker.RecordSuccess() as a safety net whenever a turn reaches the
+// main model, which happens to resolve most half-open trials even without
+// the nervous.go fix — but that safety net is skipped whenever Tier 1
+// answers instead (the turn returns through answerQuick, never answerMain).
+// This reproduces exactly that: Tier 0's half-open trial cleanly escalates
+// (no_match) and Tier 1 then finds a match, so only the nervous.go fix
+// (not the mainpath.go safety net) can resolve tier0Breaker's trial.
+func TestTier0BreakerResolvesOnCleanEscalation(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	client := &fakeT1Client{calls: []t1.Call{{Intent: "schedule.on_date", Args: map[string]string{"when": "tomorrow"}}}}
+
+	clock := newFakeClock(tier0FixedNow)
+	cfg := testBreakerConfig()
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Tier0Enabled: true, Tier1Enabled: true, T1: client, MainEnabled: true,
+		Clock: clock, AckAfter: DefaultAckAfter, Breaker: cfg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < cfg.Failures; i++ {
+		n.tier0Breaker.Allow()
+		n.tier0Breaker.RecordFailure("boom")
+	}
+	if st, _, _ := n.Tier0Breaker(); st != BreakerOpen {
+		t.Fatalf("state after %d failures = %s, want open", cfg.Failures, st)
+	}
+	clock.Advance(cfg.Cooldown)
+
+	// tier0ScheduleYAML's own templates require "calendar"/"schedule" in
+	// the utterance, so this cleanly misses Tier 0 (the half-open trial,
+	// no_match) and falls to Tier 1, which the fake client answers —
+	// routing through answerQuick, never answerMain.
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's happening tomorrow", TaskID: "breaker-t0"}, func(runtime.Event) {})
+
+	if fk.Calls() != 0 {
+		t.Fatalf("backend calls = %d, want 0 (Tier 1 answered; main must never be reached)", fk.Calls())
+	}
+	if client.invokedCount() != 1 {
+		t.Fatalf("t1 client invoked %d times, want exactly 1", client.invokedCount())
+	}
+	st, reason, _ := n.Tier0Breaker()
+	if st != BreakerClosed {
+		t.Fatalf("breaker state after a clean-escalation half-open trial = %s (reason %q), want closed — trialInFlight must not strand the breaker", st, reason)
+	}
+	if !n.tier0Breaker.Allow() {
+		t.Fatal("breaker should allow a normal Tier 0 attempt again after resolving the half-open trial")
+	}
+}
+
+// TestTier1BreakerResolvesOnCleanEscalation is Tier 1's counterpart to
+// TestTier0BreakerResolvesOnCleanEscalation above. Tier 1 has no equivalent
+// of mainpath.go's tier0Breaker.RecordSuccess() safety net, so before this
+// fix a clean Tier 1 escalation (t1_no_call, the fakeT1Client default) left
+// tier1Breaker permanently half-open with no recovery path at all.
+func TestTier1BreakerResolvesOnCleanEscalation(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	fk.Reply = func(req backend.Request) string { return "escalated" }
+	client := &fakeT1Client{} // no calls, no err: a clean t1_no_call escalation
+
+	clock := newFakeClock(tier0FixedNow)
+	cfg := testBreakerConfig()
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Tier0Enabled: true, Tier1Enabled: true, T1: client, MainEnabled: true,
+		Clock: clock, AckAfter: DefaultAckAfter, Breaker: cfg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < cfg.Failures; i++ {
+		n.tier1Breaker.Allow()
+		n.tier1Breaker.RecordFailure("boom")
+	}
+	if st, _, _ := n.tier1Breaker.State(); st != BreakerOpen {
+		t.Fatalf("state after %d failures = %s, want open", cfg.Failures, st)
+	}
+	clock.Advance(cfg.Cooldown)
+
+	// tier0ScheduleYAML's own templates don't match this utterance, so
+	// Tier 0 cleanly escalates with no_match, handing the half-open Tier 1
+	// trial to the fakeT1Client, which cleanly escalates too (no calls).
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "something unrelated entirely", TaskID: "breaker-t1"}, func(runtime.Event) {})
+
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls = %d, want 1 (the clean escalation reached main)", fk.Calls())
+	}
+	if client.invokedCount() != 1 {
+		t.Fatalf("t1 client invoked %d times, want exactly 1", client.invokedCount())
+	}
+	st, reason, _ := n.tier1Breaker.State()
+	if st != BreakerClosed {
+		t.Fatalf("breaker state after a clean-escalation half-open trial = %s (reason %q), want closed — trialInFlight must not strand the breaker", st, reason)
+	}
+	if !n.tier1Breaker.Allow() {
+		t.Fatal("breaker should allow a normal Tier 1 attempt again after resolving the half-open trial")
+	}
+}
+
+// TestEntitiesFallsBackToConfigStoreForSpeculation is a regression test:
+// entities() fell back from Config.ReadStore only to env.Store, never to
+// Config.Store (unlike specStore(), whose own doc comment claims — falsely,
+// until this fix — that entities() shares its fallback chain). Partial's
+// speculative call passes a zero-value runtime.Env{} (no per-turn
+// env.Store to fall back to, since a partial transcript isn't a full
+// turn), so a daemon wired with only Config.Store set (no optional
+// Config.ReadStore — the ordinary case) always got an empty entity list
+// during speculation, silently defeating speculative prefetch for every
+// person-slotted intent with no error anywhere. Calls entities() the same
+// way Partial does, directly, to isolate the fallback chain itself from
+// the rest of speculation's machinery.
+func TestEntitiesFallsBackToConfigStoreForSpeculation(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, _ := nervousTestEnv(t)
+	if err := env.Store.Upsert(ctx, &store.Message{
+		Meta: store.Meta{Source: "gmail", SourceID: "m1", CreatedAt: tier0FixedNow, UpdatedAt: tier0FixedNow},
+		From: "Jordan Lee <jordan@x.com>", Subject: "hi", SentAt: tier0FixedNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+		Store:        env.Store, // only Store set, no ReadStore: the exact gap
+		SenderWindow: 180 * 24 * time.Hour, SenderLimit: 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Partial's own zero-value env{} is exactly what exposed the bug.
+	ents := n.entities(ctx, runtime.Env{}, tier0FixedNow)
+	if len(ents.People) != 1 || ents.People[0].Email != "jordan@x.com" {
+		t.Fatalf("entities(ctx, Env{}, at) with only Config.Store set = %+v, want the one seeded sender (jordan@x.com) — Partial's speculative person-slot resolution must not silently see nobody", ents.People)
 	}
 }

@@ -121,6 +121,53 @@ func TestResolveDateUnresolved(t *testing.T) {
 	}
 }
 
+// TestResolveDateRejectsInvalidCalendarDates is a regression test:
+// parseMonthDay/parseSlashDate validated day (1-31) and month (1-12)
+// independently but never checked the day actually exists in that month,
+// so time.Date silently normalized an invalid combination (Feb 30 becomes
+// Mar 2) into a real but entirely different date the user never said,
+// instead of leaving the slot Unresolved so the caller asks for
+// clarification. Covers both the "<month> <day>" form and the "M/D" slash
+// form, plus February 29 in both a leap and a non-leap target year (the
+// rolled-forward-to-next-year path can itself flip leap-year-ness).
+func TestResolveDateRejectsInvalidCalendarDates(t *testing.T) {
+	cases := []struct {
+		name string
+		toks []string
+	}{
+		{"february 30, month day form", []string{"february", "30"}},
+		{"day month form, february 30", []string{"30", "february"}},
+		{"april has only 30 days", []string{"april", "31"}},
+		{"slash date, february 30", []string{"2/30"}},
+		{"slash date, april 31", []string{"4/31"}},
+		{"slash date, june 31", []string{"6/31"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, outcome, _ := resolveDate(capN(c.toks...), ref)
+			if outcome != Unresolved {
+				t.Errorf("resolveDate(%v) outcome = %v, want Unresolved (an invalid date must never silently normalize into a different real one)", c.toks, outcome)
+			}
+		})
+	}
+}
+
+// TestResolveDateFebruary29RollForwardRevalidatesLeapYear specifically
+// exercises the roll-to-next-year branch's own re-validation, using a
+// reference date where the *current* year's February 29 is valid (2028 is
+// a leap year) but has already passed by the reference date, and the
+// *next* year (2029) is not a leap year — so only the second,
+// rolled-forward construction's leap-year check can be what rejects it.
+// Without re-validating that second construction too, this would silently
+// resolve to March 1, 2029.
+func TestResolveDateFebruary29RollForwardRevalidatesLeapYear(t *testing.T) {
+	leapRef := time.Date(2028, 6, 1, 9, 0, 0, 0, ref.Location())
+	_, outcome, _ := resolveDate(capN("february", "29"), leapRef)
+	if outcome != Unresolved {
+		t.Errorf("resolveDate(february 29) rolling from leap year 2028 into non-leap 2029 outcome = %v, want Unresolved", outcome)
+	}
+}
+
 func TestResolveDateRangeWeekAndWeekend(t *testing.T) {
 	today := dayStart(ref)
 	monday := weekStart(ref)

@@ -85,7 +85,7 @@ func TestCandidatesQualifyingGroupReturned(t *testing.T) {
 	rows = append(rows, rowsOnDay("d2", day2, 2, nil)...)
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestCandidatesFewerThanMinRepeatsExcluded(t *testing.T) {
 	rows = append(rows, rowsOnDay("d2", day2, 2, nil)...) // 4 total, spans 2 days, still under min
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCandidatesSameDayOnlyExcludedEvenWithEnoughRepeats(t *testing.T) {
 	rows := rowsOnDay("d1", day1, 6, nil) // 6 repeats, but all on one day
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestCandidatesPossibleMissRowExcludedButGroupStillQualifies(t *testing.T) {
 	rows = append(rows, rowsOnDay("d2", day2, 3, nil)...)
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestCandidatesUnattributedRowExcluded(t *testing.T) {
 	rows = append(rows, rowsOnDay("d2", day2, 3, nil)...)
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestCandidatesNonLearnableToolExcluded(t *testing.T) {
 	})...)
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestCandidatesReasoningUtteranceExcludedDefensively(t *testing.T) {
 	rows = append(rows, rowsOnDay("d2", day2, 3, nil)...)
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, sh, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, sh, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestCandidatesDistinctSignaturesGroupSeparately(t *testing.T) {
 	})...)
 	insertAll(t, s, rows)
 
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,11 +302,46 @@ func TestCandidatesDefaultMinRepeats(t *testing.T) {
 
 	// minRepeats <= 0 falls back to DefaultMinRepeats (5): 5 total rows
 	// across 2 days still qualifies at the default.
-	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 0)
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 {
 		t.Fatalf("got %d candidates, want 1 at the default min: %+v", len(got), got)
+	}
+}
+
+// TestCandidatesMaxRowsBoundsTheScan is a regression test: Candidates
+// pulled QuickOnlyRoutes' entire result set for the lookback window with no
+// row cap at all, so DB I/O and unmarshal cost scaled unboundedly with
+// route_log's own size. QuickOnlyRoutes returns newest-first, so a small
+// maxRows drops the oldest rows first — here, all of day1's (older)
+// qualifying rows fall outside a maxRows of 1 (only day2's single newest
+// row survives), so the group no longer spans MinCandidateDays and must
+// not qualify, even though it would with maxRows=0 (unlimited, verified by
+// TestCandidatesQualifyingGroupReturned's identical row shape above).
+func TestCandidatesMaxRowsBoundsTheScan(t *testing.T) {
+	s := openTemp(t)
+	var rows []store.RouteRow
+	rows = append(rows, rowsOnDay("d1", day1, 3, nil)...)
+	rows = append(rows, rowsOnDay("d2", day2, 2, nil)...)
+	insertAll(t, s, rows)
+
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d candidates with maxRows=1, want 0 (only the single newest row is in scope, spanning 1 day < MinCandidateDays): %+v", len(got), got)
+	}
+
+	// The same data with maxRows unlimited (0) does qualify, confirming the
+	// difference above is the row cap and not some other change.
+	unbounded, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unbounded) != 1 {
+		t.Fatalf("got %d candidates with maxRows=0, want 1 (unlimited must still see both days)", len(unbounded))
 	}
 }

@@ -217,7 +217,7 @@ func (d *Daemon) handleRouteCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sh := d.cfg.Nervous.Registry().Shared()
-	cands, err := promote.Candidates(r.Context(), d.cfg.Store, sh, time.Now().Add(-lookback), minRepeats)
+	cands, err := promote.Candidates(r.Context(), d.cfg.Store, sh, time.Now().Add(-lookback), minRepeats, promote.DefaultMaxRows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -267,7 +267,7 @@ func (d *Daemon) handleIntentsDraft(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	sh := d.cfg.Nervous.Registry().Shared()
-	cands, err := promote.Candidates(ctx, d.cfg.Store, sh, time.Now().Add(-30*24*time.Hour), promote.DefaultMinRepeats)
+	cands, err := promote.Candidates(ctx, d.cfg.Store, sh, time.Now().Add(-30*24*time.Hour), promote.DefaultMinRepeats, promote.DefaultMaxRows)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

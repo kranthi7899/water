@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -196,12 +197,45 @@ func TestQuickOnlyRoutesFilters(t *testing.T) {
 	if _, err := s.InsertRoute(ctx, notQuick); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s.QuickOnlyRoutes(ctx, ts(0))
+	rows, err := s.QuickOnlyRoutes(ctx, ts(0), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 1 || rows[0].TurnID != "quick1" {
 		t.Fatalf("QuickOnlyRoutes = %v", rowIDs(rows))
+	}
+}
+
+// TestQuickOnlyRoutesRespectsLimit is a regression test: QuickOnlyRoutes
+// had no limit parameter at all, so a caller scanning a wide lookback
+// window on a heavy-usage daemon always pulled the entire quick_only result
+// set into memory. A positive limit must cap the returned rows (newest
+// first, matching ListRoutes' own limit semantics); 0 or negative means
+// unlimited.
+func TestQuickOnlyRoutesRespectsLimit(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		r := sampleRoute(fmt.Sprintf("q%d", i), ts(10+i))
+		r.Owner, r.QuickOnly = "main", true
+		if _, err := s.InsertRoute(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.QuickOnlyRoutes(ctx, ts(0), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].TurnID != "q4" || rows[1].TurnID != "q3" {
+		t.Fatalf("QuickOnlyRoutes(limit=2) = %v, want the 2 newest rows (q4, q3)", rowIDs(rows))
+	}
+
+	unlimited, err := s.QuickOnlyRoutes(ctx, ts(0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unlimited) != 5 {
+		t.Fatalf("QuickOnlyRoutes(limit=0) = %d rows, want all 5 (0 means unlimited)", len(unlimited))
 	}
 }
 

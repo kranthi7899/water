@@ -335,3 +335,50 @@ func TestProposeStoreFallsBackToEnvStore(t *testing.T) {
 		t.Fatalf("MessagesFrom via env.Store fallback: got %v, %v, want the seeded message", msgs, err)
 	}
 }
+
+// TestAnswerVoiceApproveNilApprovalsFailsSafely is a regression test:
+// answerVoiceApprove called env.Approvals.Pending(ctx) with no nil check,
+// unlike its three sibling call sites in this package (pendingCount,
+// pendingApprovals, and n.cfg.Approvals's own check), which all treat a
+// nil Approvals as "nothing pending" rather than dereferencing it. Not
+// reachable today through a normal Handle() call — gateway/daemon.go's
+// baseEnv always sets Approvals, and bindPendingHandler's own nil guard
+// upstream means a genuinely nil env.Approvals never produces a "decision"
+// result for answerVoiceApprove to receive in the first place — so this
+// calls answerVoiceApprove directly, as defense in depth for any future
+// caller that builds a runtime.Env with VoiceApprove.Enabled + an Approver
+// but without Approvals (a leaner test harness, a new channel wiring).
+func TestAnswerVoiceApproveNilApprovalsFailsSafely(t *testing.T) {
+	reg := actionsFixtureRegistry(t, map[string]string{"mail_draft_reply": mailDraftReplyYAML})
+	env, ctx, _ := actionsTestEnv(t)
+	env.Approvals = nil // the case none of the sibling guards would allow through
+
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.turns.Final("client-1", "turn-nil-approvals", runtime.ChannelVoice); err != nil {
+		t.Fatal(err)
+	}
+
+	result := render.Result{Kind: "decision", ApprovalID: "env-123", Intent: "approvals.respond"}
+	var events []runtime.Event
+	var mu sync.Mutex
+	rec := &routeRecorder{}
+
+	// Must not panic: a nil env.Approvals should fail safely (an "error"
+	// outcome, per the existing len(pend) != 1 branch), never crash the
+	// daemon on the user's first spoken "yes".
+	n.answerVoiceApprove(ctx, "turn-nil-approvals", Turn{Channel: runtime.ChannelVoice, Text: "yes"}, result, env, collect(&events, &mu), rec, "t0", tier0FixedNow)
+
+	if rec.outcome != "error" {
+		t.Fatalf("rec.outcome = %q, want %q", rec.outcome, "error")
+	}
+	ks := kinds(events)
+	if len(ks) == 0 || ks[len(ks)-1] != runtime.EventDone {
+		t.Fatalf("events = %v, want to end in done (a delivered error phrase), not a panic", ks)
+	}
+}

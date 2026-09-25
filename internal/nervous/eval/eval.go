@@ -10,9 +10,10 @@ import (
 	"embed"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"time"
+
+	"water/internal/nervous"
 
 	"gopkg.in/yaml.v3"
 )
@@ -240,25 +241,10 @@ func Run(ctx context.Context, t Tier, fx Fixture, cases []Case) Report {
 	}
 	r.Wilson95Upper = wilson95Upper(falseAcceptCount, r.N)
 
-	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-	r.P50 = percentile(latencies, 0.50)
-	r.P95 = percentile(latencies, 0.95)
+	r.P50 = nervous.Percentile(latencies, 0.50)
+	r.P95 = nervous.Percentile(latencies, 0.95)
 
 	return r
-}
-
-func percentile(sorted []time.Duration, p float64) time.Duration {
-	if len(sorted) == 0 {
-		return 0
-	}
-	idx := int(math.Ceil(p*float64(len(sorted)))) - 1
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(sorted) {
-		idx = len(sorted) - 1
-	}
-	return sorted[idx]
 }
 
 // wilson95Upper returns the upper bound of the two-sided 95% Wilson score

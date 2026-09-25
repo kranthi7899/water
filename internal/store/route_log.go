@@ -248,10 +248,18 @@ func (s *Store) ListRoutes(ctx context.Context, since time.Time, limit int) ([]R
 
 // QuickOnlyRoutes returns rows at or after since whose main-path answer used
 // only quick tools and was cleanly attributed (the promotion loop's
-// candidate pool), newest first.
-func (s *Store) QuickOnlyRoutes(ctx context.Context, since time.Time) ([]RouteRow, error) {
+// candidate pool), newest first. limit <= 0 means unlimited, exactly like
+// ListRoutes; a caller scanning an unbounded lookback window should pass a
+// real cap so DB I/O and unmarshal cost don't grow without bound alongside
+// route_log itself.
+func (s *Store) QuickOnlyRoutes(ctx context.Context, since time.Time, limit int) ([]RouteRow, error) {
 	q := `SELECT ` + routeRowColumns + ` FROM route_log WHERE at >= ? AND quick_only = 1 ORDER BY at DESC, id DESC`
-	rows, err := s.db.QueryContext(ctx, q, since.UnixNano())
+	args := []any{since.UnixNano()}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -9,7 +9,6 @@ import (
 	"net/mail"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 
@@ -210,10 +209,9 @@ func (e *tier1EvalTier) resetLatencies() {
 // warm-inference latency relative to the gate's warm_p95_ms threshold.
 func (e *tier1EvalTier) warmP95() time.Duration {
 	e.mu.Lock()
-	sorted := append([]time.Duration{}, e.t1Latencies...)
+	latencies := append([]time.Duration{}, e.t1Latencies...)
 	e.mu.Unlock()
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	return percentile(sorted, 0.95)
+	return nervous.Percentile(latencies, 0.95)
 }
 
 func liveWordSet(words []string) map[string]bool {

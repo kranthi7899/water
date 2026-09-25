@@ -1,6 +1,6 @@
-// Command blandcall places up to three real phone calls through Bland AI's
-// call API, for one scoped purpose: demonstrating Water's voice capability
-// to a recruiter (one test call, one stress-test call, one live-demo call).
+// Command blandcall places a small, hard-capped number of real phone calls
+// through Bland AI's call API, for one scoped purpose: demonstrating Water's
+// voice capability live (e.g. to a recruiter).
 //
 // This is deliberately NOT a water connector. It is never registered in
 // buildCEORegistry, never listed in twins/ceo/twin.yaml, and never goes
@@ -9,11 +9,16 @@
 // delete or spend without a passing gate check and an approved envelope",
 // CLAUDE.md). Placing a real, metered phone call is itself an explicit,
 // user-approved, out-of-band exception to this project's zero-metered-spend
-// rule — scoped to exactly three calls, enforced here by a local counter
-// (~/.water/blandcall/state.json), not by discipline alone. It exists to be
-// run directly from a terminal, by hand, not to be extended into a fourth
-// connector; a future session should not wire this into the gated product
-// without the same explicit, deliberate approval this one call got.
+// rule — enforced here by a local counter (~/.water/blandcall/state.json)
+// against the maxCalls cap below, not by discipline alone. The cap started
+// at 3 and was explicitly raised to 5 by the owner in the conversation that
+// built this tool (see docs/water-context-primer.md and the session log;
+// as of this comment neither CLAUDE.md nor docs/EVOLUTION_PLAN.md records
+// the exception itself, which a future session should not treat as silent
+// permission to raise it further without asking again). It exists to be run
+// directly from a terminal, by hand, not to be extended into a fourth
+// connector, and a future session should not wire this into the gated
+// product without the same explicit, deliberate approval this one got.
 package main
 
 import (
@@ -78,9 +83,9 @@ Usage:
 `)
 }
 
-// state is the local, code-enforced call budget — three calls, total,
-// forever, for this tool. It lives outside the vault (it holds no secret)
-// at ~/.water/blandcall/state.json.
+// state is the local, code-enforced call budget — maxCalls, total, forever,
+// for this tool. It lives outside the vault (it holds no secret) at
+// ~/.water/blandcall/state.json.
 type state struct {
 	CallsMade int          `json:"calls_made"`
 	History   []callRecord `json:"history"`

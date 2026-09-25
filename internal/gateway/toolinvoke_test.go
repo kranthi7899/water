@@ -134,6 +134,36 @@ func TestCleanSLevelCallRunsAutonomously(t *testing.T) {
 	}
 }
 
+// TestToolInvokeAttributesToTheInFlightMainTurn is a regression test:
+// handleToolInvoke (the real-connector tool bridge for the main model)
+// never called Nervous.RecordToolUse, unlike its sibling handleQuickInvoke,
+// so a real connector call made during a main-path turn was invisible to
+// route_log's tools_used/quick_only classification — a turn that made a
+// real write (e.g. gmail.draft_message) could be misclassified as
+// quick_only=true, and promote/candidates.go treats that as a hard safety
+// gate for auto-promoting a pattern into a learned, unsupervised Tier-0
+// intent. Simulates a main-path turn in flight (BeginMain/EndMain, exactly
+// what answerMain does around the whole turn) around a real tool call and
+// asserts the call is attributed to it.
+func TestToolInvokeAttributesToTheInFlightMainTurn(t *testing.T) {
+	h := newHarness(t)
+	tracer := h.d.cfg.Nervous.ToolTracer()
+	tracer.BeginMain("turn-1")
+
+	out := h.invokeAsModel(t, gate.P0, gate.Clean, "notes.save_note", map[string]any{"text": "attributed?"})
+	if out["status"] != "ok" {
+		t.Fatalf("out = %+v, want status=ok", out)
+	}
+
+	used, attributed := tracer.EndMain("turn-1")
+	if !attributed {
+		t.Fatal("attribution should stay unambiguous for a single in-flight turn")
+	}
+	if len(used) != 1 || used[0] != "notes.save_note" {
+		t.Fatalf("used = %v, want [notes.save_note] — a real connector call made during a main-path turn must be attributed to it, exactly like handleQuickInvoke's RecordToolUse already is", used)
+	}
+}
+
 // TestExternalToolResultEscalatesSessionTaint is the A3 taint fix: a model
 // tool call whose result is Untrusted (fake_mail.list_messages is External)
 // must escalate the daemon's stable session token to tainted, so a later

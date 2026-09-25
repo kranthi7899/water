@@ -58,6 +58,63 @@ func TestMessagesFromMatchesSender(t *testing.T) {
 	}
 }
 
+// TestMessagesFromDoesNotMatchASenderThatContainsItAsASubstring is a
+// regression test: MessagesFrom used an unanchored "%email%" LIKE pattern,
+// so searching for jo@x.com could return mjo@x.com's messages too (the
+// wrong sender's row), since "jo@x.com" is a literal substring of
+// "mjo@x.com". Also covers a bare-address sender (no "Name <email>" form)
+// and an underscore in the local part, which LIKE would otherwise treat as
+// its own single-character wildcard.
+func TestMessagesFromDoesNotMatchASenderThatContainsItAsASubstring(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	if err := s.Upsert(ctx, &Message{Meta: meta("m1", true), From: "Jo Lee <jo@x.com>", Subject: "wanted", SentAt: ts(8)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(ctx, &Message{Meta: meta("m2", true), From: "Mjo Park <mjo@x.com>", Subject: "wrong sender", SentAt: ts(9)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(ctx, &Message{Meta: meta("m3", true), From: "bare@x.com", Subject: "bare form", SentAt: ts(10)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Upsert(ctx, &Message{Meta: meta("m4", true), From: "under_score@x.com", Subject: "underscore", SentAt: ts(11)}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.MessagesFrom(ctx, "jo@x.com", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Subject != "wanted" {
+		t.Fatalf("MessagesFrom(jo@x.com) = %+v, want exactly the message from jo@x.com, not mjo@x.com", got)
+	}
+
+	got, err = s.MessagesFrom(ctx, "bare@x.com", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Subject != "bare form" {
+		t.Fatalf("MessagesFrom(bare@x.com) = %+v, want the bare-address sender", got)
+	}
+
+	// "under.score@x.com" must not match "under_score@x.com" via LIKE's
+	// unescaped '_' wildcard (which matches any single character).
+	got, err = s.MessagesFrom(ctx, "under.score@x.com", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("MessagesFrom(under.score@x.com) = %+v, want no match — '_' must be literal, not a LIKE wildcard", got)
+	}
+	got, err = s.MessagesFrom(ctx, "under_score@x.com", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Subject != "underscore" {
+		t.Fatalf("MessagesFrom(under_score@x.com) = %+v, want the underscore sender", got)
+	}
+}
+
 func TestCountMessagesSinceBoundary(t *testing.T) {
 	s, _ := openTemp(t)
 	ctx := context.Background()

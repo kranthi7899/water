@@ -29,7 +29,9 @@ func (s *Store) LatestMessages(ctx context.Context, limit int) ([]Message, error
 
 // MessagesFrom returns the most recent messages from a sender address,
 // newest first. email is matched against the raw sender field, which holds
-// either a bare address or an RFC 5322 "Name <email>" form.
+// either a bare address or an RFC 5322 "Name <email>" form — anchored so
+// that, e.g., "jo@x.com" never matches a sender of "mjo@x.com" the way an
+// unanchored "%email%" substring search would.
 func (s *Store) MessagesFrom(ctx context.Context, email string, limit int) ([]Message, error) {
 	var probe Message
 	cols := columns(&probe)
@@ -37,13 +39,23 @@ func (s *Store) MessagesFrom(ctx context.Context, email string, limit int) ([]Me
 	for i, c := range cols {
 		names[i] = c.name
 	}
-	q := "SELECT " + strings.Join(names, ", ") + " FROM messages WHERE sender LIKE ? ORDER BY sent_at DESC"
-	args := []any{"%" + email + "%"}
+	q := "SELECT " + strings.Join(names, ", ") + " FROM messages WHERE (sender LIKE ? ESCAPE '\\' OR sender LIKE ? ESCAPE '\\') ORDER BY sent_at DESC"
+	esc := escapeLike(email)
+	args := []any{esc, "%<" + esc + ">"}
 	if limit > 0 {
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
 	return queryMessages(ctx, s, q, args...)
+}
+
+// escapeLike escapes SQL LIKE wildcard characters (%, _) and the escape
+// character itself, so a value embedded in a LIKE pattern is matched
+// literally — a literal '_' in an email's local part (a valid character
+// there) must never act as LIKE's single-character wildcard.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 func queryMessages(ctx context.Context, s *Store, q string, args ...any) ([]Message, error) {

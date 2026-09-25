@@ -213,7 +213,16 @@ func (n *Nervous) answerVoiceApprove(ctx context.Context, id string, t Turn, res
 	// Exactly one pending, per bindPendingHandler: re-read it rather than
 	// trust result.ApprovalID alone, so a race between bindPendingHandler's
 	// own read and this turn (another decider, an edit) is caught here too.
-	pend, err := env.Approvals.Pending(ctx)
+	// A nil env.Approvals reads as "nothing pending" (len(pend) != 1 below),
+	// the same conservative convention pendingCount/pendingApprovals use
+	// elsewhere in this package, rather than a nil-pointer panic on a
+	// caller that built runtime.Env without it (a leaner test harness, a
+	// future channel wiring).
+	var pend []approvals.Envelope
+	var err error
+	if env.Approvals != nil {
+		pend, err = env.Approvals.Pending(ctx)
+	}
 	if err != nil || len(pend) != 1 || pend[0].ID != result.ApprovalID {
 		deliver("error", n.voiceErrorPhrase("generic"))
 		return
