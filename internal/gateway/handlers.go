@@ -9,12 +9,9 @@ import (
 	"time"
 
 	"water/internal/approvals"
-	"water/internal/connectors/google/gapi"
-	"water/internal/gate"
 	"water/internal/meetings"
 	"water/internal/nervous"
 	"water/internal/runtime"
-	"water/internal/twinlink"
 )
 
 // DecisionResult is what POST /v1/approvals/{id}/decision returns: the
@@ -154,7 +151,7 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	// The sink serializes this turn's own events with approval_required
 	// events a concurrent tool-invoke handler reports for it, and stops all
 	// writes once done/error is out (and before this handler returns).
-	sink := &turnSink{write: func(e runtime.Event) {
+	sink := &turnSink{channel: ch, write: func(e runtime.Event) {
 		_ = enc.Encode(e)
 		if flusher != nil {
 			flusher.Flush()
@@ -251,7 +248,10 @@ func (d *Daemon) handleGetApproval(w http.ResponseWriter, r *http.Request) {
 
 // handleDecideApproval requires the payload hash the client was shown, and
 // refuses a decision made against a stale one — an edit or a race must never
-// be answered blind.
+// be answered blind. It is a thin wrapper over decideAndExecute (actions.go),
+// which also backs the voice approval binding's DecideBound (R-21) — this
+// handler's only job is to decode the request and translate decideAndExecute's
+// result into this endpoint's existing JSON contract.
 func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
@@ -262,74 +262,28 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	current, err := d.cfg.Approvals.Get(r.Context(), id)
+	out, err := d.decideAndExecute(r.Context(), id, body.PayloadHash, body.Reply)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	if body.PayloadHash == "" || body.PayloadHash != current.PayloadHash {
-		http.Error(w, "payload hash does not match the current envelope; re-fetch and re-confirm", http.StatusConflict)
-		return
-	}
-	answer := approvals.Match(body.Reply)
-	e, err := d.cfg.Approvals.Decide(r.Context(), id, answer)
-	if err != nil {
-		if e.ID == "" {
-			// A store or audit failure: there is no envelope state to report.
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		var stageErr *decideStageError
+		status := http.StatusInternalServerError
+		if errors.As(err, &stageErr) {
+			switch stageErr.stage {
+			case "hash_mismatch":
+				status = http.StatusConflict
+			case "not_found":
+				status = http.StatusNotFound
+			}
 		}
-		// Not pending any more, expired, or another decider won the race:
-		// this answer was not applied, and the envelope shows what did.
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(e), Answer: answer.String(), Error: err.Error()})
+		http.Error(w, err.Error(), status)
 		return
 	}
-	if e.Status != approvals.Approved {
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(e), Answer: answer.String()})
-		return
+	result := DecisionResult{Envelope: viewOf(out.Envelope), Answer: out.Answer.String(), Executed: out.Executed, Output: out.Output}
+	if out.Err != nil {
+		result.Error = out.Err.Error()
+		result.OutcomeUnknown = out.OutcomeUnknown
 	}
-	// Approved: run it now, exactly once. Origin comes from the envelope
-	// itself (set when the model or scheduler proposed it). The payload may
-	// derive from external content (an S envelope is queued only because it
-	// was tainted), so it is presented as Tainted; the gate claims any
-	// presented envelope against its action and payload hash regardless.
-	//
-	// The execution is detached from the request: once the gate claims the
-	// envelope it is single-use, so a client that disconnects (Ctrl-C, its
-	// own timeout) must not cancel the connector call partway through. It
-	// still has its own bound.
-	execCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), approvedExecTimeout)
-	defer cancel()
-	res, ierr := d.cfg.Gate.Invoke(execCtx, gate.Call{
-		Function: e.Action, Args: e.Payload, Origin: gate.Origin(e.Origin), Taint: gate.Tainted, EnvelopeID: e.ID,
-	})
-	if ierr != nil {
-		// Refused before the claim (rate cap, missing credential, audit
-		// failure): the envelope is still Approved, and nothing else ever
-		// executes an Approved envelope, so the yes would silently sit there
-		// until it expired. End it as denied, with the reason, on the record.
-		if cur, gerr := d.cfg.Approvals.Get(execCtx, id); gerr == nil && cur.Status == approvals.Approved {
-			_, _ = d.cfg.Approvals.Abandon(execCtx, id, "execution refused: "+ierr.Error())
-		}
-	}
-	latest, gerr := d.cfg.Approvals.Get(execCtx, id)
-	if gerr != nil {
-		latest = e
-	}
-	if ierr != nil {
-		// Output set means the action ran and only indexing its result
-		// failed; either that or an unknown outcome must never read as
-		// "not executed", which would invite a second, duplicate request.
-		writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(latest), Answer: answer.String(), Executed: res.Output != nil, Output: res.Output,
-			Error: ierr.Error(), OutcomeUnknown: errors.Is(ierr, gapi.ErrSendOutcomeUnknown) || errors.Is(ierr, twinlink.ErrOutcomeUnknown)})
-		return
-	}
-	writeJSON(w, http.StatusOK, DecisionResult{Envelope: viewOf(latest), Answer: answer.String(), Executed: true, Output: res.Output})
+	writeJSON(w, http.StatusOK, result)
 }
-
-// approvedExecTimeout bounds one approved action's execution, which runs
-// detached from the deciding request's context.
-const approvedExecTimeout = 2 * time.Minute
 
 // handleState answers a compact snapshot: today's events and pending
 // approvals, the same data the fast paths and system prompt use.

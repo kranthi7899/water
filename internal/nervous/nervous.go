@@ -134,6 +134,15 @@ type Config struct {
 	// doing nothing, but a twin with no write intents (or one where none
 	// have been granted yet) needs no Actions at all.
 	Actions ActionSink
+
+	// Approver lets a bound voice yes/no directly decide a pending envelope
+	// (Design §13, R-21). Nil is accepted: VoiceApprove.Enabled then has no
+	// effect (voiceApproveActive requires both), which is the safe fallback.
+	Approver Approver
+	// VoiceApprove gates and configures the voice channel's yes/no binding.
+	// Code default off (router.voice_approve.enabled); Approver must also
+	// be set for Enabled to take effect.
+	VoiceApprove VoiceApproveConfig
 }
 
 // DefaultConfig returns Config with every flag/timing at its documented
@@ -151,6 +160,7 @@ func DefaultConfig() Config {
 		MissWindow:   DefaultMissWindow,
 		Retention:    90 * 24 * time.Hour,
 		Speculation:  true,
+		VoiceApprove: VoiceApproveConfig{Window: DefaultVoiceApproveWindow},
 	}
 }
 
@@ -166,6 +176,7 @@ type Nervous struct {
 	tier0Breaker *Breaker
 	tier1Breaker *Breaker
 	toolTracer   *ToolTracer
+	readbacks    *Readbacks
 
 	quickOnce sync.Once
 	quick     *reflex.QuickService
@@ -202,11 +213,15 @@ func New(cfg Config) (*Nervous, error) {
 	if cfg.MissWindow <= 0 {
 		cfg.MissWindow = DefaultMissWindow
 	}
+	if cfg.VoiceApprove.Window <= 0 {
+		cfg.VoiceApprove.Window = DefaultVoiceApproveWindow
+	}
 	n := &Nervous{
 		cfg:        cfg,
 		turns:      cfg.Turns,
 		ring:       newReflexRing(),
 		toolTracer: NewToolTracer(),
+		readbacks:  NewReadbacks(),
 	}
 	n.tier0Breaker = NewBreaker(cfg.Breaker, cfg.Clock)
 	// Tier 1 gets its own breaker instance (same config shape, independent
@@ -494,6 +509,10 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 	rec.escalationReason = escReason
 
 	if result != nil {
+		if n.voiceApproveActive(t.Channel, *result) {
+			n.answerVoiceApprove(ctx, id, t, *result, env, emit, rec, answeredTier, at)
+			return
+		}
 		n.answerQuick(id, t, *result, env, emit, rec, answeredTier)
 		return
 	}

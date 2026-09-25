@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -79,6 +80,36 @@ func (s *daemonActionSink) ProposeAction(ctx context.Context, fn string, payload
 		return approvals.Envelope{}, fmt.Errorf("nervous: ActionSink not ready yet")
 	}
 	return s.d.ProposeAction(ctx, fn, payload, ch)
+}
+
+// daemonApprover satisfies nervous.Approver (a bound voice yes/no deciding a
+// pending envelope, R-21) by forwarding to *gateway.Daemon's DecideBound,
+// which runs the exact same decideAndExecute path POST
+// /v1/approvals/{id}/decision uses. Same construction-order break as
+// daemonActionSink/daemonTaskControl/daemonPrewarmer above: d is set once,
+// right after gateway.New returns.
+type daemonApprover struct{ d *gateway.Daemon }
+
+func (a *daemonApprover) DecideBound(ctx context.Context, id, payloadHash, reply string) (nervous.DecisionOutcome, error) {
+	if a.d == nil {
+		return nervous.DecisionOutcome{}, fmt.Errorf("nervous: Approver not ready yet")
+	}
+	return a.d.DecideBound(ctx, id, payloadHash, reply)
+}
+
+// voiceApproveDomains parses router.voice_approve.internal_domains (a
+// comma-separated string) into the []string VoiceApprovalTier scans.
+// Whitespace around each entry is trimmed, and empty entries are dropped, so
+// "" (the default) and "a.com, ,b.com" both behave as documented: no domain
+// at all means every recipient is external.
+func voiceApproveDomains(csv string) []string {
+	var out []string
+	for _, d := range strings.Split(csv, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // daemonPrewarmer wires nervous.Config.Prewarm to the real warm session,
@@ -189,6 +220,9 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// after *nervous.Nervous is built, so it's wired in the same two-step
 	// way tc/prewarmer are, just below.
 	as := &daemonActionSink{}
+	// ap wires a bound voice yes/no to decideAndExecute (Design §13, R-21);
+	// same two-step construction-order break as as/tc/prewarmer.
+	ap := &daemonApprover{}
 	nvCfg := nervous.DefaultConfig()
 	nvCfg.Registry = func() *intents.Registry { return deps.intents }
 	nvCfg.Style = deps.style
@@ -200,6 +234,12 @@ func (a *App) runDaemon(ctx context.Context) error {
 	nvCfg.Approvals = deps.approvals
 	nvCfg.Prewarm = prewarmer.Prewarm
 	nvCfg.Actions = as
+	nvCfg.Approver = ap
+	nvCfg.VoiceApprove = nervous.VoiceApproveConfig{
+		Enabled:         cfg.Router.VoiceApprove.Enabled,
+		Window:          time.Duration(cfg.Router.VoiceApprove.WindowSeconds) * time.Second,
+		InternalDomains: voiceApproveDomains(cfg.Router.VoiceApprove.InternalDomains),
+	}
 	nv, err := nervous.New(nvCfg)
 	if err != nil {
 		return exitWith(ExitError, fmt.Errorf("nervous: %w", err))
@@ -214,6 +254,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	tc.d = d
 	prewarmer.d = d
 	as.d = d
+	ap.d = d
 
 	// Every request context derives from baseCtx, which shutdown cancels
 	// first: http.Server.Shutdown alone never cancels in-flight handlers, so

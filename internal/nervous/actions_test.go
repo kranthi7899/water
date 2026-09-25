@@ -13,6 +13,7 @@ import (
 	"water/internal/backend"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/propose"
+	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -32,6 +33,7 @@ connectors:
   - name: gcal
     functions:
       - {name: move_event, level: A}
+      - {name: create_event, level: A}
 `
 
 const actionsSharedYAML = `
@@ -109,7 +111,7 @@ func actionsFixtureRegistry(t *testing.T, files map[string]string) *intents.Regi
 	for name, content := range files {
 		fsys["twins/testtwin/intents/"+name+".yaml"] = &fstest.MapFile{Data: []byte(content)}
 	}
-	reg, err := intents.LoadRegistry(fsys, m, intents.Functions{Write: propose.Specs()}, intents.LoadOptions{})
+	reg, err := intents.LoadRegistry(fsys, m, intents.Functions{Read: reflex.Specs(), Write: propose.Specs()}, intents.LoadOptions{})
 	if err != nil {
 		t.Fatalf("LoadRegistry: %v", err)
 	}

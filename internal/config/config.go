@@ -31,6 +31,28 @@ type Config struct {
 	Meetings MeetingsConfig `yaml:"meetings"`
 	Agent    AgentConfig    `yaml:"agent"`
 	GitHub   GitHubConfig   `yaml:"github"`
+	Router   RouterConfig   `yaml:"router"`
+}
+
+// RouterConfig configures Slice R's nervous-system router
+// (internal/nervous). Only the voice approval binding's flags exist so far
+// (R-21); the rest of docs/slices/R.md Design §17's keys land with R-25.
+type RouterConfig struct {
+	VoiceApprove VoiceApproveConfig `yaml:"voice_approve"`
+}
+
+// VoiceApproveConfig gates a bare voice yes/no directly deciding a pending
+// envelope bound to an earlier read-back (router.voice_approve.enabled,
+// code default false; docs/slices/R.md Design §13).
+type VoiceApproveConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// WindowSeconds bounds how long after a read-back a bare yes/no on the
+	// same voice channel still binds to it.
+	WindowSeconds int `yaml:"window_seconds"`
+	// InternalDomains is a comma-separated list of domains a recipient
+	// address may belong to without requiring a tap. Empty means every
+	// recipient is external — fail closed, never fail open.
+	InternalDomains string `yaml:"internal_domains"`
 }
 
 // SyncConfig configures the daemon's background Google refresh
@@ -154,24 +176,27 @@ func Keys() []string {
 
 func defaults() map[string]string {
 	return map[string]string{
-		"schema":                     strconv.Itoa(CurrentSchema),
-		"backend.preferred":          "auto",
-		"backend.allow_metered":      "false",
-		"voice.provider":             "os",
-		"voice.allow_metered":        "false",
-		"voice.model":                "gpt-4o-mini-tts",
-		"voice.ceo_voice":            "",
-		"api.key":                    "",
-		"api.model":                  "",
-		"onboard.verified_at":        "",
-		"sync.interval_minutes":      "10",
-		"sync.mail_interval_seconds": "60",
-		"brief.ready_after":          "07:00",
-		"meetings.proactive_cues":    "false",
-		"agent.mail_address":         "",
-		"agent.forward_to":           "",
-		"agent.signature_name":       "",
-		"github.repo":                "",
+		"schema":                                strconv.Itoa(CurrentSchema),
+		"backend.preferred":                     "auto",
+		"backend.allow_metered":                 "false",
+		"voice.provider":                        "os",
+		"voice.allow_metered":                   "false",
+		"voice.model":                           "gpt-4o-mini-tts",
+		"voice.ceo_voice":                       "",
+		"api.key":                               "",
+		"api.model":                             "",
+		"onboard.verified_at":                   "",
+		"sync.interval_minutes":                 "10",
+		"sync.mail_interval_seconds":            "60",
+		"brief.ready_after":                     "07:00",
+		"meetings.proactive_cues":               "false",
+		"agent.mail_address":                    "",
+		"agent.forward_to":                      "",
+		"agent.signature_name":                  "",
+		"github.repo":                           "",
+		"router.voice_approve.enabled":          "false",
+		"router.voice_approve.window_seconds":   "60",
+		"router.voice_approve.internal_domains": "",
 	}
 }
 
@@ -292,6 +317,9 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Agent.ForwardTo = flat["agent.forward_to"]
 	r.Agent.SignatureName = flat["agent.signature_name"]
 	r.GitHub.Repo = flat["github.repo"]
+	r.Router.VoiceApprove.Enabled = abool("router.voice_approve.enabled")
+	r.Router.VoiceApprove.WindowSeconds = atoi("router.voice_approve.window_seconds")
+	r.Router.VoiceApprove.InternalDomains = flat["router.voice_approve.internal_domains"]
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -306,31 +334,40 @@ func (r *Resolved) apply(flat map[string]string) error {
 // as YAML ints/bools and every other key as a string, so a string value that
 // merely looks numeric or boolean ("0123", "t") is kept verbatim.
 var (
-	intKeys  = map[string]bool{"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true}
-	boolKeys = map[string]bool{"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true}
+	intKeys = map[string]bool{
+		"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true,
+		"router.voice_approve.window_seconds": true,
+	}
+	boolKeys = map[string]bool{
+		"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true,
+		"router.voice_approve.enabled": true,
+	}
 )
 
 // Flat returns the resolved values as dotted keys (for `water config`).
 func (r *Resolved) Flat() map[string]string {
 	return map[string]string{
-		"schema":                     strconv.Itoa(r.Schema),
-		"backend.preferred":          r.Backend.Preferred,
-		"backend.allow_metered":      strconv.FormatBool(r.Backend.AllowMetered),
-		"voice.provider":             r.Voice.Provider,
-		"voice.allow_metered":        strconv.FormatBool(r.Voice.AllowMetered),
-		"voice.model":                r.Voice.Model,
-		"voice.ceo_voice":            r.Voice.CEOVoice,
-		"api.key":                    mask(r.API.Key),
-		"api.model":                  r.API.Model,
-		"onboard.verified_at":        r.Onboard.VerifiedAt,
-		"sync.interval_minutes":      strconv.Itoa(r.Sync.IntervalMinutes),
-		"sync.mail_interval_seconds": strconv.Itoa(r.Sync.MailIntervalSeconds),
-		"brief.ready_after":          r.Brief.ReadyAfter,
-		"meetings.proactive_cues":    strconv.FormatBool(r.Meetings.ProactiveCues),
-		"agent.mail_address":         r.Agent.MailAddress,
-		"agent.forward_to":           r.Agent.ForwardTo,
-		"agent.signature_name":       r.Agent.SignatureName,
-		"github.repo":                r.GitHub.Repo,
+		"schema":                                strconv.Itoa(r.Schema),
+		"backend.preferred":                     r.Backend.Preferred,
+		"backend.allow_metered":                 strconv.FormatBool(r.Backend.AllowMetered),
+		"voice.provider":                        r.Voice.Provider,
+		"voice.allow_metered":                   strconv.FormatBool(r.Voice.AllowMetered),
+		"voice.model":                           r.Voice.Model,
+		"voice.ceo_voice":                       r.Voice.CEOVoice,
+		"api.key":                               mask(r.API.Key),
+		"api.model":                             r.API.Model,
+		"onboard.verified_at":                   r.Onboard.VerifiedAt,
+		"sync.interval_minutes":                 strconv.Itoa(r.Sync.IntervalMinutes),
+		"sync.mail_interval_seconds":            strconv.Itoa(r.Sync.MailIntervalSeconds),
+		"brief.ready_after":                     r.Brief.ReadyAfter,
+		"meetings.proactive_cues":               strconv.FormatBool(r.Meetings.ProactiveCues),
+		"agent.mail_address":                    r.Agent.MailAddress,
+		"agent.forward_to":                      r.Agent.ForwardTo,
+		"agent.signature_name":                  r.Agent.SignatureName,
+		"github.repo":                           r.GitHub.Repo,
+		"router.voice_approve.enabled":          strconv.FormatBool(r.Router.VoiceApprove.Enabled),
+		"router.voice_approve.window_seconds":   strconv.Itoa(r.Router.VoiceApprove.WindowSeconds),
+		"router.voice_approve.internal_domains": r.Router.VoiceApprove.InternalDomains,
 	}
 }
 

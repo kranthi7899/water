@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -218,7 +217,7 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 			continue
 		case boolKeys[k]:
 			flags[k] = "true"
-		case strings.HasPrefix(k, "sync."):
+		case intKeys[k]:
 			flags[k] = strconv.Itoa(1000 + i)
 		case k == "brief.ready_after":
 			flags[k] = "05:4" + strconv.Itoa(i%10)

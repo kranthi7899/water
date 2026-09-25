@@ -115,6 +115,10 @@ type turnSink struct {
 	mu     sync.Mutex
 	closed bool
 	write  func(runtime.Event)
+	// channel is this stream's runtime.Channel (cli/voice/text-bar), so
+	// notifyApprovalRequired knows whether a model-queued tool call's
+	// approval should also be recorded as a voice read-back (R-21).
+	channel runtime.Channel
 }
 
 func (s *turnSink) emit(e runtime.Event) {
@@ -186,6 +190,13 @@ func (d *Daemon) notifyApprovalRequired(env approvals.Envelope) {
 	d.mu.Unlock()
 	if s == nil {
 		return
+	}
+	if d.cfg.Nervous != nil {
+		// The read-back below is what's actually reaching this sink's
+		// stream; on a voice sink, record it so a later bare yes/no on that
+		// same channel can bind to it (Design §13). RecordReadback itself
+		// ignores anything that isn't the voice channel.
+		d.cfg.Nervous.RecordReadback(s.channel, env.ID, env.PayloadHash, time.Now())
 	}
 	s.emit(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: env.ID, Text: env.Action,
 		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash, ReadBack: approvals.ReadBack(env)})
