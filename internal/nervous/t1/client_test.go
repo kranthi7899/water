@@ -43,6 +43,9 @@ func fakeServer(t *testing.T, status int, body string) *httptest.Server {
 		if req["tool_choice"] != "auto" {
 			t.Errorf("tool_choice = %v, want auto", req["tool_choice"])
 		}
+		if stop, _ := req["stop"].([]any); len(stop) != 1 || stop[0] != functionCallEndTag {
+			t.Errorf("stop = %v, want [%q]", req["stop"], functionCallEndTag)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		w.Write([]byte(body))
@@ -168,6 +171,144 @@ func TestProposeUnknownToolName(t *testing.T) {
 	// what turns this into "unknown intent".
 	if strings.Contains(calls[0].Intent, ".") {
 		t.Fatalf("Intent = %q, want the raw unconverted wire name (no dot)", calls[0].Intent)
+	}
+}
+
+// TestProposeRawFunctionCallFormat reproduces what the real sidecar
+// actually sends for FunctionGemma today, confirmed directly against a
+// real llama-server + the real model during Slice R's Phase 4
+// verification: llama-server's OpenAI-style tool_calls extraction never
+// fires for this model, but the model's own raw
+// "<start_function_call>call:NAME{args}<end_function_call>" text is
+// present in message.content. Before the rawFunctionCalls fallback
+// existed, this content shape was misclassified as ErrTextReply on every
+// single real call -- Tier 1 could structurally never answer anything.
+func TestProposeRawFunctionCallFormat(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "<start_function_call>call:schedule_on_date{when:<escape>tomorrow<escape>}"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	calls, err := c.Propose(context.Background(), "what's on tomorrow", testDecls())
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %+v, want exactly 1", calls)
+	}
+	if calls[0].Intent != "schedule.on_date" {
+		t.Fatalf("Intent = %q, want schedule.on_date", calls[0].Intent)
+	}
+	if calls[0].Args["when"] != "tomorrow" {
+		t.Fatalf("Args = %+v, want when=tomorrow", calls[0].Args)
+	}
+}
+
+func TestProposeRawFunctionCallBareNumericArg(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "<start_function_call>call:mail_latest{n:5}"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	calls, err := c.Propose(context.Background(), "get my last 5 messages", testDecls())
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if len(calls) != 1 || calls[0].Args["n"] != "5" {
+		t.Fatalf("calls = %+v, want 1 call with n=5", calls)
+	}
+}
+
+func TestProposeRawFunctionCallMultipleArgs(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "<start_function_call>call:schedule_on_date{when:<escape>tomorrow<escape>,part:<escape>afternoon<escape>}"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	calls, err := c.Propose(context.Background(), "what's on tomorrow afternoon", testDecls())
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if len(calls) != 1 || calls[0].Args["when"] != "tomorrow" || calls[0].Args["part"] != "afternoon" {
+		t.Fatalf("calls = %+v, want when=tomorrow part=afternoon", calls)
+	}
+}
+
+func TestProposeRawFunctionCallNoArgs(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "<start_function_call>call:mail_unread_count{}"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	calls, err := c.Propose(context.Background(), "how many unread emails", testDecls())
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if len(calls) != 1 || len(calls[0].Args) != 0 {
+		t.Fatalf("calls = %+v, want 1 call with no args", calls)
+	}
+}
+
+// TestProposeRawFunctionCallHallucinatedTrailingCalls reproduces the
+// pre-stop-sequence failure mode directly (see chatRequest.Stop's own doc
+// comment): without a stop sequence, FunctionGemma emitted one correct
+// call and then kept hallucinating further fabricated
+// "<start_function_call>...<end_function_call>" blocks until it exhausted
+// MaxTokens. rawFunctionCalls must report 2+ calls here (never silently
+// pick the first one and drop the signal that something is wrong) so the
+// Tier 1 adapter's existing 2+-calls handling (t1_multi_call) still
+// applies -- the request-level Stop field is this slice's actual fix for
+// the underlying waste, this test is defense in depth for whatever
+// reaches the parser regardless.
+func TestProposeRawFunctionCallHallucinatedTrailingCalls(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "<start_function_call>call:schedule_on_date{when:<escape>tomorrow<escape>}<end_function_call><start_function_call>call:status_overview{}<end_function_call>"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	calls, err := c.Propose(context.Background(), "what's on tomorrow", testDecls())
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if len(calls) < 2 {
+		t.Fatalf("calls = %+v, want 2+ (so the caller's multi-call handling still applies)", calls)
+	}
+}
+
+func TestProposeRawFunctionCallUnknownToolName(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "<start_function_call>call:totally_unknown_tool{}"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	calls, err := c.Propose(context.Background(), "do something weird", testDecls())
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if len(calls) != 1 || strings.Contains(calls[0].Intent, ".") {
+		t.Fatalf("calls = %+v, want 1 call with the raw unconverted wire name", calls)
+	}
+}
+
+// TestProposeGenuineTextReplyStillErrTextReply confirms a truly plain
+// reply (no start-call tag anywhere) is unaffected by the raw-format
+// fallback: still ErrTextReply, exactly as before.
+func TestProposeGenuineTextReplyStillErrTextReply(t *testing.T) {
+	srv := fakeServer(t, http.StatusOK, `{
+		"choices": [{"message": {"content": "I can help with prioritizing tasks. Could you say more?"}}]
+	}`)
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	_, err := c.Propose(context.Background(), "what should I prioritize", testDecls())
+	if !errors.Is(err, ErrTextReply) {
+		t.Fatalf("err = %v, want ErrTextReply", err)
 	}
 }
 
