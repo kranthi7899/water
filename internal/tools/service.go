@@ -70,11 +70,16 @@ type Definition struct {
 
 // Definitions lists the tools the policy exposes, with schemas.
 func (s *Service) Definitions() []Definition {
-	out := make([]Definition, 0, len(s.Policy.Twin))
+	out := make([]Definition, 0, len(s.Policy.Twin)+len(s.Policy.Quick))
 	for _, tf := range s.Policy.Twin {
 		var schema map[string]any
 		_ = json.Unmarshal(tf.Schema, &schema)
 		out = append(out, Definition{Name: tf.Tool, Description: tf.Description, InputSchema: schema})
+	}
+	for _, qf := range s.Policy.Quick {
+		var schema map[string]any
+		_ = json.Unmarshal(qf.Schema, &schema)
+		out = append(out, Definition{Name: qf.Tool, Description: qf.Description, InputSchema: schema})
 	}
 	return out
 }
@@ -89,9 +94,12 @@ func (s *Service) Call(ctx context.Context, tool string, args map[string]any) (s
 	ev.Allowed, ev.Basis = dec.Allowed, dec.Basis
 	var result string
 	var err error
-	if !dec.Allowed {
+	switch {
+	case !dec.Allowed:
 		err = fmt.Errorf("%w: %s", ErrDenied, dec.Basis)
-	} else {
+	case isQuickTool(tool):
+		result, err = s.callQuick(ctx, tool, resolved)
+	default:
 		result, err = s.callTwin(ctx, tool, resolved)
 	}
 	s.recordEvent(ev, result, err)
@@ -167,6 +175,52 @@ func (s *Service) callTwin(ctx context.Context, tool string, args map[string]any
 	default:
 		return "", fmt.Errorf("%w: %s", ErrDenied, out.Reason)
 	}
+}
+
+// isQuickTool reports whether tool is one of Service's own two possible
+// dispatch targets by its policy-assigned name (a plain string check, not a
+// Policy lookup, since Call already has dec.Allowed proving tool resolved
+// to exactly one of Twin or Quick).
+func isQuickTool(tool string) bool { return strings.HasPrefix(tool, "quick__") }
+
+// quickInvokeResponse is what the daemon's POST /v1/quick/invoke returns.
+type quickInvokeResponse struct {
+	Status string          `json:"status"` // ok | denied
+	Output json.RawMessage `json:"output,omitempty"`
+	Reason string          `json:"reason,omitempty"`
+}
+
+// callQuick proxies one model-initiated quick.* lookup to the daemon's
+// POST /v1/quick/invoke — never /v1/tools/invoke, and never the gate: a
+// quick function is a local, read-only reflex.Table() handler, resolved
+// and run entirely inside the daemon's own process. It reuses the same
+// Unix-socket client and bearer token callTwin already uses, since both
+// endpoints sit behind the same authenticated daemon.
+func (s *Service) callQuick(ctx context.Context, tool string, args map[string]any) (string, error) {
+	qf, _ := s.Policy.quickByTool(tool)
+	body, err := json.Marshal(map[string]any{"function": qf.ID, "args": args})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://twin/v1/quick/invoke", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.Policy.TwinToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := twinHTTPClient(s.Policy.TwinSocket).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("quick proxy: %w", err)
+	}
+	defer resp.Body.Close()
+	var out quickInvokeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("quick proxy: bad response: %w", err)
+	}
+	if out.Status != "ok" {
+		return "", fmt.Errorf("%w: %s", ErrDenied, out.Reason)
+	}
+	return string(out.Output), nil
 }
 
 // NewCallID returns a unique, citeable invocation id.

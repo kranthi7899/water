@@ -31,21 +31,30 @@ type Policy struct {
 	Twin       []TwinFunction `json:"twin,omitempty"`
 	TwinSocket string         `json:"twin_socket,omitempty"`
 	TwinToken  string         `json:"twin_token,omitempty"`
+
+	// Quick lists the sous chef's read-only reflex handlers exposed as
+	// tools, proxied to POST /v1/quick/invoke instead of the gate (see
+	// quick.go) — a fast, cheap local lookup the model can call directly,
+	// never a connector call.
+	Quick []QuickFunction `json:"quick,omitempty"`
 }
 
 // ErrDenied is the base error for every permission refusal.
 var ErrDenied = errors.New("denied by tool policy")
 
 // Empty reports whether the policy grants no tools at all.
-func (p *Policy) Empty() bool { return p == nil || len(p.Twin) == 0 }
+func (p *Policy) Empty() bool { return p == nil || (len(p.Twin) == 0 && len(p.Quick) == 0) }
 
 // ToolNames lists the tools this policy exposes, sorted.
 func (p *Policy) ToolNames() []string {
 	if p.Empty() {
 		return nil
 	}
-	out := make([]string, 0, len(p.Twin))
+	out := make([]string, 0, len(p.Twin)+len(p.Quick))
 	for _, f := range p.Twin {
+		out = append(out, f.Tool)
+	}
+	for _, f := range p.Quick {
 		out = append(out, f.Tool)
 	}
 	sort.Strings(out)
@@ -58,19 +67,24 @@ type Decision struct {
 	Basis   string `json:"basis"` // human-readable rule that decided it
 }
 
-// Authorize decides whether tool may run. Every tool this policy can list is
-// a twin function; actually deciding whether the call is allowed (level,
-// taint, an approved envelope, rate caps) happens in the daemon's gate, not
-// here — this only checks the call is structurally routable to it.
+// Authorize decides whether tool may run. A twin function is proxied to the
+// daemon's gate, which alone decides level, taint, approval and rate caps —
+// this only checks the call is structurally routable to it. A quick
+// function is a local, read-only reflex lookup that never reaches the gate
+// at all: there is nothing further to authorize once it's found, since
+// internal/nervous/reflex's own handler table is the only thing that can
+// ever grant one (see quick.go).
 func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[string]any) {
-	tf, ok := p.twinByTool(tool)
-	if !ok {
-		return Decision{false, "unknown tool " + tool}, args
+	if tf, ok := p.twinByTool(tool); ok {
+		if p.TwinSocket == "" || p.TwinToken == "" {
+			return Decision{false, "twin tool proxy is not configured for this call"}, args
+		}
+		return Decision{true, "proxied to the daemon gate for " + tf.ID}, args
 	}
-	if p.TwinSocket == "" || p.TwinToken == "" {
-		return Decision{false, "twin tool proxy is not configured for this call"}, args
+	if qf, ok := p.quickByTool(tool); ok {
+		return Decision{true, "local quick lookup (no connector, no gate) for " + qf.ID}, args
 	}
-	return Decision{true, "proxied to the daemon gate for " + tf.ID}, args
+	return Decision{false, "unknown tool " + tool}, args
 }
 
 // ResolveWithinRoots resolves p to an absolute, symlink-free path and returns
@@ -149,7 +163,12 @@ func ExpandRoots(roots []string) []string {
 }
 
 // WritePolicyFile serialises the policy to a 0600 file and returns its path.
+// The policy is validated first (Validate, quick.go): a policy whose Twin
+// and Quick lists collide or are misnamed never reaches disk.
 func WritePolicyFile(dir string, p *Policy) (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -167,7 +186,9 @@ func WritePolicyFile(dir string, p *Policy) (string, error) {
 	return f.Name(), nil
 }
 
-// LoadPolicyFile reads a policy written by WritePolicyFile.
+// LoadPolicyFile reads a policy written by WritePolicyFile. It is validated
+// again on read (Validate, quick.go), defense in depth against a hand-edited
+// or otherwise tampered file.
 func LoadPolicyFile(path string) (*Policy, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -175,6 +196,9 @@ func LoadPolicyFile(path string) (*Policy, error) {
 	}
 	var p Policy
 	if err := json.Unmarshal(b, &p); err != nil {
+		return nil, fmt.Errorf("policy file %s: %w", path, err)
+	}
+	if err := p.Validate(); err != nil {
 		return nil, fmt.Errorf("policy file %s: %w", path, err)
 	}
 	return &p, nil

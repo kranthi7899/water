@@ -10,6 +10,7 @@ import (
 	"water/internal/nervous/intents"
 	"water/internal/nervous/render"
 	"water/internal/nervous/slots"
+	"water/internal/store"
 )
 
 // ErrBriefCacheMiss is returned by store.cached_brief when nothing is
@@ -55,7 +56,11 @@ func scheduleHandler(ctx context.Context, d Deps, a Args) (render.Result, error)
 
 func nextEventHandler(ctx context.Context, d Deps, a Args) (render.Result, error) {
 	ev, err := d.Store.NextEvent(ctx, d.now())
-	if err != nil {
+	// store.ErrNotFound (no future event exists) is the expected empty
+	// case, not a failure — the pre-R-16 code only checked for a nil ev,
+	// which NextEvent's actual implementation (internal/store/queries_router.go)
+	// never returns on its own: a missing row surfaces as ErrNotFound.
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return render.Result{}, fmt.Errorf("reflex: schedule.next_event: %w", err)
 	}
 	r := render.Result{Intent: "schedule.next_event", Kind: "read", Facts: map[string]string{}}
@@ -219,8 +224,20 @@ func cachedBriefHandler(ctx context.Context, d Deps, a Args) (render.Result, err
 	}, nil
 }
 
+// pendingApprovals is a nil-safe wrapper over Deps.Approvals.Pending: unlike
+// a turn's Deps (always built from a non-nil runtime.Env.Approvals),
+// Quick()'s Deps comes from Config.Approvals, which a bare test Config may
+// leave unset. Nil reads as "nothing pending" — the conservative direction,
+// since it can only ever make approvals.respond escalate rather than bind.
+func pendingApprovals(ctx context.Context, d Deps) ([]approvals.Envelope, error) {
+	if d.Approvals == nil {
+		return nil, nil
+	}
+	return d.Approvals.Pending(ctx)
+}
+
 func approvalsListHandler(ctx context.Context, d Deps, a Args) (render.Result, error) {
-	pending, err := d.Approvals.Pending(ctx)
+	pending, err := pendingApprovals(ctx, d)
 	if err != nil {
 		return render.Result{}, fmt.Errorf("reflex: approvals.list: %w", err)
 	}

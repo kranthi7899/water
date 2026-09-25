@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,6 +223,9 @@ func (d *Daemon) Mux() http.Handler {
 	// token, not a client token): it is called by the MCP bridge subprocess,
 	// not a client.
 	mux.HandleFunc("POST /v1/tools/invoke", d.handleToolInvoke)
+	// /v1/quick/invoke uses the same session tool-proxy token as
+	// /v1/tools/invoke, but never reaches the gate: see quick.go.
+	mux.HandleFunc("POST /v1/quick/invoke", d.handleQuickInvoke)
 	return mux
 }
 
@@ -507,11 +511,16 @@ func (d *Daemon) twinFunctions() []tools.TwinFunction {
 // daemon's single stable session token (see stableSessionToken), whose taint
 // is session-sticky (see escalateTaint).
 func (d *Daemon) TwinToolPolicy() *tools.Policy {
+	var quick []tools.QuickFunction
+	if d.cfg.Nervous != nil {
+		quick = d.cfg.Nervous.QuickFunctions()
+	}
 	return &tools.Policy{
 		Role:       "ceo",
 		Twin:       d.twinFunctions(),
 		TwinSocket: d.cfg.SocketPath,
 		TwinToken:  d.stableSessionToken(),
+		Quick:      quick,
 	}
 }
 
@@ -544,6 +553,14 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Belt and suspenders: the gate would deny a "quick." id anyway (no
+	// manifest connector named quick), but this makes the split with
+	// handleQuickInvoke explicit and directly testable, rather than relying
+	// solely on the gate's own default-deny.
+	if strings.HasPrefix(body.Function, "quick.") || strings.HasPrefix(body.Function, "quick__") {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": "quick tools are served at /v1/quick/invoke, not /v1/tools/invoke"})
 		return
 	}
 	if body.Args == nil {

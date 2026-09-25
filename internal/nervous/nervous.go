@@ -15,6 +15,8 @@ import (
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 	"water/internal/store"
+	"water/internal/tools"
+	"water/internal/twins"
 )
 
 // Turn is one channel's request into the front door. It carries only the
@@ -48,6 +50,13 @@ type Config struct {
 	// Tasks lets control.stop reach the daemon's in-flight-turn bookkeeping.
 	// Nil is fine (reflex's cancelTasksHandler treats it as "0 running").
 	Tasks reflex.TaskControl
+
+	// Manifest and Approvals let Quick()'s handlers (status.overview,
+	// approvals.pending) reach the twin's manifest and approval queue
+	// outside of any particular turn's runtime.Env — a quick.* tool call,
+	// unlike Handle, has no turn of its own to carry one.
+	Manifest  *twins.Manifest
+	Approvals reflex.PendingLister
 
 	// OnVoiceLint receives the main path's speak.Lint warnings for a voice
 	// turn, if any. R-14 both reads these into the route_log row AND still
@@ -119,6 +128,9 @@ type Nervous struct {
 	tier0Breaker *Breaker
 	toolTracer   *ToolTracer
 
+	quickOnce sync.Once
+	quick     *reflex.QuickService
+
 	pruneMu      sync.Mutex
 	lastPruneDay string
 }
@@ -173,6 +185,43 @@ func (n *Nervous) Tier0Breaker() (BreakerState, string, time.Time) {
 // uses without this package needing to change again.
 func (n *Nervous) ToolTracer() *ToolTracer {
 	return n.toolTracer
+}
+
+// RecordToolUse attributes one tool call (twin or quick.*) to whichever
+// main-path turn(s) are currently in flight. A thin, named wrapper around
+// ToolTracer().RecordUse so a gateway call site reads as "tell Nervous a
+// tool was used," not "reach into its tracer" — the mechanism itself is
+// R-14's.
+func (n *Nervous) RecordToolUse(tool string) {
+	n.toolTracer.RecordUse(tool)
+}
+
+// Quick lazily builds and returns the sous chef's quick.* tool service: the
+// fixed subset of reflex.Table() an intent has explicitly opted into
+// exposing to the main agent (FunctionSpec.QuickTool). Built once, since
+// the underlying handler table is fixed for the process's life.
+func (n *Nervous) Quick() *reflex.QuickService {
+	n.quickOnce.Do(func() {
+		n.quick = reflex.NewQuickService(func() reflex.Deps {
+			st := n.cfg.ReadStore
+			if st == nil {
+				st = n.cfg.Store
+			}
+			return reflex.Deps{
+				Store:     reflex.NewStoreView(st),
+				Approvals: n.cfg.Approvals,
+				Manifest:  n.cfg.Manifest,
+				Now:       time.Now,
+			}
+		})
+	})
+	return n.quick
+}
+
+// QuickFunctions is Quick().Functions(), for TwinToolPolicy (R-15) to
+// declare alongside the manifest's connector functions.
+func (n *Nervous) QuickFunctions() []tools.QuickFunction {
+	return n.Quick().Functions()
 }
 
 // Registry exposes the current intent registry snapshot, for a health

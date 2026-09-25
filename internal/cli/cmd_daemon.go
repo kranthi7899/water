@@ -140,6 +140,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 	nvCfg.Store = deps.store
 	nvCfg.ReadStore = readStore
 	nvCfg.Tasks = tc
+	nvCfg.Manifest = deps.manifest
+	nvCfg.Approvals = deps.approvals
 	nv, err := nervous.New(nvCfg)
 	if err != nil {
 		return exitWith(ExitError, fmt.Errorf("nervous: %w", err))
