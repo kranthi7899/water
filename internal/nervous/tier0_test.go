@@ -192,7 +192,7 @@ func tier0Ents() slots.Entities {
 func TestTryTier0NoMatch(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
 	u := tier0Utterance("completely unrelated gibberish", reg)
-	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "no_match" {
 		t.Fatalf("got res=%v reason=%q err=%v, want no_match", res, reason, err)
 	}
@@ -201,7 +201,7 @@ func TestTryTier0NoMatch(t *testing.T) {
 func TestTryTier0AmbiguousMatch(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"alpha": tier0AlphaYAML, "beta": tier0BetaYAML})
 	u := tier0Utterance("check status", reg)
-	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "ambiguous_match" {
 		t.Fatalf("got res=%v reason=%q err=%v, want ambiguous_match", res, reason, err)
 	}
@@ -210,7 +210,7 @@ func TestTryTier0AmbiguousMatch(t *testing.T) {
 func TestTryTier0SlotUnresolved(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"who": tier0PersonYAML})
 	u := tier0Utterance("latest from nosuchperson", reg)
-	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "slot_unresolved" {
 		t.Fatalf("got res=%v reason=%q err=%v, want slot_unresolved", res, reason, err)
 	}
@@ -219,7 +219,7 @@ func TestTryTier0SlotUnresolved(t *testing.T) {
 func TestTryTier0AmbiguousPersonAlsoSlotUnresolved(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"who": tier0PersonYAML})
 	u := tier0Utterance("latest from alex", reg)
-	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "slot_unresolved" {
 		t.Fatalf("got res=%v reason=%q err=%v, want slot_unresolved (ambiguous person)", res, reason, err)
 	}
@@ -228,7 +228,7 @@ func TestTryTier0AmbiguousPersonAlsoSlotUnresolved(t *testing.T) {
 func TestTryTier0DenyWord(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"delta": tier0DenyYAML})
 	u := tier0Utterance("look at cancel this", reg)
-	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "action_word" {
 		t.Fatalf("got res=%v reason=%q err=%v, want action_word", res, reason, err)
 	}
@@ -248,7 +248,7 @@ tests:
   - {utterance: "gibberish nonsense", intent: "none"}
 `})
 	u := tier0Utterance("cancel", reg)
-	_, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	_, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	// test.alpha_fn isn't in the real reflex.Table(), so this still can't
 	// actually answer -- but it must get past the deny-word gate first,
 	// i.e. NOT "action_word". Falling through to reflex.Table's own
@@ -262,7 +262,7 @@ tests:
 func TestTryTier0PendingGateExcludesWhenZero(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"pending": tier0PendingYAML})
 	u := tier0Utterance("yes", reg)
-	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, reflex.Deps{}, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "no_match" {
 		t.Fatalf("got res=%v reason=%q err=%v, want no_match (pending=0 must exclude the candidate entirely)", res, reason, err)
 	}
@@ -272,7 +272,7 @@ func TestTryTier0PendingGateMatchesWhenPositive(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"pending": tier0PendingYAML})
 	u := tier0Utterance("yes", reg)
 	deps := reflex.Deps{Approvals: fakePendingLister{pending: nil}}
-	res, reason, err := TryTier0(context.Background(), reg, deps, u, 1, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, deps, u, 1, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res == nil || reason != "" {
 		t.Fatalf("got res=%v reason=%q err=%v, want an answer once pending>0", res, reason, err)
 	}
@@ -283,7 +283,7 @@ func TestTryTier0HandlerErrorPropagates(t *testing.T) {
 	u := tier0Utterance("what's on my calendar today", reg)
 	wantErr := errors.New("store unavailable")
 	deps := reflex.Deps{Store: fakeStoreView{eventsErr: wantErr}}
-	res, reason, err := TryTier0(context.Background(), reg, deps, u, 0, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier0(context.Background(), reg, deps, u, 0, tier0FixedNow, tier0Ents(), nil)
 	if res != nil || reason != "" || err == nil {
 		t.Fatalf("got res=%v reason=%q err=%v, want the handler's own error", res, reason, err)
 	}

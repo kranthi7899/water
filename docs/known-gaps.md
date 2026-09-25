@@ -45,6 +45,21 @@ own company raises real consent obligations (varying by jurisdiction) that
 a prototype note cannot discharge. Do not point Slice M at a live call with
 outside participants until this gap is closed.
 
+## Slice R: sous-chef import-denylist test only scans `internal/nervous/reflex`
+
+Design §1(a) (`docs/slices/R.md`) describes the import/mutating-selector
+denylist test as covering every sous package (`reflex`, `propose`, `tmpl`,
+`slots`, `intents`, `render`, `speak`, `turn`). The actual test built
+(`internal/nervous/reflex/imports_test.go`, an earlier task) only globs
+`*.go` in its own directory (`reflex`), so it enforces the denylist for
+`reflex` alone, not the other seven packages named in the design — found
+while building R-20's `internal/nervous/propose` package, which was written
+by hand to respect the same rule (no `os/exec`/`net`/`gate`/`connectors`/
+`vault` import, no `Propose`/`Upsert`/etc. call) but is not mechanically
+checked for it. Not fixed here: broadening the test's file glob to cover
+every sous package's directory is a small, independent change that belongs
+to whichever task next touches this test, not silently folded into R-20.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the

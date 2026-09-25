@@ -10,6 +10,7 @@ import (
 	"water"
 	"water/internal/nervous/eval"
 	"water/internal/nervous/intents"
+	"water/internal/nervous/propose"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/slots"
 	"water/internal/nervous/tmpl"
@@ -138,7 +139,7 @@ func loadEmbeddedCEO(t testing.TB) (*intents.Registry, *twins.Manifest) {
 	if err != nil {
 		t.Fatalf("twins.Load(ceo): %v", err)
 	}
-	reg, err := intents.LoadRegistry(water.TwinsFS(), m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{})
+	reg, err := intents.LoadRegistry(water.TwinsFS(), m, intents.Functions{Read: reflex.Specs(), Write: propose.Specs()}, intents.LoadOptions{})
 	if err != nil {
 		t.Fatalf("LoadRegistry(ceo): %v", err)
 	}
@@ -154,6 +155,13 @@ func TestEmbeddedCEOIntentsLoad(t *testing.T) {
 		"mail.latest", "mail.unread_count", "mail.latest_from",
 		"brief.today", "approvals.list", "approvals.respond",
 		"control.stop", "status.overview", "help.intents",
+		// The four write intents (R-20): all are active in the real ceo
+		// manifest, which grants gcal.create_event/move_event and
+		// gmail.send_message at level A and gmail.draft_message at level D
+		// (docs/slice-c-planning.md's write-function increment, landed by
+		// the concurrent session; see docs/slices/R.md Risk item 24).
+		"calendar.create_event", "calendar.move_event",
+		"mail.draft_reply", "mail.send_reply",
 	}
 	got := map[string]bool{}
 	for _, it := range reg.Candidates() {

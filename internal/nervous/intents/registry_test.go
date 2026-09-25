@@ -455,7 +455,7 @@ slots:
 templates: ["hi {when} {at}"]
 tests: [{utterance: hi, intent: a.b}, {utterance: bye, intent: "none"}]
 `,
-			"is level R; write intents must target a level-A function",
+			"is level R; write intents must target a level-A or level-D function",
 		},
 		{
 			"required arg with no slot",
@@ -639,6 +639,9 @@ connectors:
 		if !ok || !it.Active {
 			t.Fatalf("calendar.create_event: got %+v, want active", it)
 		}
+		if !it.RequiresApproval {
+			t.Fatalf("calendar.create_event: RequiresApproval = false, want true for a level-A action")
+		}
 		cands := r.Candidates()
 		found := false
 		for _, c := range cands {
@@ -651,7 +654,11 @@ connectors:
 		}
 	})
 
-	t.Run("granted at a level other than A is an error", func(t *testing.T) {
+	t.Run("granted at level D is active with no approval required", func(t *testing.T) {
+		// D already means "nothing leaves" (internal/gate.NeedsEnvelope
+		// never requires an envelope for D), so a level-D write intent is
+		// active but RequiresApproval is false: its proposal is delivered
+		// directly instead of queued (docs/slices/R.md Risk item 24).
 		m := mustManifest(t, `
 id: testtwin
 name: Test twin
@@ -665,8 +672,41 @@ connectors:
     functions:
       - {name: list_messages, level: R}
 `)
+		schema := func(action string) (SchemaInfo, bool) {
+			if action != "gcal.create_event" {
+				return SchemaInfo{}, false
+			}
+			return SchemaInfo{Required: []string{"title", "start", "end"}, Properties: []string{"title", "start", "end", "attendees"}}, true
+		}
+		r, err := LoadRegistry(wellFormedFS(), m, fns, LoadOptions{Schema: schema})
+		if err != nil {
+			t.Fatalf("LoadRegistry: %v", err)
+		}
+		it, ok := r.Lookup("calendar.create_event")
+		if !ok || !it.Active {
+			t.Fatalf("calendar.create_event: got %+v, want active", it)
+		}
+		if it.RequiresApproval {
+			t.Fatalf("calendar.create_event: RequiresApproval = true, want false for a level-D action")
+		}
+	})
+
+	t.Run("granted at a level other than A or D is an error", func(t *testing.T) {
+		m := mustManifest(t, `
+id: testtwin
+name: Test twin
+usage: {window: 5h, model_calls: 200, auto_model_calls: 40}
+connectors:
+  - name: gcal
+    functions:
+      - {name: list_events, level: R}
+      - {name: create_event, level: R}
+  - name: gmail
+    functions:
+      - {name: list_messages, level: R}
+`)
 		_, err := LoadRegistry(wellFormedFS(), m, fns, LoadOptions{})
-		if err == nil || !strings.Contains(err.Error(), "write intents must target a level-A function") {
+		if err == nil || !strings.Contains(err.Error(), "write intents must target a level-A or level-D function") {
 			t.Fatalf("LoadRegistry error = %v, want a level complaint", err)
 		}
 	})

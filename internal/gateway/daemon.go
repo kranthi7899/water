@@ -572,9 +572,7 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if f, ok := d.cfg.Manifest.Function(body.Function); ok && gate.NeedsEnvelope(f.Level, ta.Taint) {
-		env, err := d.cfg.Approvals.Propose(r.Context(), approvals.Envelope{
-			Action: body.Function, Payload: body.Args, Origin: string(ta.Origin), Risk: string(functionRisk(d.cfg.Registry, body.Function)),
-		})
+		env, err := proposeEnvelope(r.Context(), d.cfg.Registry, d.cfg.Approvals, body.Function, body.Args, ta.Origin)
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 			return

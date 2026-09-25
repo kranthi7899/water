@@ -12,7 +12,6 @@ import (
 	"water/internal/config"
 	"water/internal/nervous/eval"
 	"water/internal/nervous/intents"
-	"water/internal/nervous/reflex"
 	"water/internal/nervous/sidecar"
 	"water/internal/twins"
 )
@@ -58,7 +57,7 @@ func (a *App) routeEvalCmd() *cobra.Command {
 			if err != nil {
 				return exitWith(ExitError, fmt.Errorf("twin manifest: %w", err))
 			}
-			reg, err := intents.LoadRegistry(water.TwinsFS(), m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{})
+			reg, err := intents.LoadRegistry(water.TwinsFS(), m, intentFunctions(), intents.LoadOptions{})
 			if err != nil {
 				return exitWith(ExitError, fmt.Errorf("intent registry: %w", err))
 			}

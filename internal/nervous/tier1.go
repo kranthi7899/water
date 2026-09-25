@@ -60,7 +60,7 @@ func countEquivalent(tok string) (string, bool) {
 // exactly as Tier 0 reports them). A non-nil result means Tier 1 answered.
 // err is only ever a transport/protocol failure talking to the sidecar, or
 // the matched handler's own error.
-func TryTier1(ctx context.Context, reg *intents.Registry, deps reflex.Deps, client t1.Client, u tmpl.Utterance, now time.Time, ents slots.Entities) (*render.Result, string, error) {
+func TryTier1(ctx context.Context, reg *intents.Registry, deps reflex.Deps, client t1.Client, u tmpl.Utterance, now time.Time, ents slots.Entities, wh writeHandler) (*render.Result, string, error) {
 	decls := t1.Declarations(reg)
 	calls, err := client.Propose(ctx, u.Raw, decls)
 	if errors.Is(err, t1.ErrTextReply) {
@@ -107,6 +107,13 @@ func TryTier1(ctx context.Context, reg *intents.Registry, deps reflex.Deps, clie
 	}
 	if denyWordOutsideVocabulary(reg, u, it) {
 		return nil, "action_word", nil
+	}
+
+	if it.Kind == intents.KindWrite {
+		if wh == nil {
+			return nil, "t1_unknown_intent", nil
+		}
+		return wh(ctx, it, v.Args)
 	}
 
 	handler, ok := reflex.Table()[it.Function]

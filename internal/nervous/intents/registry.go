@@ -105,11 +105,19 @@ type Intent struct {
 	Notes string `yaml:"-"`
 	File  string `yaml:"-"`
 
-	// Active, InactiveReason and Disabled are computed at load time, never
-	// decoded from YAML.
+	// Active, RequiresApproval, InactiveReason and Disabled are computed at
+	// load time, never decoded from YAML.
 	Active         bool   `yaml:"-"`
 	InactiveReason string `yaml:"-"`
 	Disabled       string `yaml:"-"`
+	// RequiresApproval is set for an Active write intent whose action is
+	// granted at level A: the sous chef must queue an approval envelope
+	// (nervous.ActionSink) and nothing executes until the CEO decides it.
+	// An Active write intent granted at level D leaves this false: "nothing
+	// leaves" by construction, so its proposal is delivered directly, with
+	// no envelope and no gate call (see checkAction). Always false for a
+	// read intent.
+	RequiresApproval bool `yaml:"-"`
 
 	compiled []*tmpl.Template // one per Templates entry, same order
 }
@@ -429,11 +437,12 @@ func validateAndCompile(it *Intent, m *twins.Manifest, fns Functions, shared Sha
 		if !ok {
 			return fmt.Errorf("%s: proposer %q is not registered", it.ID, it.Proposer)
 		}
-		active, reason, err := checkAction(it.Action, m, schema, s)
+		active, requiresApproval, reason, err := checkAction(it.Action, m, schema, s)
 		if err != nil {
 			return fmt.Errorf("%s: %w", it.ID, err)
 		}
 		it.Active = active
+		it.RequiresApproval = requiresApproval
 		it.InactiveReason = reason
 		spec = s
 	}

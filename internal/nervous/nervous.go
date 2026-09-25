@@ -127,6 +127,13 @@ type Config struct {
 	// would use). Nil is accepted: speculation then always reports "skipped"
 	// for the intents that would otherwise have prewarmed.
 	Prewarm func(ctx context.Context) (state string, err error)
+
+	// Actions lets a matched write intent's proposal reach the approval
+	// queue (Design §12). Nil is accepted: a write intent whose action
+	// needs approval then fails with a clear error instead of silently
+	// doing nothing, but a twin with no write intents (or one where none
+	// have been granted yet) needs no Actions at all.
+	Actions ActionSink
 }
 
 // DefaultConfig returns Config with every flag/timing at its documented
@@ -406,6 +413,10 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 
 	eligible, elReason := Eligible(u, reg.Shared())
 
+	wh := func(wctx context.Context, it intents.Intent, args reflex.Args) (*render.Result, string, error) {
+		return n.tryWriteIntent(wctx, env, it, args, t.Channel, at)
+	}
+
 	var result *render.Result
 	escReason := elReason
 	var briefCacheMiss bool
@@ -423,7 +434,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 			// call itself was skipped.
 			result, escReason = reused, ""
 		} else {
-			result, escReason, err = TryTier0(ctx, reg, deps, u, pending, at, ents)
+			result, escReason, err = TryTier0(ctx, reg, deps, u, pending, at, ents, wh)
 		}
 		rec.endTier("t0")
 		if err != nil {
@@ -462,7 +473,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 		if n.tier1Breaker.Allow() {
 			rec.beginTier("t1")
 			var err error
-			result, escReason, err = TryTier1(ctx, reg, deps, n.cfg.T1, u, at, ents)
+			result, escReason, err = TryTier1(ctx, reg, deps, n.cfg.T1, u, at, ents, wh)
 			rec.endTier("t1")
 			if err != nil {
 				escReason = "handler_error"
@@ -493,20 +504,21 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 // answerQuick delivers a Tier 0 or Tier 1 answer: it owns the turn from
 // here, renders through the twin's one style, escalates taint, and
 // surfaces an approval request if the intent staged one (a write intent,
-// wired by a later task — neither TryTier0 nor TryTier1 as built here ever
-// sets ApprovalID itself, but the delivery path already handles it so that
-// task needs no change here). tier is "t0" or "t1", whichever answered.
+// wired by this task — TryTier0/TryTier1 hand a matched write intent to
+// tryWriteIntent, which sets ApprovalID for a level-A proposal; the
+// delivery path below needed no change for that). tier is "t0" or "t1",
+// whichever answered.
 func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event), rec *routeRecorder, tier string) {
 	rec.owner = "quick"
 	rec.answeredBy = tier
 	rec.intent = result.Intent
-	// Neither TryTier0 nor TryTier1 as built here ever runs a write
-	// intent's proposer — write intents route through a separate proposal
-	// path a later task builds (Design §12) — so every quick answer
-	// reaching here today is intent_kind "read". IntentOrigin ("embedded"
-	// vs "learned") has no meaning yet either: the promotion loop that
-	// creates learned intents doesn't exist until R-22/23.
 	rec.intentKind = "read"
+	if it, ok := n.cfg.Registry().Lookup(result.Intent); ok && it.Kind == intents.KindWrite {
+		rec.intentKind = "write"
+	}
+	// IntentOrigin ("embedded" vs "learned") has no meaning yet: the
+	// promotion loop that creates learned intents doesn't exist until
+	// R-22/23.
 	rec.outcome = quickOutcome(result)
 
 	if err := n.turns.Route(id, turn.OwnerQuick); err != nil {

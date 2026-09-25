@@ -225,7 +225,7 @@ func (e *tier1EvalTier) Try(ctx context.Context, utterance string, pending int) 
 		return false, "", nil, true, nil
 	}
 
-	res, reason, tErr := nervous.TryTier0(ctx, e.reg, e.deps, u, pending, e.now, e.ents)
+	res, reason, tErr := nervous.TryTier0(ctx, e.reg, e.deps, u, pending, e.now, e.ents, nil)
 	if tErr != nil {
 		return false, "", nil, true, nil
 	}
@@ -237,7 +237,7 @@ func (e *tier1EvalTier) Try(ctx context.Context, utterance string, pending int) 
 	}
 
 	start := time.Now()
-	res, _, tErr = nervous.TryTier1(ctx, e.reg, e.deps, e.client, u, e.now, e.ents)
+	res, _, tErr = nervous.TryTier1(ctx, e.reg, e.deps, e.client, u, e.now, e.ents, nil)
 	d := time.Since(start)
 	e.mu.Lock()
 	e.t1Latencies = append(e.t1Latencies, d)

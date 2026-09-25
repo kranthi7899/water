@@ -45,12 +45,6 @@ func matchOnly(reg *intents.Registry, u tmpl.Utterance, pending int, now time.Ti
 	sawSlotReject := false
 
 	for _, it := range reg.Candidates() {
-		if it.Kind == intents.KindWrite {
-			// Write-intent proposals (create/move an event, draft or send
-			// a reply) go through a separate proposal path a later task
-			// builds; Tier 0 as built here only ever answers reads.
-			continue
-		}
 		if it.RequiresPending && pending <= 0 {
 			continue
 		}
@@ -111,19 +105,28 @@ func matchOnly(reg *intents.Registry, u tmpl.Utterance, pending int, now time.Ti
 // "escalate, Tier 0 has no answer" — one of "no_match", "action_word",
 // "slot_unresolved" or "ambiguous_match". A non-nil result means Tier 0
 // answered. err is only ever the matched handler's own error.
-func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tmpl.Utterance, pending int, now time.Time, ents slots.Entities) (*render.Result, string, error) {
+func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tmpl.Utterance, pending int, now time.Time, ents slots.Entities, wh writeHandler) (*render.Result, string, error) {
 	top, escReason, ok := matchOnly(reg, u, pending, now, ents)
 	if !ok {
 		return nil, escReason, nil
 	}
-	return runTier0Match(ctx, deps, top)
+	return runTier0Match(ctx, deps, top, wh)
 }
 
-// runTier0Match runs the winning candidate's real reflex handler. Split out
-// from TryTier0 so a caller that already has a matchOnly result (Handle's
-// own speculation-reuse check, tier0.go's own TryTier0 above) never needs a
-// second copy of "look the handler up and run it."
-func runTier0Match(ctx context.Context, deps reflex.Deps, top tier0Match) (*render.Result, string, error) {
+// runTier0Match runs the winning candidate's real reflex handler, or, for a
+// write-kind candidate, hands it to wh (Design §12) instead of ever looking
+// it up in reflex.Table() (a write intent's Function is always empty --
+// LoadRegistry itself enforces that). Split out from TryTier0 so a caller
+// that already has a matchOnly result (Handle's own speculation-reuse
+// check, tier0.go's own TryTier0 above) never needs a second copy of "look
+// the handler up and run it."
+func runTier0Match(ctx context.Context, deps reflex.Deps, top tier0Match, wh writeHandler) (*render.Result, string, error) {
+	if top.intent.Kind == intents.KindWrite {
+		if wh == nil {
+			return nil, "no_match", nil
+		}
+		return wh(ctx, top.intent, top.args)
+	}
 	handler, ok := reflex.Table()[top.intent.Function]
 	if !ok {
 		// The registry loader already checks every read intent's function

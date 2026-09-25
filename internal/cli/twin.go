@@ -23,6 +23,7 @@ import (
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/nervous/intents"
+	"water/internal/nervous/propose"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
 	"water/internal/store"
@@ -190,6 +191,36 @@ func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName, gi
 	return connectors.NewRegistry(cs...)
 }
 
+// schemaFromRegistry adapts a connectors.Registry to the callback
+// intents.LoadRegistry uses (LoadOptions.Schema) to check a write intent's
+// proposer against the real payload shape its target function actually
+// accepts, without intents (or internal/nervous/propose) ever importing
+// internal/connectors themselves (docs/slices/R.md Design §1: the gateway/
+// CLI wiring layer supplies connector schema lookups as a callback, not an
+// import).
+func schemaFromRegistry(reg *connectors.Registry) func(action string) (intents.SchemaInfo, bool) {
+	return func(action string) (intents.SchemaInfo, bool) {
+		_, fn, ok := reg.Lookup(action)
+		if !ok {
+			return intents.SchemaInfo{}, false
+		}
+		props := make([]string, 0, len(fn.Schema.Properties))
+		for k := range fn.Schema.Properties {
+			props = append(props, k)
+		}
+		return intents.SchemaInfo{Required: fn.Schema.Required, Properties: props}, true
+	}
+}
+
+// intentFunctions is the Functions{Read, Write} every intents.LoadRegistry
+// call against a real twin's embedded intents directory needs: once
+// twins/ceo/intents/*.yaml declares a write intent (this task), omitting
+// Write here would fail the whole load ("proposer ... is not registered"),
+// not just leave write intents inactive.
+func intentFunctions() intents.Functions {
+	return intents.Functions{Read: reflex.Specs(), Write: propose.Specs()}
+}
+
 // loadTwinManifest loads and validates id's manifest, decision registry and
 // connectors without opening the store or the audit log. It is what
 // read-only commands (`water status`, `water doctor`) use: the audit log has
@@ -204,12 +235,12 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName, githubRepo str
 	if _, err := decisions.LoadRegistry(fsys, m); err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
-	if _, err := intents.LoadRegistry(fsys, m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{}); err != nil {
-		return nil, fmt.Errorf("intent registry: %w", err)
-	}
 	reg, err := buildCEORegistry(id, nil, mailAddress, signatureName, githubRepo)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := intents.LoadRegistry(fsys, m, intentFunctions(), intents.LoadOptions{Schema: schemaFromRegistry(reg)}); err != nil {
+		return nil, fmt.Errorf("intent registry: %w", err)
 	}
 	if err := gate.ValidateManifest(m, reg); err != nil {
 		return nil, err
@@ -243,13 +274,6 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 	if err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
-	// The intent registry loads and validates the same way, before anything
-	// else opens: a bad twins/<id>/intents/*.yaml must stop the daemon here,
-	// not surface later as a Tier 0 that silently never matches anything.
-	intentsReg, err := intents.LoadRegistry(fsys, m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("intent registry: %w", err)
-	}
 	// A missing twins/<id>/style.yaml is not an error (render.DefaultStyle()),
 	// so this only ever fails on a malformed file.
 	style, err := render.LoadStyle(fsys, id)
@@ -260,6 +284,21 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	reg, err := buildCEORegistry(id, st, mailAddress, signatureName, githubRepo)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	// The intent registry loads and validates the same way, before anything
+	// else opens: a bad twins/<id>/intents/*.yaml must stop the daemon here,
+	// not surface later as a Tier 0 that silently never matches anything.
+	// It needs reg (built just above) to check a write intent's proposer
+	// against its target connector function's real payload schema.
+	intentsReg, err := intents.LoadRegistry(fsys, m, intentFunctions(), intents.LoadOptions{Schema: schemaFromRegistry(reg)})
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("intent registry: %w", err)
+	}
 	// *store.Store implements audit.Anchor directly (LoadAuditAnchor /
 	// SaveAuditAnchor), so the audit log's tail is anchored in the same
 	// database the gate persists rate/usage windows to.
@@ -269,12 +308,6 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 	q := approvals.NewQueue(st, log)
-	reg, err := buildCEORegistry(id, st, mailAddress, signatureName, githubRepo)
-	if err != nil {
-		log.Close()
-		st.Close()
-		return nil, err
-	}
 	v := vault.Default()
 	g, err := gate.New(gate.Config{Manifest: m, Registry: reg, Approvals: q, Audit: log, Vault: v, Store: st})
 	if err != nil {

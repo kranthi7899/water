@@ -6,11 +6,14 @@ prompt_block: >
   Answer in a calm, brief, plain voice. Facts first. No filler, no
   apologies, no hedging. Never say "As an AI" or similar. On voice, avoid
   markdown and long lists.
-# One entry per intent id (write intents are added in a later task, R-20).
-# header/empty are required; item/more are optional and only used when a
-# result has Items. {key} substitutes against Result.Facts (for
-# header/empty) or each Item map (for item) — a plain string replace, not
-# text/template, so external text containing literal braces is inert.
+# One entry per intent id. header/empty are required; item/more are
+# optional and only used when a result has Items. {key} substitutes against
+# Result.Facts (for header/empty) or each Item map (for item) — a plain
+# string replace, not text/template, so external text containing literal
+# braces is inert. The four write intents (R-20) never set Facts or Items:
+# their one-line summary/read-back is pre-phrased prose in Result.Text
+# (bypassing header substitution entirely, exactly like brief.today's cached
+# brief), so their header below is a plain literal.
 responses:
   schedule.on_date:
     header: "{when_spoken}:"
@@ -57,6 +60,18 @@ responses:
     item: "{id}: {description}"
     empty: "Nothing registered yet."
     more: "and {n} more"
+  calendar.create_event:
+    header: "Calendar:"
+    empty: "Could not create that event."
+  calendar.move_event:
+    header: "Calendar:"
+    empty: "Could not move that event."
+  mail.draft_reply:
+    header: "Draft:"
+    empty: "Could not draft that reply."
+  mail.send_reply:
+    header: "Reply:"
+    empty: "Could not send that reply."
 voice:
   name: Water
   tone: "Calm, brief, plain. Facts first. No filler, no apologies, no hedging."

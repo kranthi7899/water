@@ -44,7 +44,7 @@ func TestTryTier1AnswersGroundedCall(t *testing.T) {
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "schedule.on_date", Args: map[string]string{"when": "tomorrow"}}}}
 	deps := reflex.Deps{Store: fakeStoreView{}}
 
-	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res == nil || reason != "" {
 		t.Fatalf("got res=%v reason=%q err=%v, want an answer", res, reason, err)
 	}
@@ -63,7 +63,7 @@ func TestTryTier1UngroundedValueEscalates(t *testing.T) {
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "schedule.on_date", Args: map[string]string{"when": "friday"}}}}
 	deps := reflex.Deps{Store: fakeStoreView{}}
 
-	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "t1_ungrounded" {
 		t.Fatalf("got res=%v reason=%q err=%v, want t1_ungrounded", res, reason, err)
 	}
@@ -78,7 +78,7 @@ func TestTryTier1DefaultedArgExemptFromGrounding(t *testing.T) {
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "schedule.on_date", Args: map[string]string{}}}}
 	deps := reflex.Deps{Store: fakeStoreView{}}
 
-	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res == nil || reason != "" {
 		t.Fatalf("got res=%v reason=%q err=%v, want an answer (default exempt from grounding)", res, reason, err)
 	}
@@ -111,7 +111,7 @@ func TestTryTier1CountGroundsOnDigitOrWord(t *testing.T) {
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "test.delta", Args: map[string]string{"x": "three"}}}}
 	deps := reflex.Deps{}
 
-	_, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	_, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || reason == "t1_ungrounded" {
 		t.Fatalf("got reason=%q err=%v, want anything but t1_ungrounded (3/three must be grounding-equivalent)", reason, err)
 	}
@@ -123,7 +123,7 @@ func TestTryTier1DenyWordOutsideVocabulary(t *testing.T) {
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "test.delta", Args: map[string]string{"x": "3"}}}}
 	deps := reflex.Deps{}
 
-	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "action_word" {
 		t.Fatalf("got res=%v reason=%q err=%v, want action_word", res, reason, err)
 	}
@@ -146,7 +146,7 @@ tests:
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "control.stop", Args: map[string]string{}}}}
 	deps := reflex.Deps{}
 
-	_, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	_, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	// test.alpha_fn isn't in the real reflex.Table(), so this still can't
 	// actually answer -- but "cancel" is control.stop's own literal, so it
 	// must get past the deny-word gate (not "action_word"); it lands on
@@ -165,7 +165,7 @@ func TestTryTier1ZeroCalls(t *testing.T) {
 	u := tier0Utterance("completely unrelated gibberish", reg)
 	client := &fakeT1Client{calls: nil}
 
-	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "t1_no_call" {
 		t.Fatalf("got res=%v reason=%q err=%v, want t1_no_call", res, reason, err)
 	}
@@ -179,7 +179,7 @@ func TestTryTier1MultipleCalls(t *testing.T) {
 		{Intent: "schedule.on_date", Args: map[string]string{"when": "tomorrow"}},
 	}}
 
-	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "t1_multi_call" {
 		t.Fatalf("got res=%v reason=%q err=%v, want t1_multi_call", res, reason, err)
 	}
@@ -190,7 +190,7 @@ func TestTryTier1TextReply(t *testing.T) {
 	u := tier0Utterance("why is the board sync on friday", reg)
 	client := &fakeT1Client{err: t1.ErrTextReply}
 
-	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "t1_text" {
 		t.Fatalf("got res=%v reason=%q err=%v, want t1_text", res, reason, err)
 	}
@@ -201,7 +201,7 @@ func TestTryTier1UnknownIntentName(t *testing.T) {
 	u := tier0Utterance("do something odd", reg)
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "no_such_intent", Args: nil}}}
 
-	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "t1_unknown_intent" {
 		t.Fatalf("got res=%v reason=%q err=%v, want t1_unknown_intent", res, reason, err)
 	}
@@ -214,7 +214,7 @@ func TestTryTier1RequiresPendingIntentNeverAnswered(t *testing.T) {
 	// though Declarations never offers it.
 	client := &fakeT1Client{calls: []t1.Call{{Intent: "approvals.respond", Args: nil}}}
 
-	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents(), nil)
 	if err != nil || res != nil || reason != "t1_unknown_intent" {
 		t.Fatalf("got res=%v reason=%q err=%v, want t1_unknown_intent", res, reason, err)
 	}
@@ -226,7 +226,7 @@ func TestTryTier1TransportErrorPropagates(t *testing.T) {
 	wantErr := errors.New("sidecar unreachable")
 	client := &fakeT1Client{err: wantErr}
 
-	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, reflex.Deps{}, client, u, tier0FixedNow, tier0Ents(), nil)
 	if res != nil || reason != "" || err == nil {
 		t.Fatalf("got res=%v reason=%q err=%v, want the transport's own error", res, reason, err)
 	}
@@ -239,7 +239,7 @@ func TestTryTier1HandlerErrorPropagates(t *testing.T) {
 	wantErr := errors.New("store unavailable")
 	deps := reflex.Deps{Store: fakeStoreView{eventsErr: wantErr}}
 
-	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents())
+	res, reason, err := TryTier1(context.Background(), reg, deps, client, u, tier0FixedNow, tier0Ents(), nil)
 	if res != nil || reason != "" || err == nil {
 		t.Fatalf("got res=%v reason=%q err=%v, want the handler's own error", res, reason, err)
 	}

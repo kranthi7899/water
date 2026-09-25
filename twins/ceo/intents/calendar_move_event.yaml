@@ -1,0 +1,25 @@
+id: calendar.move_event
+description: Move an existing calendar event to a new time
+kind: write
+action: gcal.move_event
+proposer: calendar.move
+slots:
+  from: {type: time, required: true}
+  on: {type: date, default: today}
+  to_date: {type: date}
+  to: {type: time}
+templates:
+  - "move my {from} [{on}] to {to}"
+  - "move my {from} [{on}] to {to_date} [at {to}]"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "move my 1:15pm to 2:15pm", intent: calendar.move_event, slots: {from: "1:15pm", to: "2:15pm"}}
+  - {utterance: "move my 10:30am friday to 2:30pm", intent: calendar.move_event, slots: {from: "10:30am", on: friday, to: "2:30pm"}}
+  - {utterance: "what's the weather like", intent: "none"}
+---
+Needs exactly one non-cancelled event starting at "from" on "on" in the
+store; the proposer (internal/nervous/propose), not the registry, enforces
+"at least one of to_date/to" since that is an OR constraint FunctionSpec.
+Required can't express. Active only once gcal.move_event is granted at
+level A or D (checkAction). The CEO twin grants it at level A.

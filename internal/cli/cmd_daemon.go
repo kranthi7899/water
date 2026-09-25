@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"water/internal/agentmail"
+	"water/internal/approvals"
 	"water/internal/backend"
 	"water/internal/config"
 	"water/internal/connectors/google/gapi"
@@ -63,6 +64,21 @@ func (t *daemonTaskControl) CancelAllExcept(taskID string) int {
 		return 0
 	}
 	return t.d.CancelTasksExcept(taskID)
+}
+
+// daemonActionSink satisfies nervous.ActionSink (a matched write intent's
+// proposal reaching the approval queue) by forwarding to *gateway.Daemon's
+// ProposeAction, which queues an envelope through the exact same
+// proposeEnvelope path a model-initiated tool call uses. Same
+// construction-order break as daemonTaskControl/daemonPrewarmer above: d is
+// set once, right after gateway.New returns.
+type daemonActionSink struct{ d *gateway.Daemon }
+
+func (s *daemonActionSink) ProposeAction(ctx context.Context, fn string, payload map[string]any, ch runtime.Channel) (approvals.Envelope, error) {
+	if s.d == nil {
+		return approvals.Envelope{}, fmt.Errorf("nervous: ActionSink not ready yet")
+	}
+	return s.d.ProposeAction(ctx, fn, payload, ch)
 }
 
 // daemonPrewarmer wires nervous.Config.Prewarm to the real warm session,
@@ -168,6 +184,11 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// after *nervous.Nervous — a gateway.Config field — is built, so it's
 	// wired in the same two-step way tc is, just below.
 	prewarmer := &daemonPrewarmer{warm: warm, roleMD: deps.roleMD, manifest: deps.manifest}
+	// as wires a matched write intent's proposal to the approval queue
+	// (Design §12); it needs *gateway.Daemon, which doesn't exist until
+	// after *nervous.Nervous is built, so it's wired in the same two-step
+	// way tc/prewarmer are, just below.
+	as := &daemonActionSink{}
 	nvCfg := nervous.DefaultConfig()
 	nvCfg.Registry = func() *intents.Registry { return deps.intents }
 	nvCfg.Style = deps.style
@@ -178,6 +199,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	nvCfg.Manifest = deps.manifest
 	nvCfg.Approvals = deps.approvals
 	nvCfg.Prewarm = prewarmer.Prewarm
+	nvCfg.Actions = as
 	nv, err := nervous.New(nvCfg)
 	if err != nil {
 		return exitWith(ExitError, fmt.Errorf("nervous: %w", err))
@@ -191,6 +213,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	})
 	tc.d = d
 	prewarmer.d = d
+	as.d = d
 
 	// Every request context derives from baseCtx, which shutdown cancels
 	// first: http.Server.Shutdown alone never cancels in-flight handlers, so

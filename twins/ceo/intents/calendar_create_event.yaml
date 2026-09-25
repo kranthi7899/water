@@ -1,0 +1,23 @@
+id: calendar.create_event
+description: Create a calendar event and invite attendees
+kind: write
+action: gcal.create_event
+proposer: calendar.create
+slots:
+  who: {type: person}
+  when: {type: date, required: true}
+  at: {type: time, required: true}
+  dur: {type: duration, default: "30 minutes"}
+  title: {type: text}
+templates:
+  - "(schedule|book|set up) a meeting [with {who}] {when} at {at} [for {dur}] [called {title}]"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "schedule a meeting with priya tomorrow at 3:15pm", intent: calendar.create_event, slots: {when: tomorrow, at: "3:15pm", who: "priya nair <priya@example.com>"}}
+  - {utterance: "book a meeting friday at 10:45am", intent: calendar.create_event, slots: {when: friday, at: "10:45am"}}
+  - {utterance: "what's the weather forecast", intent: "none"}
+---
+Active only once gcal.create_event is granted at level A or D in the twin's
+manifest (checkAction, R-6/R-20). The CEO twin grants it at level A, so a
+successful proposal is queued for approval; nothing executes without it.
