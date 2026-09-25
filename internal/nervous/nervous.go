@@ -31,6 +31,13 @@ type Turn struct {
 	Text    string
 	Context string
 	TaskID  string
+	// ClientID is the optional turn_id a client streamed partial
+	// transcripts under (POST /v1/turns/{id}/partial) before posting this
+	// final turn. Empty means no partials preceded this turn — the existing
+	// behavior, unchanged. When set, Handle takes over that turn's
+	// bookkeeping (turn.Table.Final's clientID parameter) so any cached
+	// speculative work reaches this turn (R-19).
+	ClientID string
 }
 
 // Config wires the front door to its dependencies. It intentionally holds
@@ -107,6 +114,19 @@ type Config struct {
 	// Retention bounds how long route_log rows are kept before
 	// pruneRoutesOncePerDay deletes them (default 90 days).
 	Retention time.Duration
+
+	// Speculation gates R-19's partial-transcript prefetch (Design §11.5,
+	// flag router.speculation.enabled, code default on). Off makes Partial
+	// a pure turn.Table bookkeeping call: it still tracks partial
+	// counts/timing for the route_log row, it just never runs speculate().
+	Speculation bool
+	// Prewarm tries to warm the backend's subprocess ahead of a real turn,
+	// without ever sending it one (internal/backend.WarmSession.Prewarm,
+	// wrapped by the daemon's own wiring so it always warms with the exact
+	// request — system prompt, model, tool policy — a real main-path turn
+	// would use). Nil is accepted: speculation then always reports "skipped"
+	// for the intents that would otherwise have prewarmed.
+	Prewarm func(ctx context.Context) (state string, err error)
 }
 
 // DefaultConfig returns Config with every flag/timing at its documented
@@ -123,6 +143,7 @@ func DefaultConfig() Config {
 		Breaker:      DefaultBreakerConfig(),
 		MissWindow:   DefaultMissWindow,
 		Retention:    90 * 24 * time.Hour,
+		Speculation:  true,
 	}
 }
 
@@ -345,7 +366,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 
 	emitRouter := n.turns.Emitter(id, turn.OwnerRouter, emit)
 
-	if _, err := n.turns.Final("", id, t.Channel); err != nil {
+	if _, err := n.turns.Final(t.ClientID, id, t.Channel); err != nil {
 		// A duplicate or otherwise invalid task id: nothing this package
 		// can recover from sensibly, and the caller (the daemon, later)
 		// is responsible for task-id uniqueness. Answer conservatively.
@@ -393,7 +414,17 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 	if eligible && n.cfg.Tier0Enabled && n.tier0Breaker.Allow() {
 		rec.beginTier("t0")
 		var err error
-		result, escReason, err = TryTier0(ctx, reg, deps, u, pending, at, ents)
+		if reused, ok := n.trySpeculationReuse(id, reg, u, pending, at, ents); ok {
+			// A cached speculative dry-match/read from this turn's own
+			// partials still agrees with the FINAL match (Design §11.5):
+			// reuse its already-rendered result instead of re-running the
+			// handler. This is exactly a Tier 0 hit for every bookkeeping
+			// purpose below (breaker, route log, ring) — only the handler
+			// call itself was skipped.
+			result, escReason = reused, ""
+		} else {
+			result, escReason, err = TryTier0(ctx, reg, deps, u, pending, at, ents)
+		}
 		rec.endTier("t0")
 		if err != nil {
 			if errors.Is(err, reflex.ErrBriefCacheMiss) {
@@ -548,4 +579,165 @@ func (n *Nervous) emitHandoff(ch runtime.Channel, emit func(runtime.Event)) {
 		return
 	}
 	emit(runtime.Event{Kind: runtime.EventAck})
+}
+
+// trySpeculationReuse reports whether a cached speculative read answer for
+// id may stand in for a real Tier 0 run (Design §11.5): the cached
+// Speculation must exist, have actually hit (DryMatch AND RunRead both
+// succeeded), be no older than specReuseWindow, and — checked here against
+// the exact same matchOnly Tier 0 itself uses, never the cached dry-match's
+// own say-so — the FINAL utterance's winning match must name the same
+// intent and the same resolved slot labels. Anything else is left alone: the
+// caller falls through to a normal TryTier0 run, and the speculative work
+// was simply wasted, which Design §11.5 accepts as fine.
+func (n *Nervous) trySpeculationReuse(id string, reg *intents.Registry, u tmpl.Utterance, pending int, now time.Time, ents slots.Entities) (*render.Result, bool) {
+	specAny, ok := n.turns.GetSpec(id)
+	if !ok || specAny == nil {
+		return nil, false
+	}
+	spec, ok := specAny.(*Speculation)
+	if !ok || spec == nil || !spec.hit {
+		return nil, false
+	}
+	if now.Sub(spec.computedAt) > specReuseWindow {
+		return nil, false
+	}
+	top, _, ok := matchOnly(reg, u, pending, now, ents)
+	if !ok || top.intent.ID != spec.intent || !sameLabels(top.labels, spec.labels) {
+		return nil, false
+	}
+	spec.reused = true
+	res := spec.result
+	return &res, true
+}
+
+// specStore is the read-only store speculation reads through: ReadStore,
+// falling back to Store, exactly like n.deps and n.entities do.
+func (n *Nervous) specStore() *store.Store {
+	if n.cfg.ReadStore != nil {
+		return n.cfg.ReadStore
+	}
+	return n.cfg.Store
+}
+
+// pendingCountConfig is pendingCount's Config-only twin: Partial has no
+// per-turn runtime.Env to read env.Approvals from (a partial transcript
+// isn't a full turn), so it reads Config.Approvals directly instead. A nil
+// Config.Approvals or a read error is treated as "nothing pending" — same
+// conservative direction as pendingCount.
+func (n *Nervous) pendingCountConfig(ctx context.Context) int {
+	if n.cfg.Approvals == nil {
+		return 0
+	}
+	pend, err := n.cfg.Approvals.Pending(ctx)
+	if err != nil {
+		return 0
+	}
+	return len(pend)
+}
+
+// specDeps builds the SpecDeps a real Partial call speculates against: pure
+// store reads (Summary, and the reflex.Deps DryMatch/RunRead run their
+// handler against) plus Config.Prewarm — never a backend or Tier 1 field,
+// so this package's own speculate() can never reach either one no matter
+// what reg/pending/now/ents are (Design §1's "enforced by construction").
+func (n *Nervous) specDeps(reg *intents.Registry, pending int, now time.Time, ents slots.Entities) SpecDeps {
+	rdeps := reflex.Deps{
+		Store:     reflex.NewStoreView(n.specStore()),
+		Approvals: n.cfg.Approvals,
+		Manifest:  n.cfg.Manifest,
+		Now:       func() time.Time { return now },
+		// brief.today's cached-brief handler calls Deps.Brief directly with
+		// no nil check (it is always built from a real runtime.Env in every
+		// other caller); speculation has no runtime.Env of its own to build
+		// CachedBrief from, so it supplies a safe stub that always reports
+		// a cache miss. A dry-matched brief.today therefore always defers
+		// its handler run to the main path exactly as an ordinary Tier 0
+		// cache miss does (reflex.ErrBriefCacheMiss) — speculation never
+		// computes or caches a brief itself.
+		Brief: func(context.Context, string) (string, bool, bool, error) {
+			return "", false, false, nil
+		},
+	}
+	return SpecDeps{
+		ReadStore: n.specStore(),
+		Summary: func(ctx context.Context) (string, bool, error) {
+			// runtime.Env.Approvals is a concrete *approvals.Queue, while
+			// Config.Approvals is the narrower reflex.PendingLister this
+			// package actually depends on; omitting it here only drops the
+			// "pending approvals" line from a summary text nothing reads
+			// (speculate() only cares whether this precompute succeeded at
+			// all, for the route_log row's "summary" flag), not the
+			// store-read behavior this step exists to warm.
+			s, tainted := runtime.StateSummary(ctx, runtime.Env{Store: n.specStore(), Now: func() time.Time { return now }})
+			return s, tainted, nil
+		},
+		DryMatch: func(u tmpl.Utterance) (string, map[string]string, bool) {
+			top, _, ok := matchOnly(reg, u, pending, now, ents)
+			if !ok {
+				return "", nil, false
+			}
+			return top.intent.ID, top.labels, true
+		},
+		RunRead: func(ctx context.Context, intent string, labels map[string]string) (render.Result, error) {
+			it, ok := candidateByID(reg, intent)
+			if !ok {
+				return render.Result{}, errors.New("nervous: speculate: unknown intent " + intent)
+			}
+			captures := make([]tmpl.Capture, 0, len(labels))
+			for name, val := range labels {
+				nt := tmpl.Normalize(val, nil)
+				captures = append(captures, tmpl.Capture{Slot: name, Tokens: nt.Tokens, Raw: val})
+			}
+			v, _, ok := Validate(reg, Proposal{Intent: intent, Captures: captures}, now, ents)
+			if !ok {
+				return render.Result{}, errors.New("nervous: speculate: could not revalidate " + intent)
+			}
+			handler, ok := reflex.Table()[it.Function]
+			if !ok {
+				return render.Result{}, errors.New("nervous: speculate: no handler for " + it.Function)
+			}
+			return handler.Run(ctx, rdeps, v.Args)
+		},
+		Prewarm: n.cfg.Prewarm,
+	}
+}
+
+// Partial records one partial transcript for clientID (turn.Table.Partial:
+// creates a new listening turn, or extends one already listening — the
+// partial text itself is passed to nothing but this call's own in-memory
+// speculative work below, and is never stored or logged anywhere; see
+// Design §11.5) and, when Config.Speculation is on, runs at most one
+// debounced round of speculative prefetch: a state-summary read, a dry
+// match against Tier 0's own registry and matching logic, and — only on a
+// dry-match hit — the matched read handler, cached for later reuse by
+// Handle. It never answers the turn and never emits an event; Handle is the
+// only path that can do either.
+func (n *Nervous) Partial(ctx context.Context, clientID string, ch runtime.Channel, text string, seq int) (turn.State, error) {
+	tn, err := n.turns.Partial(clientID, ch, seq)
+	if err != nil {
+		return "", err
+	}
+	if !n.cfg.Speculation {
+		return tn.State, nil
+	}
+
+	reg := n.cfg.Registry()
+	u := tmpl.Normalize(text, wordSet(reg.Shared().SkipWords))
+	now := n.cfg.Clock.Now()
+
+	var prev *Speculation
+	if prevAny, ok := n.turns.GetSpec(clientID); ok {
+		prev, _ = prevAny.(*Speculation)
+	}
+	if !shouldSpeculate(prev, u.Tokens, now) {
+		return tn.State, nil
+	}
+
+	pending := n.pendingCountConfig(ctx)
+	ents := n.entities(ctx, runtime.Env{}, now)
+	spec := speculate(ctx, n.specDeps(reg, pending, now, ents), u)
+	spec.computedAt = now
+	n.turns.SetSpec(clientID, spec)
+	return tn.State, nil
 }

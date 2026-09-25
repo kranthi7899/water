@@ -98,11 +98,14 @@ type Daemon struct {
 	// warm session serializes its turns anyway; taking this slot first just
 	// makes the daemon know which turn that is.
 	modelSlot chan struct{}
+	// partialLimiter bounds POST /v1/turns/{id}/partial's rate (Design
+	// §11.5: at most 20/s per turn id).
+	partialLimiter *partialLimiter
 }
 
 func New(cfg Config) *Daemon {
 	return &Daemon{cfg: cfg, meetings: meetings.New(cfg.Store), tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{},
-		sinks: map[string]*turnSink{}, modelSlot: make(chan struct{}, 1)}
+		sinks: map[string]*turnSink{}, modelSlot: make(chan struct{}, 1), partialLimiter: newPartialLimiter()}
 }
 
 // turnSink is one open POST /v1/turns stream. Writes from the turn itself
@@ -213,6 +216,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/router", d.auth(d.handleRouterHealth))
 	mux.Handle("GET /v1/route/report", d.auth(d.handleRouteReport))
 	mux.Handle("GET /v1/voice/profile", d.auth(d.handleVoiceProfile))
+	mux.Handle("POST /v1/turns/{id}/partial", d.auth(d.handleTurnPartial))
 	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))
 	mux.Handle("POST /v1/twinlink/outbox", d.auth(d.handleTwinOutbox))
 	// Inbound twin messages are authenticated by a peer token only (a

@@ -65,6 +65,35 @@ func (t *daemonTaskControl) CancelAllExcept(taskID string) int {
 	return t.d.CancelTasksExcept(taskID)
 }
 
+// daemonPrewarmer wires nervous.Config.Prewarm to the real warm session,
+// warming it with exactly the request — system prompt, model, tool policy —
+// a real main-path turn would use (Design §11.5), so a successful prewarm
+// actually avoids the real turn's own cold start rather than warming under
+// a different key that just gets restarted anyway. Like daemonTaskControl
+// above, d is set once, right after gateway.New returns, to break the same
+// construction-order cycle (Prewarm needs the twin's tool policy, which
+// only *gateway.Daemon can build).
+type daemonPrewarmer struct {
+	warm     *backend.WarmSession
+	roleMD   string
+	manifest *twins.Manifest
+	d        *gateway.Daemon
+}
+
+func (p *daemonPrewarmer) Prewarm(ctx context.Context) (string, error) {
+	if p.warm == nil {
+		return "skipped", nil
+	}
+	req := backend.Request{
+		System: runtime.RoleSystem(runtime.Env{RoleMD: p.roleMD}),
+		Model:  p.manifest.ModelFor(twins.TierFast),
+	}
+	if p.d != nil {
+		req.Tools = p.d.TwinToolPolicy()
+	}
+	return p.warm.Prewarm(ctx, req)
+}
+
 func (a *App) runDaemon(ctx context.Context) error {
 	cfg, err := a.config()
 	if err != nil {
@@ -133,6 +162,12 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// exist until after *nervous.Nervous is built (Nervous itself is a
 	// gateway.Config field), so it's wired in two steps.
 	tc := &daemonTaskControl{}
+	// prewarmer wires R-19's speculative prefetch to the same warm session
+	// and startup path a real main-path turn uses (Design §11.5): it needs
+	// *gateway.Daemon for the twin's tool policy, which doesn't exist until
+	// after *nervous.Nervous — a gateway.Config field — is built, so it's
+	// wired in the same two-step way tc is, just below.
+	prewarmer := &daemonPrewarmer{warm: warm, roleMD: deps.roleMD, manifest: deps.manifest}
 	nvCfg := nervous.DefaultConfig()
 	nvCfg.Registry = func() *intents.Registry { return deps.intents }
 	nvCfg.Style = deps.style
@@ -142,6 +177,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	nvCfg.Tasks = tc
 	nvCfg.Manifest = deps.manifest
 	nvCfg.Approvals = deps.approvals
+	nvCfg.Prewarm = prewarmer.Prewarm
 	nv, err := nervous.New(nvCfg)
 	if err != nil {
 		return exitWith(ExitError, fmt.Errorf("nervous: %w", err))
@@ -154,6 +190,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 		Nervous: nv,
 	})
 	tc.d = d
+	prewarmer.d = d
 
 	// Every request context derives from baseCtx, which shutdown cancels
 	// first: http.Server.Shutdown alone never cancels in-flight handlers, so

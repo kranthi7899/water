@@ -110,26 +110,35 @@ func (r *routeRecorder) finish(ctx context.Context) {
 	logCtx := context.WithoutCancel(ctx)
 
 	now := r.n.cfg.Clock.Now()
+	partials, firstPartialLeadMS, speculation := r.n.captureSpeculationFacts(r.turnID, r.start)
 	row := store.RouteRow{
-		TurnID:           r.turnID,
-		At:               r.start,
-		Channel:          string(r.channel),
-		Utterance:        r.utterance,
-		TiersAttempted:   r.tiersAttempted,
-		Owner:            r.owner,
-		AnsweredBy:       r.answeredBy,
-		Intent:           r.intent,
-		IntentKind:       r.intentKind,
-		IntentOrigin:     r.intentOrigin,
-		Slots:            r.slots,
-		EscalationReason: r.escalationReason,
-		LatencyMS:        r.latency,
-		TotalMS:          ms(now.Sub(r.start)),
-		Outcome:          r.outcome,
-		Warnings:         r.warnings,
-		Voice:            r.channel == runtime.ChannelVoice,
-		AckMS:            r.ackMS,
-		FirstSentenceMS:  r.firstSentenceMS,
+		TurnID:             r.turnID,
+		At:                 r.start,
+		Channel:            string(r.channel),
+		Utterance:          r.utterance,
+		TiersAttempted:     r.tiersAttempted,
+		Owner:              r.owner,
+		AnsweredBy:         r.answeredBy,
+		Intent:             r.intent,
+		IntentKind:         r.intentKind,
+		IntentOrigin:       r.intentOrigin,
+		Slots:              r.slots,
+		EscalationReason:   r.escalationReason,
+		LatencyMS:          r.latency,
+		TotalMS:            ms(now.Sub(r.start)),
+		Outcome:            r.outcome,
+		Warnings:           r.warnings,
+		Voice:              r.channel == runtime.ChannelVoice,
+		Partials:           partials,
+		FirstPartialLeadMS: firstPartialLeadMS,
+		Speculation:        speculation,
+		// SpeculationModelCalls is always 0: SpecDeps (speculate.go) has no
+		// backend or Tier 1 field at all, so speculative work can never make
+		// a model call by construction — there is nothing to count here,
+		// ever (TestSpeculationZeroModelCalls asserts this in practice too).
+		SpeculationModelCalls: 0,
+		AckMS:                 r.ackMS,
+		FirstSentenceMS:       r.firstSentenceMS,
 	}
 
 	// The "previous row" must be found BEFORE this one is inserted, or it
@@ -144,6 +153,35 @@ func (r *routeRecorder) finish(ctx context.Context) {
 
 	r.updateRing()
 	r.n.pruneRoutesOncePerDay(logCtx, now)
+}
+
+// captureSpeculationFacts reads whatever turn.Table still knows about
+// partials and cached speculative work for id, at logging time (R-19).
+// Partial transcripts and speculation results live only in memory (Design
+// §11.5: "partial text is never stored") — only these counts, timings and a
+// small speculation summary ever reach route_log. id is looked up after
+// Done() has run, so this always sees the turn's final state; turn.Table's
+// own DoneKeep (10 minutes) comfortably outlives the deferred call that
+// reaches here.
+func (n *Nervous) captureSpeculationFacts(id string, at time.Time) (partials int, firstPartialLeadMS *int64, speculation map[string]any) {
+	tn, ok := n.turns.Get(id)
+	if !ok {
+		return 0, nil, nil
+	}
+	partials = tn.Partials
+	if partials > 0 && !tn.FirstPartialAt.IsZero() {
+		v := ms(at.Sub(tn.FirstPartialAt))
+		firstPartialLeadMS = &v
+	}
+	if spec, ok := tn.Spec.(*Speculation); ok && spec != nil {
+		speculation = map[string]any{
+			"summary": spec.summaryOK,
+			"dry":     spec.intent,
+			"prewarm": spec.prewarm,
+			"reused":  spec.reused,
+		}
+	}
+	return partials, firstPartialLeadMS, speculation
 }
 
 func (r *routeRecorder) updateRing() {

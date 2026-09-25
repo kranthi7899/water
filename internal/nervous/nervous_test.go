@@ -294,6 +294,85 @@ func TestTier0WhileMainBlocked(t *testing.T) {
 	}
 }
 
+// TestPartialsNeverAnswer: 50 partials against the same client id never
+// produce any event on any stream and never write a route_log row — only
+// the eventual final transcript's own Handle call does either of those
+// (Design §11.5).
+func TestPartialsNeverAnswer(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, _ := nervousTestEnv(t)
+	n := nervousFor(t, reg, realClock{})
+
+	for i := 1; i <= 50; i++ {
+		if _, err := n.Partial(ctx, "never-answer", runtime.ChannelCLI, "what's on my calendar today", i); err != nil {
+			t.Fatalf("Partial #%d: %v", i, err)
+		}
+	}
+
+	if env.Store == nil {
+		t.Fatal("test setup: nil store")
+	}
+	rows, err := env.Store.ListRoutes(ctx, time.Time{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("route_log rows after 50 partials (no final turn) = %d, want 0", len(rows))
+	}
+}
+
+// TestNoDoubleAnswer: the final transcript matches Tier 0 exactly the same
+// way the speculative dry match already did, so Handle reuses the cached
+// answer — and, either way, exactly one done event is produced, never two,
+// regardless of whether reuse fired.
+func TestNoDoubleAnswer(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	if err := env.Store.Upsert(ctx, &store.Event{
+		Meta:    store.Meta{Source: "gcal", SourceID: "nda1", CreatedAt: tier0FixedNow},
+		Title:   "Board sync",
+		StartAt: tier0FixedNow.Add(2 * time.Hour),
+		EndAt:   tier0FixedNow.Add(3 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	table := turn.NewTable(func() time.Time { return tier0FixedNow })
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Turns: table, Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+		Speculation: true, Store: env.Store, ReadStore: env.Store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := n.Partial(ctx, "no-double", runtime.ChannelCLI, "what's on my calendar today", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []runtime.Event
+	var mu sync.Mutex
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar today", TaskID: "nda-final", ClientID: "no-double"}, collect(&events, &mu))
+
+	if fk.Calls() != 0 {
+		t.Fatalf("backend calls = %d, want 0", fk.Calls())
+	}
+	doneCount := 0
+	for _, e := range events {
+		if e.Kind == runtime.EventDone {
+			doneCount++
+		}
+	}
+	if doneCount != 1 {
+		t.Fatalf("done events = %d, want exactly 1", doneCount)
+	}
+	tn, ok := table.Get("nda-final")
+	if !ok || tn.State != turn.StateDone || tn.Owner != turn.OwnerQuick {
+		t.Fatalf("turn = %+v, want StateDone/OwnerQuick", tn)
+	}
+}
+
 // fakeClock is a controllable Clock for testing the ack timer without a
 // real sleep: AfterFunc records a pending callback, and Advance fires every
 // callback whose deadline has passed.

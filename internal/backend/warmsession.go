@@ -409,6 +409,49 @@ func (w *WarmSession) RunTurn(ctx context.Context, req Request, onDelta func(str
 	return resp, err
 }
 
+// Prewarm tries to get the session's subprocess ready ahead of a real turn
+// (internal/nervous/speculate.go's speculative prefetch), without ever
+// sending it a turn: it never writes to stdin, so it can never produce a
+// model reply, by construction — the only thing it calls is the same
+// process-launch portion of the startup path RunTurn itself uses (start),
+// never turnLocked's write-and-read loop.
+//
+// It try-acquires the one-slot semaphore without blocking:
+//   - ("busy", nil) if a real turn (or another Prewarm) already holds it, or
+//     the session is closed (daemon shutting down: never spawn a new
+//     process just to have it killed);
+//   - ("alive", nil) if a process is already live whose system prompt,
+//     model and tool-policy key already match req (the same needRestart
+//     check turnLocked uses to decide whether a real turn would restart);
+//   - ("started", nil) if it (re)started the process for req;
+//   - ("", err) if starting the process failed.
+func (w *WarmSession) Prewarm(ctx context.Context, req Request) (string, error) {
+	select {
+	case w.sem <- struct{}{}:
+	default:
+		return "busy", nil
+	}
+	defer w.release()
+
+	if w.closed {
+		return "busy", nil
+	}
+
+	needRestart := !w.live || w.system != req.System || (req.Model != "" && w.model != req.Model) ||
+		w.turns >= w.maxTurns() || w.toolsKey != toolsKey(req.Tools)
+	if !needRestart {
+		return "alive", nil
+	}
+
+	// Unconditional, exactly like turnLocked's own needRestart branch: a
+	// dead process can still hold policy files and an unreaped handle.
+	w.killLocked()
+	if err := w.start(ctx, req); err != nil {
+		return "", err
+	}
+	return "started", nil
+}
+
 // turnLocked runs one turn with the session held. rejected is non-empty
 // (the CLI's error text) when the turn failed only because the CLI rejected
 // req.Model, before any delta was delivered, so the caller can retry it

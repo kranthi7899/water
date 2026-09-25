@@ -255,6 +255,35 @@ func (t *Table) Get(id string) (Turn, bool) {
 	return *tn, true
 }
 
+// SetSpec attaches (or clears, with a nil spec) speculative work to a turn
+// this table still knows about, keyed by whatever id the caller currently
+// addresses it by (clientID while listening; the daemon task id from Final
+// onward — Final reindexes the same *Turn under that id, carrying Spec over
+// automatically). A caller naming a turn id the table has no record of is a
+// silent no-op: speculate.go's own background work (package nervous) must
+// never fail a request over a turn that has already expired or been
+// forgotten.
+func (t *Table) SetSpec(id string, spec any) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if tn, ok := t.turns[id]; ok {
+		tn.Spec = spec
+	}
+}
+
+// GetSpec returns whatever speculative work (Turn.Spec's own doc comment)
+// is currently attached to id, and whether the turn itself is still known
+// at all.
+func (t *Table) GetSpec(id string) (any, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	tn, ok := t.turns[id]
+	if !ok {
+		return nil, false
+	}
+	return tn.Spec, true
+}
+
 // Emitter returns a function that delivers an event only while o currently
 // owns id, dropping (and counting) anything else:
 //   - OwnerRouter may emit only while the turn is StateFinal, or

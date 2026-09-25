@@ -108,9 +108,10 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		// is nothing to answer from or to taint.
 		MeetingID string `json:"meeting_id"`
 		// TurnID, if the client already posted partial transcripts under it
-		// (POST /v1/turns/{id}/partial, a later task), correlates this final
-		// turn with that speculative work. Accepted now so a forward-looking
-		// client doesn't 400; nothing reads it yet.
+		// (POST /v1/turns/{id}/partial), correlates this final turn with
+		// that speculative work (R-19: nervous.Turn.ClientID, so Handle can
+		// take over and, on a match, reuse any cached speculative answer).
+		// Empty is unchanged, existing behavior.
 		TurnID string `json:"turn_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -194,10 +195,11 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	env := d.turnEnv(taskID)
 
 	d.cfg.Nervous.Handle(ctx, env, nervous.Turn{
-		Channel: ch,
-		Text:    body.Prompt,
-		Context: meetingContext,
-		TaskID:  taskID,
+		Channel:  ch,
+		Text:     body.Prompt,
+		Context:  meetingContext,
+		TaskID:   taskID,
+		ClientID: strings.TrimSpace(body.TurnID),
 	}, sink.emit)
 }
 

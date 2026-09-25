@@ -18,19 +18,25 @@ type tier0Match struct {
 	intent   intents.Intent
 	literals int
 	args     reflex.Args
+	labels   map[string]string
 }
 
-// TryTier0 is the sous chef's deterministic first pass (Design §11.4 step
-// 3): match u against every live intent's templates, validate whatever
-// matches, and run the single most specific validated match's handler. It
-// takes no backend or model client at all, so a Tier 0 attempt can never
-// make a model call by construction.
+// matchOnly runs Tier 0's deterministic template match and validation
+// against every live candidate (Design §11.4 step 3, minus the final
+// step of actually running the winning handler): match u against every
+// live intent's templates, validate whatever matches through the same
+// Validate every quick tier uses, and pick the single most specific
+// validated match. It touches no store, no backend and no model client —
+// pure with respect to anything but reg/u/pending/now/ents — so both
+// TryTier0 (which then runs the winning handler) and speculate.go's dry
+// match (Design §11.5, which never runs anything through this package's own
+// say-so) can share the exact same matching logic instead of either one
+// reimplementing the loop.
 //
-// A nil result with a non-empty escalationReason (and nil err) means
-// "escalate, Tier 0 has no answer" — one of "no_match", "action_word",
-// "slot_unresolved" or "ambiguous_match". A non-nil result means Tier 0
-// answered. err is only ever the matched handler's own error.
-func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tmpl.Utterance, pending int, now time.Time, ents slots.Entities) (*render.Result, string, error) {
+// A false ok with a non-empty escalationReason means "no committed match" —
+// one of "no_match", "action_word", "slot_unresolved" or "ambiguous_match".
+// A true ok means exactly one most-specific candidate won.
+func matchOnly(reg *intents.Registry, u tmpl.Utterance, pending int, now time.Time, ents slots.Entities) (tier0Match, string, bool) {
 	shared := reg.Shared()
 	denyWords := wordSet(shared.DenyWords)
 
@@ -62,7 +68,7 @@ func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tm
 					}
 					return false
 				}
-				matches = append(matches, tier0Match{intent: v.Intent, literals: m.Literals, args: v.Args})
+				matches = append(matches, tier0Match{intent: v.Intent, literals: m.Literals, args: v.Args, labels: v.Labels})
 				return false // keep enumerating: a later, more specific match (or a competing intent) may still turn up
 			})
 		}
@@ -71,11 +77,11 @@ func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tm
 	if len(matches) == 0 {
 		switch {
 		case sawDenyReject:
-			return nil, "action_word", nil
+			return tier0Match{}, "action_word", false
 		case sawSlotReject:
-			return nil, "slot_unresolved", nil
+			return tier0Match{}, "slot_unresolved", false
 		default:
-			return nil, "no_match", nil
+			return tier0Match{}, "no_match", false
 		}
 	}
 
@@ -90,9 +96,34 @@ func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tm
 		}
 	}
 	if tie {
-		return nil, "ambiguous_match", nil
+		return tier0Match{}, "ambiguous_match", false
 	}
+	return top, "", true
+}
 
+// TryTier0 is the sous chef's deterministic first pass (Design §11.4 step
+// 3): match u against every live intent's templates, validate whatever
+// matches, and run the single most specific validated match's handler. It
+// takes no backend or model client at all, so a Tier 0 attempt can never
+// make a model call by construction.
+//
+// A nil result with a non-empty escalationReason (and nil err) means
+// "escalate, Tier 0 has no answer" — one of "no_match", "action_word",
+// "slot_unresolved" or "ambiguous_match". A non-nil result means Tier 0
+// answered. err is only ever the matched handler's own error.
+func TryTier0(ctx context.Context, reg *intents.Registry, deps reflex.Deps, u tmpl.Utterance, pending int, now time.Time, ents slots.Entities) (*render.Result, string, error) {
+	top, escReason, ok := matchOnly(reg, u, pending, now, ents)
+	if !ok {
+		return nil, escReason, nil
+	}
+	return runTier0Match(ctx, deps, top)
+}
+
+// runTier0Match runs the winning candidate's real reflex handler. Split out
+// from TryTier0 so a caller that already has a matchOnly result (Handle's
+// own speculation-reuse check, tier0.go's own TryTier0 above) never needs a
+// second copy of "look the handler up and run it."
+func runTier0Match(ctx context.Context, deps reflex.Deps, top tier0Match) (*render.Result, string, error) {
 	handler, ok := reflex.Table()[top.intent.Function]
 	if !ok {
 		// The registry loader already checks every read intent's function
