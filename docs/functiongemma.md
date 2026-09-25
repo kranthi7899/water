@@ -91,11 +91,23 @@ water model pull functiongemma --accept-gemma-terms
   `$WATER_HOME/models/functiongemma.gguf.part`, verifies its sha256 against a
   constant pinned in code, and only then renames it into place as
   `functiongemma.gguf`. A sha mismatch deletes the partial file and fails.
-- The exact GGUF source (Hugging Face repo, filename, revision) and its
-  sha256 are pinned as constants in `internal/nervous/sidecar/model.go`,
-  added in task R-17 of `docs/slices/R.md`'s task list, once that task
-  confirms which GGUF build (official or a pinned community conversion) is
-  actually available.
+- The exact GGUF source and its sha256 are pinned as constants in
+  `internal/nervous/sidecar/model.go`, confirmed live against the Hugging
+  Face API on 2026-09-24 (task R-17):
+  - Repo: [`ggml-org/functiongemma-270m-it-GGUF`](https://huggingface.co/ggml-org/functiongemma-270m-it-GGUF)
+    — Hugging Face's own llama.cpp/GGUF-conversion org, converted directly
+    from `google/functiongemma-270m-it`.
+  - File: `functiongemma-270m-it-q8_0.gguf` (~292 MB). The repo publishes
+    only two quantizations, `bf16` (~543 MB) and `q8_0`; `q8_0` is the
+    CPU-friendly pick — there is no lower (Q4/Q5/Q6) build here, and at
+    8-bit it is effectively lossless for a 270M-parameter model.
+  - Revision: `2566ce14aedfc14fdd0de955ba67346425e67126` (the repo's HEAD
+    commit at verification time).
+  - sha256: `83940d4dd9676710856f43523bed096164a595a96f6b34771610a03937de5270`,
+    read from the Hugging Face API's blobs listing
+    (`GET /api/models/ggml-org/functiongemma-270m-it-GGUF?blobs=true`) and
+    cross-checked against the `X-Linked-ETag` header on the file's
+    `resolve` redirect.
 - The daemon never starts the sidecar or attempts a download on its own;
   `water status` / `GET /v1/router` simply reports "model not found" when
   `router.tier1.enabled=true` but the file is absent.
