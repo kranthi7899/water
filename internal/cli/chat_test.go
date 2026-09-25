@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 
 	"water/internal/approvals"
 	"water/internal/audit"
@@ -14,6 +15,10 @@ import (
 	"water/internal/connectors/fake"
 	"water/internal/gate"
 	"water/internal/gateway"
+	"water/internal/nervous"
+	"water/internal/nervous/intents"
+	"water/internal/nervous/reflex"
+	"water/internal/nervous/render"
 	"water/internal/store"
 	"water/internal/twins"
 	"water/internal/vault"
@@ -68,7 +73,23 @@ func startTestDaemon(t *testing.T, fakeBackend *backend.Fake) {
 	if _, err := clients.EnsureCLI(); err != nil {
 		t.Fatal(err)
 	}
-	d := gateway.New(gateway.Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fakeBackend, Clients: clients, SocketPath: paths.SocketPath()})
+	// An empty intent registry (no twins/<id>/intents dir): Tier 0 never
+	// matches, so every turn flows to the main path exactly as it did
+	// before Slice R was wired in — Nervous.Handle has no nil-receiver
+	// fallback, so every gateway.Config needs a real *nervous.Nervous.
+	intentsReg, err := intents.LoadRegistry(fstest.MapFS{}, m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{})
+	if err != nil {
+		t.Fatalf("empty intent registry: %v", err)
+	}
+	cfg := nervous.DefaultConfig()
+	cfg.Registry = func() *intents.Registry { return intentsReg }
+	cfg.Style = render.DefaultStyle()
+	cfg.Store = st
+	nv, err := nervous.New(cfg)
+	if err != nil {
+		t.Fatalf("nervous.New: %v", err)
+	}
+	d := gateway.New(gateway.Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fakeBackend, Clients: clients, SocketPath: paths.SocketPath(), Nervous: nv})
 	srv := &http.Server{Handler: d.Mux()}
 	go srv.Serve(l)
 	t.Cleanup(func() { srv.Close() })
@@ -121,11 +142,17 @@ func TestChatCommandQuitAndClear(t *testing.T) {
 
 // TestChatTurnFastPathMakesNoProviderCalls used to prove
 // internal/runtime.FastPath answered "any pending approvals" with zero
-// model calls. Slice R's task R-12 deletes FastPath (its replacement,
-// internal/nervous's Tier 0, is not wired into the daemon's turn path until
-// task R-15) — until then, every turn goes through RunTurn's
-// ModelTurn-only compatibility path, so this now makes exactly one call.
-// This assertion should flip back to 0 once R-15 lands.
+// model calls, using hardcoded Go phrase-matching that worked against any
+// manifest. Slice R's Tier 0 (wired into handleTurn as of R-15) replaces
+// that with intent templates loaded from twins/<id>/intents/*.yaml — and
+// startTestDaemon's synthetic test manifest has no such directory, so its
+// *nervous.Nervous gets an empty registry (by design: a missing intents
+// directory is not an error) with nothing for "any pending approvals" to
+// match. The turn correctly escalates to the main path, making one call.
+// This is expected for this test's synthetic fixture, not a regression:
+// the real CEO registry's own equivalent coverage
+// (internal/nervous/intents.TestLegacyFastPathCases, built in R-9) proves
+// the genuine zero-call answer against the actual twins/ceo/intents files.
 func TestChatTurnFastPathMakesNoProviderCalls(t *testing.T) {
 	fb := backend.NewFake("fake")
 	startTestDaemon(t, fb)

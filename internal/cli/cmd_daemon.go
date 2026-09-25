@@ -20,7 +20,11 @@ import (
 	"water/internal/connectors/google/gapi"
 	"water/internal/gate"
 	"water/internal/gateway"
+	"water/internal/nervous"
+	"water/internal/nervous/intents"
+	"water/internal/nervous/turn"
 	"water/internal/runtime"
+	"water/internal/store"
 	watersync "water/internal/sync"
 	"water/internal/twins"
 )
@@ -37,6 +41,28 @@ func (a *App) daemonCmd() *cobra.Command {
 	}
 	c.AddCommand(a.daemonInstallCmd(), a.daemonUninstallCmd(), a.daemonTokenCmd())
 	return c
+}
+
+// daemonTaskControl satisfies reflex.TaskControl (control.stop's access to
+// in-flight-turn cancellation) by forwarding to *gateway.Daemon. It exists
+// only to break the construction order: *nervous.Nervous is built before
+// the *gateway.Daemon that owns the real task bookkeeping, since Nervous is
+// itself one of gateway.Config's fields. d is set once, right after
+// gateway.New returns.
+type daemonTaskControl struct{ d *gateway.Daemon }
+
+func (t *daemonTaskControl) Running() int {
+	if t.d == nil {
+		return 0
+	}
+	return t.d.RunningTasks()
+}
+
+func (t *daemonTaskControl) CancelAllExcept(taskID string) int {
+	if t.d == nil {
+		return 0
+	}
+	return t.d.CancelTasksExcept(taskID)
 }
 
 func (a *App) runDaemon(ctx context.Context) error {
@@ -92,11 +118,40 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// both see the same in-memory classification cache.
 	trigger := buildDecisionsTrigger(deps, sel.Backend)
 
+	// Slice R's sous chef reads through a separate read-only connection pool
+	// (Design §1(e)'s defense in depth: a write attempt fails at the SQLite
+	// level even if a reflex handler somehow tried one), opened on the same
+	// file the writer above already migrated.
+	readStore, err := store.OpenReadOnly(twinStorePath(deps.manifest.ID), 4)
+	if err != nil {
+		return exitWith(ExitError, fmt.Errorf("route read pool: %w", err))
+	}
+	defer readStore.Close()
+
+	// tc is a thin reflex.TaskControl adapter over the daemon's existing
+	// task-cancellation bookkeeping: it needs *gateway.Daemon, which doesn't
+	// exist until after *nervous.Nervous is built (Nervous itself is a
+	// gateway.Config field), so it's wired in two steps.
+	tc := &daemonTaskControl{}
+	nvCfg := nervous.DefaultConfig()
+	nvCfg.Registry = func() *intents.Registry { return deps.intents }
+	nvCfg.Style = deps.style
+	nvCfg.Turns = turn.NewTable(time.Now)
+	nvCfg.Store = deps.store
+	nvCfg.ReadStore = readStore
+	nvCfg.Tasks = tc
+	nv, err := nervous.New(nvCfg)
+	if err != nil {
+		return exitWith(ExitError, fmt.Errorf("nervous: %w", err))
+	}
+
 	d := gateway.New(gateway.Config{
 		Manifest: deps.manifest, Store: deps.store, Audit: deps.audit, Approvals: deps.approvals,
 		Gate: deps.gate, Registry: deps.registry, Backend: sel.Backend, Warm: warm, RoleMD: deps.roleMD,
 		Decisions: trigger, ProactiveCues: cfg.Meetings.ProactiveCues, Clients: clients, SocketPath: paths.SocketPath(),
+		Nervous: nv,
 	})
+	tc.d = d
 
 	// Every request context derives from baseCtx, which shutdown cancels
 	// first: http.Server.Shutdown alone never cancels in-flight handlers, so

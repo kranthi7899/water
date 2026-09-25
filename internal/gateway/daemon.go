@@ -25,6 +25,7 @@ import (
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/meetings"
+	"water/internal/nervous"
 	"water/internal/runtime"
 	"water/internal/store"
 	"water/internal/tools"
@@ -49,6 +50,12 @@ type Config struct {
 	// nil Decisions makes /v1/decisions report no cards and the morning
 	// brief's open-cards signal stay absent, rather than erroring.
 	Decisions *decisions.Trigger
+	// Nervous is Slice R's front door: handleTurn calls Nervous.Handle in
+	// place of runtime.RunTurn directly. Required — buildTwinDepsFS's
+	// intents.LoadRegistry never fails on a missing intents directory (an
+	// empty registry, per its own design), so a *nervous.Nervous can always
+	// be built, even for a twin with no twins/<id>/intents/*.yaml at all.
+	Nervous *nervous.Nervous
 	// ProactiveCues gates GET /v1/meetings/{id}/cues (docs/slices/M.md
 	// section 6, config key meetings.proactive_cues). Off by default: the
 	// endpoint still exists and always answers 200, just with an empty,
@@ -202,6 +209,9 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))
 	mux.Handle("POST /v1/meetings/{id}/stop", d.auth(d.handleMeetingStop))
 	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
+	mux.Handle("GET /v1/router", d.auth(d.handleRouterHealth))
+	mux.Handle("GET /v1/route/report", d.auth(d.handleRouteReport))
+	mux.Handle("GET /v1/voice/profile", d.auth(d.handleVoiceProfile))
 	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))
 	mux.Handle("POST /v1/twinlink/outbox", d.auth(d.handleTwinOutbox))
 	// Inbound twin messages are authenticated by a peer token only (a
@@ -268,6 +278,30 @@ func (d *Daemon) unregisterTask(id string) {
 	d.mu.Lock()
 	delete(d.tasks, id)
 	d.mu.Unlock()
+}
+
+// RunningTasks and CancelTasksExcept satisfy reflex.TaskControl, over the
+// same task-cancellation bookkeeping POST /v1/tasks/{id}/cancel already
+// uses, so control.stop cancels other in-flight turns through the one
+// existing mechanism rather than a second one.
+func (d *Daemon) RunningTasks() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.tasks)
+}
+
+func (d *Daemon) CancelTasksExcept(exceptID string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for id, cancel := range d.tasks {
+		if id == exceptID {
+			continue
+		}
+		cancel()
+		n++
+	}
+	return n
 }
 
 func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {

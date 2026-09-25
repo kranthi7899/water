@@ -74,6 +74,11 @@ type Config struct {
 	// through. Nil is accepted (route logging is then a no-op) so existing
 	// tests that don't care about it keep working unchanged.
 	Store *store.Store
+	// ReadStore is the read-only pool reflex handlers query through (Design
+	// §1(e)'s defense in depth: opened with store.OpenReadOnly, so a write
+	// attempt fails at the SQLite level). Nil falls back to Store, which
+	// keeps every pre-R-15 test (none of which set this) working unchanged.
+	ReadStore *store.Store
 	// Breaker configures Tier 0's circuit breaker (Design §11.4/§17).
 	Breaker BreakerConfig
 	// MissWindow bounds the possible-miss detection window (default 60s)
@@ -170,6 +175,20 @@ func (n *Nervous) ToolTracer() *ToolTracer {
 	return n.toolTracer
 }
 
+// Registry exposes the current intent registry snapshot, for a health
+// endpoint (GET /v1/router, R-15) to report inactive write intents and any
+// skipped learned-overlay files.
+func (n *Nervous) Registry() *intents.Registry {
+	return n.cfg.Registry()
+}
+
+// VoiceProfile exposes the loaded style's voice section, for GET
+// /v1/voice/profile (R-15): every client's TTS settings come from here, so
+// the twin's voice never differs by which tier answered.
+func (n *Nervous) VoiceProfile() render.VoiceStyle {
+	return n.cfg.Style.Voice()
+}
+
 func now(env runtime.Env) time.Time {
 	if env.Now != nil {
 		return env.Now()
@@ -182,10 +201,14 @@ func now(env runtime.Env) time.Time {
 // empty list (an unresolved person slot escalates, which is the safe
 // direction — it never treats a store error as "no such person exists").
 func (n *Nervous) entities(ctx context.Context, env runtime.Env, at time.Time) slots.Entities {
-	if env.Store == nil {
+	st := n.cfg.ReadStore
+	if st == nil {
+		st = env.Store
+	}
+	if st == nil {
 		return slots.Entities{}
 	}
-	people, err := env.Store.Senders(ctx, at.Add(-n.cfg.SenderWindow), n.cfg.SenderLimit)
+	people, err := st.Senders(ctx, at.Add(-n.cfg.SenderWindow), n.cfg.SenderLimit)
 	if err != nil {
 		return slots.Entities{}
 	}
@@ -202,8 +225,12 @@ func intentSummaries(reg *intents.Registry) []reflex.IntentSummary {
 }
 
 func (n *Nervous) deps(env runtime.Env, reg *intents.Registry, taskID string, at time.Time) reflex.Deps {
+	st := n.cfg.ReadStore
+	if st == nil {
+		st = env.Store
+	}
 	return reflex.Deps{
-		Store:     reflex.NewStoreView(env.Store),
+		Store:     reflex.NewStoreView(st),
 		Approvals: env.Approvals,
 		Brief: func(ctx context.Context, day string) (string, bool, bool, error) {
 			return runtime.CachedBrief(ctx, env, day)

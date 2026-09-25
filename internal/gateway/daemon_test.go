@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"water/internal/approvals"
@@ -20,11 +21,39 @@ import (
 	"water/internal/connectors/fake"
 	"water/internal/gate"
 	"water/internal/gate/permit"
+	"water/internal/nervous"
+	"water/internal/nervous/intents"
+	"water/internal/nervous/reflex"
+	"water/internal/nervous/render"
 	"water/internal/runtime"
 	"water/internal/store"
 	"water/internal/twins"
 	"water/internal/vault"
 )
+
+// testNervous builds the smallest real *nervous.Nervous a test harness
+// needs: an empty intent registry (no twins/<id>/intents dir — Tier 0 then
+// simply never matches, so every turn flows to the main path exactly as it
+// did before Slice R was wired in) and the compiled-in default style. Every
+// gateway test harness uses this rather than leaving Config.Nervous nil,
+// since Nervous.Handle has no nil-receiver fallback (nil is a genuine
+// programmer error, not "not configured").
+func testNervous(t *testing.T, m *twins.Manifest, st *store.Store) *nervous.Nervous {
+	t.Helper()
+	reg, err := intents.LoadRegistry(fstest.MapFS{}, m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{})
+	if err != nil {
+		t.Fatalf("empty intent registry: %v", err)
+	}
+	cfg := nervous.DefaultConfig()
+	cfg.Registry = func() *intents.Registry { return reg }
+	cfg.Style = render.DefaultStyle()
+	cfg.Store = st
+	n, err := nervous.New(cfg)
+	if err != nil {
+		t.Fatalf("nervous.New: %v", err)
+	}
+	return n
+}
 
 const testManifest = `
 id: test
@@ -203,7 +232,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := New(Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb, Clients: clients, SocketPath: "unused-in-http-tests.sock"})
+	d := New(Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb, Clients: clients, SocketPath: "unused-in-http-tests.sock", Nervous: testNervous(t, m, st)})
 	srv := httptest.NewServer(d.Mux())
 	t.Cleanup(srv.Close)
 	return &harness{d: d, srv: srv, token: tok, st: st, log: log, q: q, fake: fb, mail: mail, notes: nt, slow: sa, vault: v, dir: dir}
@@ -278,11 +307,17 @@ func TestTurnStreamsDeltasBeforeDone(t *testing.T) {
 
 // TestFastPathTurnMakesZeroProviderCalls used to prove
 // internal/runtime.FastPath answered "any pending approvals" with zero
-// model calls. Slice R's task R-12 deletes FastPath (its replacement,
-// internal/nervous's Tier 0, is not wired into handleTurn until task R-15)
-// — until then, every turn goes through RunTurn's ModelTurn-only
-// compatibility path, so this now makes exactly one call. This assertion
-// should flip back to 0 once R-15 lands.
+// model calls, using hardcoded Go phrase-matching that worked against any
+// manifest. Slice R's Tier 0 (wired into handleTurn as of R-15) replaces
+// that with intent templates loaded from twins/<id>/intents/*.yaml — and
+// newHarness's synthetic testManifest has no such directory, so its
+// *nervous.Nervous gets an empty registry (by design: a missing intents
+// directory is not an error) with nothing for "any pending approvals" to
+// match. The turn correctly escalates to the main path, making one call.
+// This is expected for this test's synthetic fixture, not a regression:
+// the real CEO registry's own equivalent coverage
+// (internal/nervous/intents.TestLegacyFastPathCases, built in R-9) proves
+// the genuine zero-call answer against the actual twins/ceo/intents files.
 func TestFastPathTurnMakesZeroProviderCalls(t *testing.T) {
 	h := newHarness(t)
 	resp := h.post(t, "/v1/turns", `{"channel":"cli","prompt":"any pending approvals"}`, h.token)
@@ -291,7 +326,7 @@ func TestFastPathTurnMakesZeroProviderCalls(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 	if h.fake.Calls() != 1 {
-		t.Fatalf("provider calls = %d, want 1 (no fast path is wired into handleTurn until Slice R's R-15)", h.fake.Calls())
+		t.Fatalf("provider calls = %d, want 1 (this harness's manifest has no intents directory, so Tier 0 has nothing to match)", h.fake.Calls())
 	}
 }
 

@@ -75,6 +75,35 @@ severity_weight: 1
 // buildTwinDepsFS's success path goes on to open the real ~/.water store,
 // which a unit test must not touch.
 
+// TestBuildTwinDepsFSFailsLoudlyOnBadIntentFile is R-15's own version of the
+// same rule (Design §5.3, mirroring decisions.LoadRegistry): a malformed
+// twins/<id>/intents/*.yaml must stop startup before the store or audit log
+// ever opens, exactly like a bad twin.yaml or decisions file does.
+func TestBuildTwinDepsFSFailsLoudlyOnBadIntentFile(t *testing.T) {
+	fsys := fstest.MapFS{
+		"twins/ceo/twin.yaml":            &fstest.MapFile{Data: []byte(minimalCEOManifestYAML)},
+		"twins/ceo/intents/_shared.yaml": &fstest.MapFile{Data: []byte("skip_words: [please]\n")},
+		// "kind" is not a recognized key on an Intent (strict decode); this
+		// must fail to parse, not be silently dropped.
+		"twins/ceo/intents/broken.yaml": &fstest.MapFile{Data: []byte(`
+id: broken.intent
+description: A malformed intent
+kynd: read
+function: store.something
+templates: ["do the thing"]
+tests:
+  - {utterance: "do the thing", intent: broken.intent}
+`)},
+	}
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "", "")
+	if err == nil {
+		t.Fatal("buildTwinDepsFS: expected an error from a malformed intent file, got nil")
+	}
+	if !strings.Contains(err.Error(), "intent registry") {
+		t.Fatalf("buildTwinDepsFS error = %q, want it to name the intent registry", err.Error())
+	}
+}
+
 // TestDemoTwinNeverTouchesRealStore is the review finding: the demo twin's
 // fake GitHub/Linear/HubSpot records (and its cards and classification
 // cache) used to be upserted into the real twin's ~/.water/water.db. Under a

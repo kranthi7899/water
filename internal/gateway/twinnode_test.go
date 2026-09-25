@@ -97,7 +97,7 @@ func newTwinNode(t *testing.T, id string) *twinNode {
 		t.Fatal(err)
 	}
 	fb := backend.NewFake("fake")
-	d := New(Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb, Clients: clients, SocketPath: paths.SocketPath()})
+	d := New(Config{Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb, Clients: clients, SocketPath: paths.SocketPath(), Nervous: testNervous(t, m, st)})
 	l, unlock, err := Listen(paths)
 	if err != nil {
 		t.Fatal(err)

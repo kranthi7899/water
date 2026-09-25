@@ -228,11 +228,16 @@ func TestTurnWithMeetingIDTaintsEvenWithNoSegmentsYet(t *testing.T) {
 // TestTurnWithUnknownMeetingIDIsIgnored: a stale or mistyped meeting_id must
 // not fail the turn or taint it — nothing was actually pulled in. The
 // provider-call count itself used to be 0 (internal/runtime.FastPath
-// answered "any pending approvals" directly); Slice R's task R-12 deletes
-// FastPath, and its replacement (internal/nervous's Tier 0) isn't wired
-// into handleTurn until task R-15, so this now makes exactly one call. That
-// part of the assertion should flip back to 0 once R-15 lands — the taint
-// check below is this test's real invariant and is unaffected either way.
+// answered "any pending approvals" directly via hardcoded Go matching that
+// worked against any manifest); Slice R's Tier 0 (wired into handleTurn as
+// of R-15) replaces that with intent templates loaded from
+// twins/<id>/intents/*.yaml, and newHarness's synthetic testManifest has no
+// such directory — its *nervous.Nervous gets an empty registry (by design)
+// with nothing to match, so the turn correctly escalates to the main path,
+// making one call. The real CEO registry's equivalent coverage
+// (internal/nervous/intents.TestLegacyFastPathCases, R-9) proves the
+// genuine zero-call answer. The taint check below is this test's real
+// invariant and is unaffected either way.
 func TestTurnWithUnknownMeetingIDIsIgnored(t *testing.T) {
 	h := newHarness(t)
 	resp := h.post(t, "/v1/turns", `{"channel":"cli","prompt":"any pending approvals","meeting_id":"mtg_does_not_exist"}`, h.token)
@@ -241,7 +246,7 @@ func TestTurnWithUnknownMeetingIDIsIgnored(t *testing.T) {
 		t.Fatalf("events = %+v", events)
 	}
 	if h.fake.Calls() != 1 {
-		t.Fatalf("provider calls = %d, want 1 (no fast path is wired into handleTurn until Slice R's R-15)", h.fake.Calls())
+		t.Fatalf("provider calls = %d, want 1 (this harness's manifest has no intents directory, so Tier 0 has nothing to match)", h.fake.Calls())
 	}
 	if got := h.sessionTaint(t); got != gate.Clean {
 		t.Fatalf("taint = %v, want clean: an unknown meeting_id pulls in nothing to taint", got)

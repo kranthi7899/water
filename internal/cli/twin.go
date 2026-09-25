@@ -22,6 +22,9 @@ import (
 	"water/internal/connectors/linear"
 	"water/internal/decisions"
 	"water/internal/gate"
+	"water/internal/nervous/intents"
+	"water/internal/nervous/reflex"
+	"water/internal/nervous/render"
 	"water/internal/store"
 	"water/internal/twinlink"
 	"water/internal/twins"
@@ -110,6 +113,8 @@ type twinDeps struct {
 	registry  *connectors.Registry
 	vault     vault.Vault
 	decisions *decisions.Registry
+	intents   *intents.Registry
+	style     *render.Style
 	roleMD    string
 }
 
@@ -199,6 +204,9 @@ func loadTwinManifest(fsys fs.FS, id, mailAddress, signatureName, githubRepo str
 	if _, err := decisions.LoadRegistry(fsys, m); err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
+	if _, err := intents.LoadRegistry(fsys, m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{}); err != nil {
+		return nil, fmt.Errorf("intent registry: %w", err)
+	}
 	reg, err := buildCEORegistry(id, nil, mailAddress, signatureName, githubRepo)
 	if err != nil {
 		return nil, err
@@ -235,6 +243,19 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 	if err != nil {
 		return nil, fmt.Errorf("decision registry: %w", err)
 	}
+	// The intent registry loads and validates the same way, before anything
+	// else opens: a bad twins/<id>/intents/*.yaml must stop the daemon here,
+	// not surface later as a Tier 0 that silently never matches anything.
+	intentsReg, err := intents.LoadRegistry(fsys, m, intents.Functions{Read: reflex.Specs()}, intents.LoadOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("intent registry: %w", err)
+	}
+	// A missing twins/<id>/style.yaml is not an error (render.DefaultStyle()),
+	// so this only ever fails on a malformed file.
+	style, err := render.LoadStyle(fsys, id)
+	if err != nil {
+		return nil, fmt.Errorf("style: %w", err)
+	}
 	st, err := store.Open(twinStorePath(id))
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
@@ -261,7 +282,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 		st.Close()
 		return nil, err
 	}
-	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, roleMD: loadRoleMD(id)}, nil
+	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, intents: intentsReg, style: style, roleMD: loadRoleMD(id)}, nil
 }
 
 // buildDecisionsTrigger wires internal/decisions' classification-trigger

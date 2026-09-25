@@ -102,6 +102,7 @@ func newEmailTestDaemonWith(t *testing.T, manifest string) (*Daemon, string, *ap
 	d := New(Config{
 		Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb,
 		Decisions: trigger, Clients: clients, SocketPath: "unused-in-http-tests.sock",
+		Nervous: testNervous(t, m, st),
 	})
 	return d, tok, q, st
 }

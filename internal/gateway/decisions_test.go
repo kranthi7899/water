@@ -104,6 +104,7 @@ func TestGetDecisionsProducesAGenericCardThroughTheRealPath(t *testing.T) {
 	d := New(Config{
 		Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: fb,
 		Decisions: trigger, Clients: clients, SocketPath: "unused-in-http-tests.sock",
+		Nervous: testNervous(t, m, st),
 	})
 	srv := httptest.NewServer(d.Mux())
 	t.Cleanup(srv.Close)
