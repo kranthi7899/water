@@ -240,10 +240,23 @@ on disk, and a recorded live eval (`water route eval --tier1`) shows a
 false-accept rate ≤ 1%, a Wilson 95% upper bound ≤ 2%, at least 200 (in
 practice ≥ 400) cases, and a warm p95 latency ≤ 400ms — all matching the
 current model sha256 and the current registry hash. `GET /v1/router`
-reports which of those checks is failing when Tier 1 stays off. As of this
-build, the eval mechanism is implemented and unit-tested but has never
-been run against the real model+sidecar (no model/network access in the
-implementation sandbox) — see `docs/known-gaps.md`.
+reports which of those checks is failing when Tier 1 stays off.
+
+Run for real during Slice R's Phase 4 verification (`docs/slices/
+R-verification.md`): a live `water model pull functiongemma
+--accept-gemma-terms` plus `water route eval --tier1` against the real
+Homebrew `llama-server` sidecar surfaced that `llama-server` never
+populates the OpenAI-style structured `tool_calls` field for this model —
+the parser only read that field, so every real answer was silently
+discarded and Tier 1 had never actually answered anything. Fixed (a raw
+`<start_function_call>...` text-format fallback parser, plus a
+request-level stop sequence that also cut latency 7-10x). The honest
+post-fix numbers still fail the gate — a real 2.2% false-accept rate
+(Wilson 95% upper 4.1%) and 558ms warm p95, both outside threshold — so
+Tier 1 correctly stays off, now for legitimate reasons. See
+`docs/known-gaps.md`'s Slice R section for the full story and what a
+follow-up pass would need to try (a Metal-accelerated build; this Mac's
+Homebrew bottle is CPU-only).
 
 ## Background plane
 

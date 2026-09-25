@@ -128,3 +128,31 @@ never answers a real turn until a recorded live evaluation (`water route eval
 `GET /v1/router` reports which of these is unmet (`eval_missing`,
 `eval_stale`, or `eval_failed`) whenever Tier 1 is configured on but not
 actually serving answers.
+
+## What actually happens when you pull and eval it (2026-09-25)
+
+Run for real during Slice R's Phase 4 verification (`docs/slices/
+R-verification.md`), not just simulated — `water model pull functiongemma
+--accept-gemma-terms` and `water route eval --tier1` against a real,
+owner-approved Homebrew `llama-server` sidecar. Two things worth knowing
+before you try this yourself:
+
+- **This Mac's Homebrew `llama.cpp` bottle is CPU-only.** `otool -L` on
+  `libggml-base.dylib` shows only `libSystem`/`libomp`/`libc++` — no
+  `Metal.framework` linkage, no GPU acceleration at all. That's a property
+  of the bottle, not of `llama-server`'s flags: no combination of startup
+  flags turns on hardware acceleration that isn't compiled in. A
+  from-source build with `-DGGML_METAL=ON` would very likely help a lot,
+  but that's a different decision than "the Homebrew bottle," which is
+  what was approved.
+- **The gate correctly keeps Tier 1 off, for a real reason.** The first
+  eval run looked like a pure latency problem (0% false accepts, 1313ms
+  p95) — but that "0%" was vacuously true: a parsing bug
+  (`internal/nervous/t1/client.go` only read a wire field `llama-server`
+  never populates for this model) meant Tier 1 had never actually
+  answered anything. Fixed (see `docs/known-gaps.md`'s Slice R section for
+  the detail) — the honest re-run shows Tier 1 genuinely answering, with a
+  real 2.2% false-accept rate and a 558ms p95, both still outside
+  threshold. Expect roughly these numbers if you re-run the eval on
+  similar (CPU-only, 8GB M-series) hardware; they are not a fluke of one
+  run.
