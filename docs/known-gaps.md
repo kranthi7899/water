@@ -60,6 +60,27 @@ checked for it. Not fixed here: broadening the test's file glob to cover
 every sous package's directory is a small, independent change that belongs
 to whichever task next touches this test, not silently folded into R-20.
 
+## Slice R: `approvals.respond`'s single-pending render has no real read-back text
+
+`bindPendingHandler` (`internal/nervous/reflex/handlers.go`, R-8) returns
+`Result{Kind: "decision", ApprovalID: e.ID}` for exactly one pending
+envelope, with no `Text` and no `Interpretation`. `style.yaml`'s
+`approvals.respond` entry has a `header` ("Approval:") and only an `empty`
+template ("Nothing is waiting for approval."), no `item`. Since the Result
+has no `Text` and no `Items`, `render.Style.Render` always falls through to
+the `empty` template — so on any channel, with the flag off, a bare "yes"
+against one pending envelope currently renders as "Approval:\nNothing is
+waiting for approval.", which reads as if nothing were pending even though
+something is. Found while building R-21 (voice approval binding), which
+requires this pre-R-21 behavior to stay byte-identical when
+`router.voice_approve.enabled` is off, so it was not fixed here. R-21's own
+voice-approval-enabled path does not have this problem (it renders
+`approvals.ReadBack(envelope)` directly instead of going through this
+Result/template path at all). Fixing the general case means either giving
+`bindPendingHandler` a real summary `Text` or adding an `item`/better
+`empty` template that reflects a bound envelope — a small, independent
+change for whichever task next touches this handler's rendering.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
