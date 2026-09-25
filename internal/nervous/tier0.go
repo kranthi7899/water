@@ -138,7 +138,35 @@ func runTier0Match(ctx context.Context, deps reflex.Deps, top tier0Match, wh wri
 	if err != nil {
 		return nil, "", err
 	}
+	// Overwrite whatever intent id the handler itself reported
+	// (internal/nervous/reflex/handlers.go's handlers each hardcode their
+	// own canonical embedded intent name, e.g. "schedule.on_date", since
+	// before learned intents existed exactly one intent ever targeted a
+	// given function). top.intent.ID is the REGISTRY's own record of which
+	// intent actually matched — embedded or, since R-23, learned, reusing
+	// the very same handler — and is the only value route_log attribution
+	// (intent/intent_origin, the auto-demotion hook) and style rendering
+	// (a learned intent's own response phrasing, keyed by id) can trust.
+	result.Intent = top.intent.ID
 	return &result, "", nil
+}
+
+// DryMatch runs Tier 0's own deterministic matching logic (matchOnly) for
+// one utterance against reg, without ever running a handler. It is exported
+// specifically for internal/nervous/promote's ValidateLearned (R-23): a
+// draft intent's ambiguity and false-accept risk must be judged by the real
+// specificity/tie/deny-word rules Tier 0 itself applies, not a second,
+// parallel reimplementation of that logic. ok=false means no committed
+// match (reason is one of "no_match", "action_word", "slot_unresolved" or
+// "ambiguous_match"); ok=true means exactly one most-specific candidate won
+// (intentID/labels report it, reason is "").
+func DryMatch(reg *intents.Registry, utterance string, pending int, now time.Time, ents slots.Entities) (intentID string, labels map[string]string, reason string, ok bool) {
+	u := tmpl.Normalize(utterance, wordSet(reg.Shared().SkipWords))
+	top, reason, ok := matchOnly(reg, u, pending, now, ents)
+	if !ok {
+		return "", nil, reason, false
+	}
+	return top.intent.ID, top.labels, "", true
 }
 
 // denyWordHit reports whether any token the utterance contains is a

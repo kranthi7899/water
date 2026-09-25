@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -272,6 +273,37 @@ func (s *Store) QuickOnlyRoutes(ctx context.Context, since time.Time) ([]RouteRo
 func (s *Store) IntentAnswered(ctx context.Context, intent string, limit int) ([]RouteRow, error) {
 	q := `SELECT ` + routeRowColumns + ` FROM route_log WHERE intent = ? AND owner = 'quick' ORDER BY at DESC, id DESC LIMIT ?`
 	rows, err := s.db.QueryContext(ctx, q, intent, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RouteRow
+	for rows.Next() {
+		r, err := scanRouteRow(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RoutesByTurnIDs returns the route_log rows matching any of ids (order not
+// guaranteed), for the promotion loop's draft step to recover a candidate's
+// sample utterances (Design §16 item 2) from its Candidate.SampleTurnIDs.
+// An empty ids returns (nil, nil) without a query.
+func (s *Store) RoutesByTurnIDs(ctx context.Context, ids []string) ([]RouteRow, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT ` + routeRowColumns + ` FROM route_log WHERE turn_id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

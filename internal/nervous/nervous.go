@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"water/internal/nervous/intents"
@@ -143,7 +144,38 @@ type Config struct {
 	// Code default off (router.voice_approve.enabled); Approver must also
 	// be set for Enabled to take effect.
 	VoiceApprove VoiceApproveConfig
+
+	// Promotion configures the learned-intent growth loop's automatic
+	// demotion thresholds (Design §16 item 5, R-23). It has no effect on
+	// whether the learned overlay is ever loaded in the first place (that
+	// is router.promotion.enabled, applied where the registry is built,
+	// outside this package) — a twin with no learned intents active simply
+	// never has an IntentOrigin == "learned" row to demote.
+	Promotion PromotionConfig
+	// Logf receives one line per background error this package cannot
+	// surface to any turn (currently: automatic-demotion bookkeeping
+	// failures only, since that work runs after the turn it was triggered
+	// by has already finished). Nil is replaced with a no-op in New.
+	Logf func(format string, args ...any)
 }
+
+// PromotionConfig configures the growth loop's automatic-demotion
+// thresholds (Design §16 item 5 / §17: router.promotion.demote_min_samples,
+// router.promotion.demote_miss_rate_pct).
+type PromotionConfig struct {
+	// DemoteMinSamples and DemoteMissRatePct feed
+	// LearnedIntentShouldDemote (breaker.go) directly; <= 0 falls back to
+	// DefaultDemoteMinSamples/DefaultDemoteMissRatePct.
+	DemoteMinSamples  int
+	DemoteMissRatePct int
+}
+
+// DefaultDemoteMinSamples and DefaultDemoteMissRatePct are Design §17's
+// documented defaults for the automatic-demotion breaker.
+const (
+	DefaultDemoteMinSamples  = 10
+	DefaultDemoteMissRatePct = 20
+)
 
 // DefaultConfig returns Config with every flag/timing at its documented
 // default (Design §17). Registry, Style and Turns are left nil/zero — the
@@ -171,6 +203,13 @@ func DefaultConfig() Config {
 type Nervous struct {
 	cfg   Config
 	turns *turn.Table
+
+	// registryPtr is the live intent registry: an atomic.Pointer so a
+	// concurrent Handle always observes either the pre- or post-Reload
+	// registry in full, never a torn read. Seeded from Config.Registry() at
+	// construction; Reload (R-23: POST /v1/intents/reload, and the
+	// automatic-demotion hook in routelog.go) swaps it afterward.
+	registryPtr atomic.Pointer[intents.Registry]
 
 	ring         *reflexRing
 	tier0Breaker *Breaker
@@ -216,6 +255,9 @@ func New(cfg Config) (*Nervous, error) {
 	if cfg.VoiceApprove.Window <= 0 {
 		cfg.VoiceApprove.Window = DefaultVoiceApproveWindow
 	}
+	if cfg.Logf == nil {
+		cfg.Logf = func(string, ...any) {}
+	}
 	n := &Nervous{
 		cfg:        cfg,
 		turns:      cfg.Turns,
@@ -223,6 +265,7 @@ func New(cfg Config) (*Nervous, error) {
 		toolTracer: NewToolTracer(),
 		readbacks:  NewReadbacks(),
 	}
+	n.registryPtr.Store(cfg.Registry())
 	n.tier0Breaker = NewBreaker(cfg.Breaker, cfg.Clock)
 	// Tier 1 gets its own breaker instance (same config shape, independent
 	// state): a run of Tier 1 handler errors must not also silence Tier 0,
@@ -282,11 +325,32 @@ func (n *Nervous) QuickFunctions() []tools.QuickFunction {
 	return n.Quick().Functions()
 }
 
+// registry returns the live intent registry: whatever Reload last set, or
+// the one Config.Registry supplied at construction if Reload has never been
+// called. Every internal call site in this package reads through here (not
+// n.cfg.Registry() directly) so a reload actually takes effect immediately.
+func (n *Nervous) registry() *intents.Registry {
+	return n.registryPtr.Load()
+}
+
+// Reload atomically swaps in a freshly-built registry (POST
+// /v1/intents/reload, and the automatic-demotion hook in routelog.go,
+// R-23). A concurrent Handle always sees either the old or the new registry
+// in full, never a partially-updated one. reg == nil is ignored (a caller
+// mistake, not a valid "clear the registry" request — this package always
+// requires a non-nil registry, from New onward).
+func (n *Nervous) Reload(reg *intents.Registry) {
+	if reg == nil {
+		return
+	}
+	n.registryPtr.Store(reg)
+}
+
 // Registry exposes the current intent registry snapshot, for a health
 // endpoint (GET /v1/router, R-15) to report inactive write intents and any
 // skipped learned-overlay files.
 func (n *Nervous) Registry() *intents.Registry {
-	return n.cfg.Registry()
+	return n.registry()
 }
 
 // VoiceProfile exposes the loaded style's voice section, for GET
@@ -420,7 +484,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 		_ = n.turns.Done(id, doneOrCancelled(ctx))
 	}()
 
-	reg := n.cfg.Registry()
+	reg := n.registry()
 	u := tmpl.Normalize(t.Text, wordSet(reg.Shared().SkipWords))
 	pending := pendingCount(ctx, env)
 	deps := n.deps(env, reg, id, at)
@@ -532,12 +596,15 @@ func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runti
 	rec.answeredBy = tier
 	rec.intent = result.Intent
 	rec.intentKind = "read"
-	if it, ok := n.cfg.Registry().Lookup(result.Intent); ok && it.Kind == intents.KindWrite {
-		rec.intentKind = "write"
+	rec.intentOrigin = "embedded"
+	if it, ok := n.registry().Lookup(result.Intent); ok {
+		if it.Kind == intents.KindWrite {
+			rec.intentKind = "write"
+		}
+		if it.Origin == "learned" {
+			rec.intentOrigin = "learned"
+		}
 	}
-	// IntentOrigin ("embedded" vs "learned") has no meaning yet: the
-	// promotion loop that creates learned intents doesn't exist until
-	// R-22/23.
 	rec.outcome = quickOutcome(result)
 
 	if err := n.turns.Route(id, turn.OwnerQuick); err != nil {
@@ -753,7 +820,7 @@ func (n *Nervous) Partial(ctx context.Context, clientID string, ch runtime.Chann
 		return tn.State, nil
 	}
 
-	reg := n.cfg.Registry()
+	reg := n.registry()
 	u := tmpl.Normalize(text, wordSet(reg.Shared().SkipWords))
 	now := n.cfg.Clock.Now()
 

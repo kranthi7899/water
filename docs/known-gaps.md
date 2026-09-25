@@ -81,6 +81,47 @@ Result/template path at all). Fixing the general case means either giving
 `empty` template that reflects a bound envelope — a small, independent
 change for whichever task next touches this handler's rendering.
 
+## Slice R: an inactive/disabled intent never actually escalates with `intent_inactive:<id>`
+
+Design §5.4 (and `internal/nervous/report.go`'s own
+`InactiveIntentNearMiss` field, which aggregates
+`escalation_reason == "intent_inactive:<id>"` rows) documents that an
+utterance matching only a `Shadow()` intent (inactive, or — since R-23 —
+disabled) should escalate with that specific reason, so `water route
+report`/`GET /v1/router` can show "the CEO tried this N times." Found
+while building R-23: `matchOnly` (`internal/nervous/tier0.go`) only ever
+iterates `reg.Candidates()`, never `reg.Shadow()`, so a disabled or
+inactive intent's own templates are never tried at all — the utterance
+just falls through to `"no_match"` (or, for R-23's own auto-demoted
+learned intents, to the main path) like any other unrecognized turn, and
+`report.go`'s `intent_inactive:` aggregation has had nothing to ever
+find. R-23's own `TestLearnedAutoDemoted` only asserts that a demoted
+learned intent's next matching turn escalates to the main path (`Owner !=
+"quick"`), which holds regardless of this gap, so it does not block that
+task. Pre-existing since at least R-6/R-20 (inactive write intents), not
+introduced by R-23. Fixing it means giving `matchOnly` (or a caller of it)
+a second, Shadow()-only pass that runs only when the Candidates() pass
+found nothing, producing `"intent_inactive:<id>"` instead of `"no_match"`
+when exactly one Shadow() intent's templates match.
+
+## Slice R: `runTier0Match`/`TryTier1`'s handler-run previously mislabeled the answered intent
+
+Found and fixed while building R-23 (not left as a gap): every reflex
+handler in `internal/nervous/reflex/handlers.go` hardcodes its own
+`Result.Intent` (e.g. `store.calendar_events`'s handler always reports
+`"schedule.on_date"`), which was harmless before learned intents existed
+because exactly one embedded intent ever targeted a given function. Once a
+learned intent can wrap the very same handler, this hardcoded value
+silently misattributed the answer to the embedded intent instead — wrong
+`route_log.intent`/`intent_origin` (breaking the auto-demotion hook, which
+keys off intent id and origin) and wrong style-rendered response text (the
+embedded intent's phrasing instead of the learned one's). Fixed by having
+`runTier0Match` (`tier0.go`) and `TryTier1` (`tier1.go`) overwrite
+`result.Intent` with the registry's own matched intent id right after the
+handler returns, restoring the invariant `internal/nervous/actions.go`'s
+write-intent path already upheld correctly. Regression test:
+`TestAnswerQuickRecordsIntentOrigin` (`internal/nervous/promotion_test.go`).
+
 ## Slice R: `TestQuickInvokeTaintedResultEscalatesSession` is time-of-day flaky
 
 Found while building R-22 (pre-existing: reproduces identically on

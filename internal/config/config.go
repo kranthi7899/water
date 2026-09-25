@@ -35,10 +35,36 @@ type Config struct {
 }
 
 // RouterConfig configures Slice R's nervous-system router
-// (internal/nervous). Only the voice approval binding's flags exist so far
-// (R-21); the rest of docs/slices/R.md Design §17's keys land with R-25.
+// (internal/nervous). Only the voice approval binding's (R-21) and
+// promotion loop's (R-23) flags exist so far; the rest of
+// docs/slices/R.md Design §17's keys land with R-25.
 type RouterConfig struct {
 	VoiceApprove VoiceApproveConfig `yaml:"voice_approve"`
+	Promotion    PromotionConfig    `yaml:"promotion"`
+}
+
+// PromotionConfig gates the learned-intent growth loop (router.promotion.*,
+// code default off; docs/slices/R.md Design §16). Landed with this task
+// (R-23), ahead of R-25's bulk config commit, the same way R-21 landed
+// router.voice_approve.* early: the feature needs a real settable flag to
+// be testable end to end, and R-25 has not landed yet.
+type PromotionConfig struct {
+	// Enabled gates both drafting (`water intent draft`/POST
+	// /v1/intents/draft) and promoting (`water intent promote`) a learned
+	// intent, and whether intents.LoadOptions.Learned is ever populated at
+	// all (with it off, the overlay directory is never loaded, regardless
+	// of what it contains).
+	Enabled bool
+	// MinRepeats is `water route candidates`'s default --min (Design §16
+	// item 1). Candidate listing itself is never gated by Enabled.
+	MinRepeats int
+	// MaxLearned bounds how many learned intents may be simultaneously
+	// active (promote.ValidateLearned's cap).
+	MaxLearned int
+	// DemoteMissRatePct and DemoteMinSamples feed the automatic-demotion
+	// breaker (nervous.PromotionConfig, LearnedIntentShouldDemote).
+	DemoteMissRatePct int
+	DemoteMinSamples  int
 }
 
 // VoiceApproveConfig gates a bare voice yes/no directly deciding a pending
@@ -197,6 +223,11 @@ func defaults() map[string]string {
 		"router.voice_approve.enabled":          "false",
 		"router.voice_approve.window_seconds":   "60",
 		"router.voice_approve.internal_domains": "",
+		"router.promotion.enabled":              "false",
+		"router.promotion.min_repeats":          "5",
+		"router.promotion.max_learned":          "20",
+		"router.promotion.demote_miss_rate_pct": "20",
+		"router.promotion.demote_min_samples":   "10",
 	}
 }
 
@@ -320,6 +351,11 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Router.VoiceApprove.Enabled = abool("router.voice_approve.enabled")
 	r.Router.VoiceApprove.WindowSeconds = atoi("router.voice_approve.window_seconds")
 	r.Router.VoiceApprove.InternalDomains = flat["router.voice_approve.internal_domains"]
+	r.Router.Promotion.Enabled = abool("router.promotion.enabled")
+	r.Router.Promotion.MinRepeats = atoi("router.promotion.min_repeats")
+	r.Router.Promotion.MaxLearned = atoi("router.promotion.max_learned")
+	r.Router.Promotion.DemoteMissRatePct = atoi("router.promotion.demote_miss_rate_pct")
+	r.Router.Promotion.DemoteMinSamples = atoi("router.promotion.demote_min_samples")
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -336,11 +372,16 @@ func (r *Resolved) apply(flat map[string]string) error {
 var (
 	intKeys = map[string]bool{
 		"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true,
-		"router.voice_approve.window_seconds": true,
+		"router.voice_approve.window_seconds":   true,
+		"router.promotion.min_repeats":          true,
+		"router.promotion.max_learned":          true,
+		"router.promotion.demote_miss_rate_pct": true,
+		"router.promotion.demote_min_samples":   true,
 	}
 	boolKeys = map[string]bool{
 		"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true,
 		"router.voice_approve.enabled": true,
+		"router.promotion.enabled":     true,
 	}
 )
 
@@ -368,6 +409,11 @@ func (r *Resolved) Flat() map[string]string {
 		"router.voice_approve.enabled":          strconv.FormatBool(r.Router.VoiceApprove.Enabled),
 		"router.voice_approve.window_seconds":   strconv.Itoa(r.Router.VoiceApprove.WindowSeconds),
 		"router.voice_approve.internal_domains": r.Router.VoiceApprove.InternalDomains,
+		"router.promotion.enabled":              strconv.FormatBool(r.Router.Promotion.Enabled),
+		"router.promotion.min_repeats":          strconv.Itoa(r.Router.Promotion.MinRepeats),
+		"router.promotion.max_learned":          strconv.Itoa(r.Router.Promotion.MaxLearned),
+		"router.promotion.demote_miss_rate_pct": strconv.Itoa(r.Router.Promotion.DemoteMissRatePct),
+		"router.promotion.demote_min_samples":   strconv.Itoa(r.Router.Promotion.DemoteMinSamples),
 	}
 }
 

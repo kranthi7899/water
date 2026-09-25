@@ -166,11 +166,67 @@ func (r *routeRecorder) finish(ctx context.Context) {
 	id, err := r.n.cfg.Store.InsertRoute(logCtx, row)
 	if err == nil && hasPrev && r.n.isPossibleMiss(prev, r) {
 		_ = r.n.cfg.Store.MarkPossibleMiss(logCtx, prev.ID)
+		if prev.IntentOrigin == "learned" {
+			// Fire-and-forget: the turn that triggered this correction has
+			// already finished (finish itself runs from Handle's deferred
+			// cleanup, after every event for THIS turn was emitted), and the
+			// re-check below does a few more store reads plus, possibly, a
+			// SetIntentState write — none of it should add latency to
+			// whatever the next turn is doing. Errors are never silently
+			// dropped (Config.Logf), just never surfaced to any turn, since
+			// there is no turn left to tell.
+			go r.n.maybeAutoDemote(logCtx, prev.Intent)
+		}
 	}
 	_ = id
 
 	r.updateRing()
 	r.n.pruneRoutesOncePerDay(logCtx, now)
+}
+
+// autoDemoteSampleWindow bounds how many of a learned intent's most recent
+// answered rows the auto-demotion check looks at (Design §16 item 5: the
+// breaker's own IntentAnswered(id, 50) call).
+const autoDemoteSampleWindow = 50
+
+// maybeAutoDemote runs after a possible miss was just marked against one of
+// intent's own rows (finish, above), for a row whose IntentOrigin is
+// "learned": it re-checks that intent's recent miss rate
+// (LearnedIntentShouldDemote, R-14's pure breaker function, over
+// store.IntentAnswered's most recent autoDemoteSampleWindow rows) and, if it
+// has crossed the threshold, disables the intent (store.SetIntentState) and
+// atomically swaps in a registry clone with it marked disabled
+// (intents.Registry.WithDisabled) so the very next matching turn escalates
+// instead of answering — without waiting for a full on-disk reload (that is
+// a separate, heavier operation: POST /v1/intents/reload). Any error is
+// logged via Config.Logf, never silently dropped, and never reaches any
+// turn — there is nothing left to tell.
+func (n *Nervous) maybeAutoDemote(ctx context.Context, intent string) {
+	if n.cfg.Store == nil {
+		return
+	}
+	rows, err := n.cfg.Store.IntentAnswered(ctx, intent, autoDemoteSampleWindow)
+	if err != nil {
+		n.cfg.Logf("nervous: auto-demote: IntentAnswered(%s): %v", intent, err)
+		return
+	}
+	minSamples := n.cfg.Promotion.DemoteMinSamples
+	if minSamples <= 0 {
+		minSamples = DefaultDemoteMinSamples
+	}
+	maxRate := n.cfg.Promotion.DemoteMissRatePct
+	if maxRate <= 0 {
+		maxRate = DefaultDemoteMissRatePct
+	}
+	demote, reason := LearnedIntentShouldDemote(rows, minSamples, maxRate)
+	if !demote {
+		return
+	}
+	if err := n.cfg.Store.SetIntentState(ctx, intent, true, reason, n.cfg.Clock.Now()); err != nil {
+		n.cfg.Logf("nervous: auto-demote: SetIntentState(%s): %v", intent, err)
+		return
+	}
+	n.Reload(n.registry().WithDisabled(intent, reason))
 }
 
 // captureSpeculationFacts reads whatever turn.Table still knows about
@@ -250,7 +306,7 @@ func (n *Nervous) isPossibleMiss(prev store.RouteRow, cur *routeRecorder) bool {
 		return false
 	}
 
-	reg := n.cfg.Registry()
+	reg := n.registry()
 	if isCorrectionPhrase(cur.utterance, reg.Shared().Corrections) {
 		return true
 	}

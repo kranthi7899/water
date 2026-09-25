@@ -137,6 +137,16 @@ type Registry struct {
 	shared  Shared
 	hash    string
 	skipped []Skipped
+
+	// manifest, fns and schemaFn are the exact inputs this registry was
+	// built from, kept so a later single-file dry-run check
+	// (promote.ValidateLearned, R-23's ValidateAsOverlay/WithOverlay below)
+	// can re-run the identical cross-reference checks LoadRegistry itself
+	// applies, without its caller needing to thread fsys/manifest/fns
+	// through a second time.
+	manifest *twins.Manifest
+	fns      Functions
+	schemaFn func(action string) (SchemaInfo, bool)
 }
 
 // LoadOptions carries the pieces LoadRegistry needs that don't come from
@@ -177,7 +187,7 @@ func LoadRegistry(fsys fs.FS, m *twins.Manifest, fns Functions, opts LoadOptions
 	dir := path.Join("twins", m.ID, "intents")
 	if _, err := fs.Stat(fsys, dir); err != nil {
 		// No intents directory at all: every turn goes to the main path.
-		return &Registry{intents: map[string]Intent{}, shared: Shared{}}, nil
+		return &Registry{intents: map[string]Intent{}, shared: Shared{}, manifest: m, fns: fns, schemaFn: opts.Schema}, nil
 	}
 
 	files, err := fs.Glob(fsys, path.Join(dir, "*.yaml"))
@@ -207,7 +217,7 @@ func LoadRegistry(fsys fs.FS, m *twins.Manifest, fns Functions, opts LoadOptions
 		return nil, fmt.Errorf("intents: %s: %w", sharedFile, err)
 	}
 
-	r := &Registry{intents: map[string]Intent{}, shared: shared}
+	r := &Registry{intents: map[string]Intent{}, shared: shared, manifest: m, fns: fns, schemaFn: opts.Schema}
 	hashInputs := []hashEntry{{path: sharedFile, data: sharedBytes}}
 
 	for _, f := range intentFiles {
@@ -244,7 +254,7 @@ func LoadRegistry(fsys fs.FS, m *twins.Manifest, fns Functions, opts LoadOptions
 	}
 
 	if opts.Learned != nil {
-		learnedEntries := r.loadLearned(opts.Learned, m, fns, shared, opts)
+		learnedEntries := r.loadLearned(opts.Learned, opts)
 		hashInputs = append(hashInputs, learnedEntries...)
 	}
 
@@ -278,7 +288,7 @@ func computeHash(entries []hashEntry) string {
 // eligibility (Learnable-only, no ambiguity, no false accepts against the
 // eval negatives) is the promotion loop's job in a later task; this is
 // only the loader.
-func (r *Registry) loadLearned(learnedFS fs.FS, m *twins.Manifest, fns Functions, shared Shared, opts LoadOptions) []hashEntry {
+func (r *Registry) loadLearned(learnedFS fs.FS, opts LoadOptions) []hashEntry {
 	files, err := fs.Glob(learnedFS, "*.yaml")
 	if err != nil {
 		r.skipped = append(r.skipped, Skipped{File: "*", Reason: err.Error()})
@@ -292,25 +302,8 @@ func (r *Registry) loadLearned(learnedFS fs.FS, m *twins.Manifest, fns Functions
 			r.skipped = append(r.skipped, Skipped{File: f, Reason: err.Error()})
 			continue
 		}
-		it, err := parseIntent(b)
+		it, err := r.addLearnedFile(b, f)
 		if err != nil {
-			r.skipped = append(r.skipped, Skipped{File: f, Reason: err.Error()})
-			continue
-		}
-		it.File = f
-		if it.Origin != "learned" {
-			r.skipped = append(r.skipped, Skipped{File: f, Reason: "origin must be \"learned\" in an overlay file"})
-			continue
-		}
-		if !learnedIDRe.MatchString(it.ID) {
-			r.skipped = append(r.skipped, Skipped{File: f, Reason: fmt.Sprintf("id %q must start with \"learned.\"", it.ID)})
-			continue
-		}
-		if _, collide := r.intents[it.ID]; collide {
-			r.skipped = append(r.skipped, Skipped{File: f, Reason: fmt.Sprintf("id %q collides with an embedded intent; embedded wins", it.ID)})
-			continue
-		}
-		if err := validateAndCompile(&it, m, fns, shared, opts.Schema); err != nil {
 			r.skipped = append(r.skipped, Skipped{File: f, Reason: err.Error()})
 			continue
 		}
@@ -322,6 +315,103 @@ func (r *Registry) loadLearned(learnedFS fs.FS, m *twins.Manifest, fns Functions
 		loaded = append(loaded, hashEntry{path: "learned/" + f, data: b})
 	}
 	return loaded
+}
+
+// addLearnedFile parses and validates b as one learned-overlay intent file
+// against r's own manifest, function tables and shared config — the exact
+// per-file rules loadLearned applies to every real overlay file (origin,
+// id prefix, embedded/learned id collision, then the full LoadRegistry
+// cross-reference via validateAndCompile) — but never adds it to r.intents
+// or r.order, and never mutates r. name is used only for the returned
+// Intent's File field and in error messages. Shared by loadLearned (which
+// commits the result on success) and ValidateAsOverlay (a pure dry run for
+// promote.ValidateLearned, R-23).
+func (r *Registry) addLearnedFile(b []byte, name string) (Intent, error) {
+	it, err := parseIntent(b)
+	if err != nil {
+		return Intent{}, err
+	}
+	it.File = name
+	if it.Origin != "learned" {
+		return Intent{}, fmt.Errorf("origin must be \"learned\" in an overlay file")
+	}
+	if !learnedIDRe.MatchString(it.ID) {
+		return Intent{}, fmt.Errorf("id %q must start with \"learned.\"", it.ID)
+	}
+	if _, collide := r.intents[it.ID]; collide {
+		return Intent{}, fmt.Errorf("id %q collides with an embedded intent; embedded wins", it.ID)
+	}
+	if err := validateAndCompile(&it, r.manifest, r.fns, r.shared, r.schemaFn); err != nil {
+		return Intent{}, err
+	}
+	return it, nil
+}
+
+// ValidateAsOverlay is addLearnedFile exposed for promote.ValidateLearned
+// (R-23): it runs the exact same per-file rules a real learned-overlay load
+// applies — YAML schema, origin/id-prefix, embedded/learned id collision,
+// and the full manifest/function/schema cross-reference — as a pure read.
+// Nothing is added to r, and r is never mutated.
+func (r *Registry) ValidateAsOverlay(fileBytes []byte) (Intent, error) {
+	return r.addLearnedFile(fileBytes, "draft.yaml")
+}
+
+// WithOverlay returns a shallow clone of r with it added as if it were one
+// more already-loaded learned intent. promote.ValidateLearned (R-23) uses
+// this to run the real Tier 0 matcher (nervous.DryMatch) against a registry
+// that includes a draft, to check its ambiguity and false-accept risk,
+// without ever mutating or being confused with the live registry Nervous is
+// currently matching real turns against.
+func (r *Registry) WithOverlay(it Intent) *Registry {
+	clone := &Registry{
+		intents:  make(map[string]Intent, len(r.intents)+1),
+		order:    append(append([]string{}, r.order...), it.ID),
+		shared:   r.shared,
+		manifest: r.manifest,
+		fns:      r.fns,
+		schemaFn: r.schemaFn,
+	}
+	for k, v := range r.intents {
+		clone.intents[k] = v
+	}
+	clone.intents[it.ID] = it
+	return clone
+}
+
+// WithDisabled returns a shallow clone of r with id's Disabled field set to
+// reason ("" clears it), everything else shared unchanged — no re-parsing,
+// no re-compiling of templates. The automatic-demotion hook
+// (internal/nervous/routelog.go, R-23) uses this: it already knows the
+// outcome of a store.SetIntentState write and wants Candidates() to reflect
+// it on the very next turn, without waiting for a full LoadRegistry rebuild
+// from disk (that happens separately, on demand, via POST
+// /v1/intents/reload).
+func (r *Registry) WithDisabled(id, reason string) *Registry {
+	clone := &Registry{
+		intents:  make(map[string]Intent, len(r.intents)),
+		order:    r.order,
+		shared:   r.shared,
+		hash:     r.hash,
+		skipped:  r.skipped,
+		manifest: r.manifest,
+		fns:      r.fns,
+		schemaFn: r.schemaFn,
+	}
+	for k, v := range r.intents {
+		clone.intents[k] = v
+	}
+	if it, ok := clone.intents[id]; ok {
+		it.Disabled = reason
+		clone.intents[id] = it
+	}
+	return clone
+}
+
+// ReadSpec returns the FunctionSpec a read intent's function id resolves
+// to, from the same fns.Read this registry was loaded against.
+func (r *Registry) ReadSpec(function string) (FunctionSpec, bool) {
+	s, ok := r.fns.Read[function]
+	return s, ok
 }
 
 // splitNotes separates the YAML header from the notes body after a line

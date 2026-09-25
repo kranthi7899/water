@@ -205,6 +205,43 @@ func TestQuickOnlyRoutesFilters(t *testing.T) {
 	}
 }
 
+func TestRoutesByTurnIDs(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	for i, id := range []string{"turn-a", "turn-b", "turn-c"} {
+		r := sampleRoute(id, ts(10+i))
+		r.Utterance = "utterance for " + id
+		if _, err := s.InsertRoute(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.RoutesByTurnIDs(ctx, []string{"turn-a", "turn-c", "turn-does-not-exist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("RoutesByTurnIDs = %d rows, want 2: %v", len(rows), rowIDs(rows))
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.TurnID] = true
+	}
+	if !got["turn-a"] || !got["turn-c"] {
+		t.Fatalf("RoutesByTurnIDs = %v, want turn-a and turn-c", rowIDs(rows))
+	}
+}
+
+func TestRoutesByTurnIDsEmpty(t *testing.T) {
+	s, _ := openTemp(t)
+	rows, err := s.RoutesByTurnIDs(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("RoutesByTurnIDs(nil) = %v, want none", rows)
+	}
+}
+
 func TestIntentAnsweredRecent(t *testing.T) {
 	s, _ := openTemp(t)
 	ctx := context.Background()

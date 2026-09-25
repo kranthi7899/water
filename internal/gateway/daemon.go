@@ -66,6 +66,27 @@ type Config struct {
 	// SocketPath is this daemon's own socket, handed to the twin-mode MCP
 	// bridge so a model-initiated tool call can reach back in.
 	SocketPath string
+
+	// Home is $WATER_HOME, used only to locate the promotion loop's
+	// pending/learned intent directories (POST /v1/intents/draft, R-23).
+	Home string
+	// PromotionEnabled mirrors router.promotion.enabled: it gates both
+	// POST /v1/intents/draft and (once R-26 builds it) `water intent
+	// promote`, exactly like drafting/promoting are gated everywhere else
+	// in Design §16 item 2 ("Draft (flag on)"). Candidate listing (GET
+	// /v1/route/candidates, R-22) is never gated by this.
+	PromotionEnabled bool
+	// MaxLearned bounds promote.ValidateLearned's active-learned-intent
+	// cap; <= 0 uses promote.DefaultMaxLearned.
+	MaxLearned int
+	// ReloadIntents rebuilds the twin's intents registry from its current
+	// on-disk state (the embedded intent files, the learned overlay
+	// directory when PromotionEnabled, and the store's intent_state table)
+	// and atomically swaps it into Nervous (POST /v1/intents/reload,
+	// Design §5.4's last paragraph). Nil only in tests that don't exercise
+	// the endpoint; a real daemon always sets it
+	// (internal/cli/cmd_daemon.go's daemonIntentsReloader).
+	ReloadIntents func(ctx context.Context) error
 }
 
 // turnAuth is what a tool-proxy token grants: an origin and a taint. In
@@ -227,6 +248,8 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/router", d.auth(d.handleRouterHealth))
 	mux.Handle("GET /v1/route/report", d.auth(d.handleRouteReport))
 	mux.Handle("GET /v1/route/candidates", d.auth(d.handleRouteCandidates))
+	mux.Handle("POST /v1/intents/draft", d.auth(d.handleIntentsDraft))
+	mux.Handle("POST /v1/intents/reload", d.auth(d.handleIntentsReload))
 	mux.Handle("GET /v1/voice/profile", d.auth(d.handleVoiceProfile))
 	mux.Handle("POST /v1/turns/{id}/partial", d.auth(d.handleTurnPartial))
 	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))

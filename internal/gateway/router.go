@@ -1,15 +1,20 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"water/internal/gate"
 	"water/internal/nervous"
+	"water/internal/nervous/eval"
 	"water/internal/nervous/promote"
+	"water/internal/twins"
 )
 
 // turnPartialIDPattern is the client-generated turn id's required shape
@@ -211,6 +216,158 @@ func (d *Daemon) handleRouteCandidates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, cands)
+}
+
+// intentsDraftRequest is POST /v1/intents/draft's body: the candidate id
+// GET /v1/route/candidates (or `water route candidates`) reported.
+type intentsDraftRequest struct {
+	CandidateID string `json:"candidate_id"`
+}
+
+// intentsDraftResponse is what the draft step hands back for the owner to
+// review before ever promoting anything (Design §16 item 2): the YAML this
+// call wrote to the twin's pending/ directory, and whether it currently
+// passes ValidateLearned.
+type intentsDraftResponse struct {
+	ID              string `json:"id"`
+	YAML            string `json:"yaml"`
+	Path            string `json:"path"`
+	Valid           bool   `json:"valid"`
+	ValidationError string `json:"validation_error,omitempty"`
+}
+
+// handleIntentsDraft makes one cold, P0 model call proposing a learned
+// intent file for a repeated quick-tool phrasing pattern (Design §16 item
+// 2), writes it to the twin's pending/ directory for review, and reports
+// whether it currently passes ValidateLearned. It never touches the live
+// registry — that only happens on POST /v1/intents/reload, after `water
+// intent promote`. Requires router.promotion.enabled: drafting is gated
+// exactly like promotion itself ("Draft (flag on)").
+func (d *Daemon) handleIntentsDraft(w http.ResponseWriter, r *http.Request) {
+	if !d.cfg.PromotionEnabled {
+		http.Error(w, "the promotion loop is disabled (router.promotion.enabled=false)", http.StatusForbidden)
+		return
+	}
+	if d.cfg.Store == nil || d.cfg.Nervous == nil || d.cfg.Backend == nil || d.cfg.Manifest == nil {
+		http.Error(w, "promotion is not available on this daemon", http.StatusServiceUnavailable)
+		return
+	}
+	var body intentsDraftRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.CandidateID) == "" {
+		http.Error(w, "bad request: candidate_id is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	sh := d.cfg.Nervous.Registry().Shared()
+	cands, err := promote.Candidates(ctx, d.cfg.Store, sh, time.Now().Add(-30*24*time.Hour), promote.DefaultMinRepeats)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var cand *promote.Candidate
+	for i := range cands {
+		if cands[i].ID == body.CandidateID {
+			cand = &cands[i]
+			break
+		}
+	}
+	if cand == nil {
+		http.Error(w, "candidate not found (it may no longer qualify at the default --since 30d/--min 5)", http.StatusNotFound)
+		return
+	}
+	tools := strings.Split(cand.Signature, "+")
+	if len(tools) != 1 {
+		http.Error(w, "candidate names more than one tool; only a single-tool candidate can become one learned intent", http.StatusBadRequest)
+		return
+	}
+	spec, ok := promote.SpecForQuickTool(tools[0])
+	if !ok {
+		http.Error(w, "candidate's tool is not a recognized reflex handler", http.StatusInternalServerError)
+		return
+	}
+
+	samples, err := d.sampleUtterances(ctx, cand.SampleTurnIDs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if d.cfg.Gate != nil {
+		if err := d.cfg.Gate.ModelCall(gate.P0); err != nil {
+			http.Error(w, err.Error(), http.StatusTooManyRequests)
+			return
+		}
+	}
+	model := d.cfg.Manifest.ModelFor(twins.TierFast)
+	yamlBytes, err := promote.Draft(ctx, d.cfg.Backend, model, spec, *cand, samples)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	path, err := promote.WritePending(d.cfg.Home, d.cfg.Manifest.ID, yamlBytes, cand.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := intentsDraftResponse{ID: promote.ExtractID(yamlBytes), YAML: string(yamlBytes), Path: path}
+	if err := promote.ValidateLearned(yamlBytes, d.cfg.Nervous.Registry(), eval.Negatives(), d.cfg.MaxLearned); err != nil {
+		resp.ValidationError = err.Error()
+	} else {
+		resp.Valid = true
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// sampleUtterances resolves a candidate's sample turn ids back to their
+// original utterances (route_log.utterance), for Draft's prompt.
+func (d *Daemon) sampleUtterances(ctx context.Context, turnIDs []string) ([]string, error) {
+	if len(turnIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := d.cfg.Store.RoutesByTurnIDs(ctx, turnIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.Utterance != "" {
+			out = append(out, r.Utterance)
+		}
+	}
+	return out, nil
+}
+
+// handleIntentsReload rebuilds the twin's intents registry from its current
+// on-disk state and atomically swaps it into Nervous (Design §5.4's last
+// paragraph, R-23): the embedded intent files, the learned overlay
+// directory (only when router.promotion.enabled), and the store's
+// intent_state table. `water intent promote`/`demote`/`enable` (R-26) all
+// call this after writing their own change; it is also safe to call with
+// no prior write (a same-state no-op reload).
+func (d *Daemon) handleIntentsReload(w http.ResponseWriter, r *http.Request) {
+	if d.cfg.ReloadIntents == nil {
+		http.Error(w, "intents reload is not available on this daemon", http.StatusServiceUnavailable)
+		return
+	}
+	if err := d.cfg.ReloadIntents(r.Context()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := map[string]any{"reloaded": true}
+	if d.cfg.Nervous != nil {
+		reg := d.cfg.Nervous.Registry()
+		out["hash"] = reg.Hash()
+		out["candidates"] = len(reg.Candidates())
+		var skipped []map[string]string
+		for _, s := range reg.LearnedSkipped() {
+			skipped = append(skipped, map[string]string{"file": s.File, "reason": s.Reason})
+		}
+		out["learned_skipped"] = skipped
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleVoiceProfile serves the twin's voice/TTS settings (name, tone,

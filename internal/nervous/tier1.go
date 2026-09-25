@@ -128,6 +128,13 @@ func TryTier1(ctx context.Context, reg *intents.Registry, deps reflex.Deps, clie
 	if err != nil {
 		return nil, "", err
 	}
+	// See tier0.go's runTier0Match: a handler's own hardcoded Result.Intent
+	// only ever names its original embedded intent, so it must be
+	// overwritten with the registry's own record of which intent actually
+	// matched (it.ID) — otherwise a learned intent reusing this same
+	// handler would be misattributed to the embedded one it was drafted
+	// from, both in route_log and in style rendering.
+	result.Intent = it.ID
 	return &result, "", nil
 }
 

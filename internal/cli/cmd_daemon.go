@@ -15,15 +15,18 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"water"
 	"water/internal/agentmail"
 	"water/internal/approvals"
 	"water/internal/backend"
 	"water/internal/config"
+	"water/internal/connectors"
 	"water/internal/connectors/google/gapi"
 	"water/internal/gate"
 	"water/internal/gateway"
 	"water/internal/nervous"
 	"water/internal/nervous/intents"
+	"water/internal/nervous/promote"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -80,6 +83,46 @@ func (s *daemonActionSink) ProposeAction(ctx context.Context, fn string, payload
 		return approvals.Envelope{}, fmt.Errorf("nervous: ActionSink not ready yet")
 	}
 	return s.d.ProposeAction(ctx, fn, payload, ch)
+}
+
+// daemonIntentsReloader rebuilds the twin's intents registry from its
+// current on-disk state — the embedded intent files, the learned overlay
+// directory (only when router.promotion.enabled), and the store's
+// intent_state table — and atomically swaps it into *nervous.Nervous
+// (gateway.Config.ReloadIntents; POST /v1/intents/reload, R-23). It is the
+// same assembly buildTwinDepsFS does once at startup, run again on demand
+// after `water intent promote`/`demote`/`enable` (R-26) writes a change, and
+// once here at startup (right after nv is built) so a daemon that starts
+// with the flag already on, or with existing disabled-intent rows, picks
+// them up before it ever serves a turn — buildTwinDepsFS's own
+// intents.LoadRegistry call never sets LoadOptions.Learned/Disabled at all.
+type daemonIntentsReloader struct {
+	manifest    *twins.Manifest
+	connectors  *connectors.Registry
+	store       *store.Store
+	home        string
+	promotionOn bool
+	nv          *nervous.Nervous
+}
+
+func (r *daemonIntentsReloader) Reload(ctx context.Context) error {
+	opts := intents.LoadOptions{Schema: schemaFromRegistry(r.connectors)}
+	if r.promotionOn {
+		opts.Learned = os.DirFS(promote.LearnedDir(r.home, r.manifest.ID))
+	}
+	if r.store != nil {
+		disabled, err := r.store.ListIntentStates(ctx)
+		if err != nil {
+			return fmt.Errorf("intents reload: %w", err)
+		}
+		opts.Disabled = disabled
+	}
+	reg, err := intents.LoadRegistry(water.TwinsFS(), r.manifest, intentFunctions(), opts)
+	if err != nil {
+		return fmt.Errorf("intents reload: %w", err)
+	}
+	r.nv.Reload(reg)
+	return nil
 }
 
 // daemonApprover satisfies nervous.Approver (a bound voice yes/no deciding a
@@ -182,6 +225,12 @@ func (a *App) runDaemon(ctx context.Context) error {
 	}
 	fmt.Fprintf(os.Stderr, "water daemon: twin=%s socket=%s cli-token=%s\n", deps.manifest.ID, paths.SocketPath(), cliToken)
 
+	// Defined early (moved ahead of its original single use, agentWatcher's
+	// Config.Logf, below) so nvCfg.Logf (R-23's auto-demotion bookkeeping
+	// errors) can use the same "water daemon: ..." stderr convention every
+	// other background error in this process already uses.
+	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) }
+
 	var warm *backend.WarmSession
 	if sel.Backend.Name() == backend.ClaudeSubscriptionName {
 		warm = backend.NewWarmSession(backend.WarmSessionConfig{WorkDir: config.Home()})
@@ -223,6 +272,17 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// ap wires a bound voice yes/no to decideAndExecute (Design §13, R-21);
 	// same two-step construction-order break as as/tc/prewarmer.
 	ap := &daemonApprover{}
+	// reloader rebuilds the intents registry on demand (POST
+	// /v1/intents/reload, R-23) and also runs once, synchronously, right
+	// after nv is built below, to pick up the learned overlay/intent_state
+	// before this daemon ever serves a turn — same two-step
+	// construction-order pattern as as/ap/tc/prewarmer (it needs
+	// *nervous.Nervous itself, which doesn't exist until nervous.New
+	// returns).
+	reloader := &daemonIntentsReloader{
+		manifest: deps.manifest, connectors: deps.registry, store: deps.store,
+		home: config.Home(), promotionOn: cfg.Router.Promotion.Enabled,
+	}
 	nvCfg := nervous.DefaultConfig()
 	nvCfg.Registry = func() *intents.Registry { return deps.intents }
 	nvCfg.Style = deps.style
@@ -240,9 +300,27 @@ func (a *App) runDaemon(ctx context.Context) error {
 		Window:          time.Duration(cfg.Router.VoiceApprove.WindowSeconds) * time.Second,
 		InternalDomains: voiceApproveDomains(cfg.Router.VoiceApprove.InternalDomains),
 	}
+	nvCfg.Promotion = nervous.PromotionConfig{
+		DemoteMinSamples:  cfg.Router.Promotion.DemoteMinSamples,
+		DemoteMissRatePct: cfg.Router.Promotion.DemoteMissRatePct,
+	}
+	nvCfg.Logf = logf
 	nv, err := nervous.New(nvCfg)
 	if err != nil {
 		return exitWith(ExitError, fmt.Errorf("nervous: %w", err))
+	}
+	reloader.nv = nv
+	// Run once at startup, synchronously: a daemon that starts with
+	// router.promotion.enabled already on (or with pre-existing disabled
+	// learned intents from a previous run) must serve its very first turn
+	// against the real overlay/disabled state, not the bare registry
+	// buildTwinDepsFS loaded with no LoadOptions.Learned/Disabled at all.
+	// Failure here is logged, never fatal: the daemon still starts and
+	// serves from the base registry, exactly the same "owner data must
+	// never block the daemon" posture the learned overlay's own loader
+	// already has.
+	if err := reloader.Reload(context.Background()); err != nil {
+		logf("initial intents overlay load: %v", err)
 	}
 
 	d := gateway.New(gateway.Config{
@@ -250,6 +328,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 		Gate: deps.gate, Registry: deps.registry, Backend: sel.Backend, Warm: warm, RoleMD: deps.roleMD,
 		Decisions: trigger, ProactiveCues: cfg.Meetings.ProactiveCues, Clients: clients, SocketPath: paths.SocketPath(),
 		Nervous: nv,
+		Home:    config.Home(), PromotionEnabled: cfg.Router.Promotion.Enabled, MaxLearned: cfg.Router.Promotion.MaxLearned,
+		ReloadIntents: reloader.Reload,
 	})
 	tc.d = d
 	prewarmer.d = d
@@ -284,8 +364,6 @@ func (a *App) runDaemon(ctx context.Context) error {
 	if trigger != nil {
 		briefEnv.Decisions = trigger
 	}
-
-	logf := func(format string, args ...any) { fmt.Fprintf(os.Stderr, "water daemon: "+format+"\n", args...) }
 
 	// The agent-mailbox inbound-triage watcher (internal/agentmail): its own
 	// vault credential (account "agent"), its own model classification
