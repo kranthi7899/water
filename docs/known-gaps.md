@@ -135,6 +135,23 @@ want tainted". Not fixed here: root cause is in the fixture's fixed
 `+1h` offset versus `store.calendar_events`'s actual default window, not
 anything R-22 touches (`internal/nervous/promote`, `mainpath.go`'s
 BeginMain/EndMain wiring, or the new `/v1/route/candidates` endpoint).
+
+## Slice R: FunctionGemma's warm p95 latency (1313ms) fails the 400ms eval-gate threshold on this Mac
+
+Measured live during Slice R's Phase 4 verification (`docs/slices/R-verification.md`):
+a real `water model pull functiongemma --accept-gemma-terms` plus `water route
+eval --tier1` against the real, owner-approved Homebrew `llama-server` sidecar
+produced 0 false accepts (0.00%, Wilson 95% upper bound 0.93%) over 410 cases —
+every safety criterion clears its threshold with margin — but warm p95 latency
+came in at 1313ms against the plan's 400ms ceiling. The eval-gate mechanism
+(R-17/R-25) correctly refused to start the sidecar in response (`water daemon:
+tier1 not started: eval_failed`, confirmed live even with
+`router.tier1.enabled` explicitly set to `true`), so Tier 1 stays inert — this
+is the intended fail-safe behavior working correctly, not a bug. Not
+investigated in this pass: whether different `llama-server` startup flags
+(thread count, an explicit Metal-offload flag, a smaller `--ctx-size`) would
+bring warm p95 under 400ms on Apple Silicon CPU/GPU. Revisit before ever
+setting `router.tier1.enabled=true` in real use.
 Whoever next touches `quick_test.go` or the `store.calendar_events`
 handler should pin the fixture's event time to a fixed, mid-day instant
 (the way `internal/nervous/promote/candidates_test.go`'s `day1`/`day2`
