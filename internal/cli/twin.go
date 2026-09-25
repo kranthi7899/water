@@ -330,18 +330,28 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 // always non-nil given a valid deps (NewTriager only errors on a nil
 // classifier or candidate, and neither is ever nil here).
 //
-// R-24: the classifier is wrapped with decider.Wrap(decider.Null{}, ...)
-// before StoreCache sees it. decider.provider has no settable config key
-// yet (that lands in R-25 alongside the rest of §17's keys), so Null{} is
-// hardcoded here; Wrap with a Null decider returns the ModelClassifier
-// UNCHANGED (see decider.Wrap's doc comment), so this line is provably a
-// no-op today — TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier
-// in twin_test.go is the regression guard.
-func buildDecisionsTrigger(deps *twinDeps, be backend.Backend) *decisions.Trigger {
+// R-24 wrapped the classifier with decider.Wrap(decider.Null{}, ...) before
+// StoreCache sees it, hardcoded since decider.provider had no settable
+// config key yet. R-25 sources the decider from deciderProvider
+// (cfg.Decider.Provider) instead via decider.New: since apply() rejects
+// anything but "none" (internal/config/config.go), decider.New always
+// returns Null{} in practice today, and Wrap with a Null decider returns
+// the ModelClassifier UNCHANGED (see decider.Wrap's doc comment) — so this
+// is still provably a no-op, just sourced from config now rather than
+// hardcoded. A decider.New error (unreachable given apply()'s own
+// validation) falls back to Null{} rather than failing daemon startup over
+// a decider nothing outward-facing depends on.
+// TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier in
+// twin_test.go is the regression guard.
+func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider string) *decisions.Trigger {
 	model := deps.manifest.ModelFor(twins.TierFast)
 	charge := func() error { return deps.gate.ModelCall(gate.P1) }
 	classifier := &decisions.ModelClassifier{Registry: deps.decisions, Backend: be, Model: model, Charge: charge}
-	wrapped := decider.Wrap(decider.Null{}, classifier, deps.decisions)
+	dec, err := decider.New(deciderProvider)
+	if err != nil {
+		dec = decider.Null{}
+	}
+	wrapped := decider.Wrap(dec, classifier, deps.decisions)
 	cached := &decisions.StoreCache{Store: deps.store, Inner: wrapped}
 	triager, err := decisions.NewTriager(cached, decisions.Candidate)
 	if err != nil {

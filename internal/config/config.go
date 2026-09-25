@@ -46,12 +46,80 @@ type DeciderConfig struct {
 }
 
 // RouterConfig configures Slice R's nervous-system router
-// (internal/nervous). Only the voice approval binding's (R-21) and
-// promotion loop's (R-23) flags exist so far; the rest of
-// docs/slices/R.md Design §17's keys land with R-25.
+// (internal/nervous), per docs/slices/R.md Design §17's full table. The
+// voice approval binding's (R-21) and promotion loop's (R-23) flags landed
+// early; the rest lands with this task (R-25).
 type RouterConfig struct {
-	VoiceApprove VoiceApproveConfig `yaml:"voice_approve"`
-	Promotion    PromotionConfig    `yaml:"promotion"`
+	Tier0        RouterTier0Config       `yaml:"tier0"`
+	Tier1        RouterTier1Config       `yaml:"tier1"`
+	Main         RouterMainConfig        `yaml:"main"`
+	Breaker      RouterBreakerConfig     `yaml:"breaker"`
+	Speculation  RouterSpeculationConfig `yaml:"speculation"`
+	QuickTools   RouterQuickToolsConfig  `yaml:"quick_tools"`
+	VoiceApprove VoiceApproveConfig      `yaml:"voice_approve"`
+	Promotion    PromotionConfig         `yaml:"promotion"`
+
+	// PossibleMissWindowSeconds bounds Tier 0's possible-miss detection
+	// window (router.possible_miss_window_seconds, nervous.Config.MissWindow).
+	PossibleMissWindowSeconds int `yaml:"possible_miss_window_seconds"`
+	// LogRetentionDays bounds how long route_log rows are kept
+	// (router.log_retention_days, nervous.Config.Retention).
+	LogRetentionDays int `yaml:"log_retention_days"`
+	// AckMS bounds how long an unrouted turn waits before Handle emits a
+	// handoff acknowledgement on its own (router.ack_ms,
+	// nervous.Config.AckAfter). apply() rejects any value >= 300: the
+	// handoff acknowledgement must arrive well inside the 300ms budget
+	// R-12's own tests lock in (docs/slices/R.md acceptance criterion 9),
+	// so a value at or above that budget could never actually be met.
+	AckMS int `yaml:"ack_ms"`
+}
+
+// RouterTier0Config configures Tier 0, the sous chef's deterministic
+// template match (router.tier0.*).
+type RouterTier0Config struct {
+	Enabled   bool `yaml:"enabled"`
+	TimeoutMS int  `yaml:"timeout_ms"`
+}
+
+// RouterTier1Config configures Tier 1, the FunctionGemma sidecar
+// (router.tier1.*). Enabled alone is never enough to start the sidecar —
+// the daemon also requires a passing eval-gate record (docs/slices/R.md
+// §10); see internal/cli/cmd_daemon.go.
+type RouterTier1Config struct {
+	Enabled   bool   `yaml:"enabled"`
+	TimeoutMS int    `yaml:"timeout_ms"`
+	ServerBin string `yaml:"server_bin"`
+	// ModelPath is the GGUF file passed to llama-server. Empty means
+	// $WATER_HOME/models/functiongemma.gguf.
+	ModelPath string `yaml:"model_path"`
+}
+
+// RouterMainConfig configures the main path (router.main.*). Disabling it
+// leaves quick answers only; an unanswered turn errors.
+type RouterMainConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// RouterBreakerConfig configures Tier 0/Tier 1's circuit breakers
+// (router.breaker.*, nervous.BreakerConfig). MissSample and MinMissSamples
+// are not in Design §17's table — they stay the code defaults
+// nervous.DefaultBreakerConfig documents, not a settable key.
+type RouterBreakerConfig struct {
+	Failures        int `yaml:"failures"`
+	CooldownSeconds int `yaml:"cooldown_seconds"`
+	MaxMissRatePct  int `yaml:"max_miss_rate_pct"`
+}
+
+// RouterSpeculationConfig gates R-19's partial-transcript prefetch
+// (router.speculation.enabled).
+type RouterSpeculationConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// RouterQuickToolsConfig gates the main agent's quick-tool bridge
+// (router.quick_tools.enabled).
+type RouterQuickToolsConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // PromotionConfig gates the learned-intent growth loop (router.promotion.*,
@@ -231,6 +299,21 @@ func defaults() map[string]string {
 		"agent.forward_to":                      "",
 		"agent.signature_name":                  "",
 		"github.repo":                           "",
+		"router.tier0.enabled":                  "true",
+		"router.tier0.timeout_ms":               "150",
+		"router.tier1.enabled":                  "false",
+		"router.tier1.timeout_ms":               "400",
+		"router.tier1.server_bin":               "llama-server",
+		"router.tier1.model_path":               "",
+		"router.main.enabled":                   "true",
+		"router.breaker.failures":               "5",
+		"router.breaker.cooldown_seconds":       "60",
+		"router.breaker.max_miss_rate_pct":      "20",
+		"router.possible_miss_window_seconds":   "60",
+		"router.log_retention_days":             "90",
+		"router.ack_ms":                         "250",
+		"router.speculation.enabled":            "true",
+		"router.quick_tools.enabled":            "true",
 		"router.voice_approve.enabled":          "false",
 		"router.voice_approve.window_seconds":   "60",
 		"router.voice_approve.internal_domains": "",
@@ -360,6 +443,24 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Agent.ForwardTo = flat["agent.forward_to"]
 	r.Agent.SignatureName = flat["agent.signature_name"]
 	r.GitHub.Repo = flat["github.repo"]
+	r.Router.Tier0.Enabled = abool("router.tier0.enabled")
+	r.Router.Tier0.TimeoutMS = atoi("router.tier0.timeout_ms")
+	r.Router.Tier1.Enabled = abool("router.tier1.enabled")
+	r.Router.Tier1.TimeoutMS = atoi("router.tier1.timeout_ms")
+	r.Router.Tier1.ServerBin = flat["router.tier1.server_bin"]
+	r.Router.Tier1.ModelPath = flat["router.tier1.model_path"]
+	r.Router.Main.Enabled = abool("router.main.enabled")
+	r.Router.Breaker.Failures = atoi("router.breaker.failures")
+	r.Router.Breaker.CooldownSeconds = atoi("router.breaker.cooldown_seconds")
+	r.Router.Breaker.MaxMissRatePct = atoi("router.breaker.max_miss_rate_pct")
+	r.Router.PossibleMissWindowSeconds = atoi("router.possible_miss_window_seconds")
+	r.Router.LogRetentionDays = atoi("router.log_retention_days")
+	r.Router.AckMS = atoi("router.ack_ms")
+	if r.Router.AckMS >= 300 && err == nil {
+		err = fmt.Errorf("router.ack_ms: %d is not < 300 (set by %s)", r.Router.AckMS, r.Provenance["router.ack_ms"])
+	}
+	r.Router.Speculation.Enabled = abool("router.speculation.enabled")
+	r.Router.QuickTools.Enabled = abool("router.quick_tools.enabled")
 	r.Router.VoiceApprove.Enabled = abool("router.voice_approve.enabled")
 	r.Router.VoiceApprove.WindowSeconds = atoi("router.voice_approve.window_seconds")
 	r.Router.VoiceApprove.InternalDomains = flat["router.voice_approve.internal_domains"]
@@ -388,6 +489,14 @@ func (r *Resolved) apply(flat map[string]string) error {
 var (
 	intKeys = map[string]bool{
 		"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true,
+		"router.tier0.timeout_ms":               true,
+		"router.tier1.timeout_ms":               true,
+		"router.breaker.failures":               true,
+		"router.breaker.cooldown_seconds":       true,
+		"router.breaker.max_miss_rate_pct":      true,
+		"router.possible_miss_window_seconds":   true,
+		"router.log_retention_days":             true,
+		"router.ack_ms":                         true,
 		"router.voice_approve.window_seconds":   true,
 		"router.promotion.min_repeats":          true,
 		"router.promotion.max_learned":          true,
@@ -396,6 +505,11 @@ var (
 	}
 	boolKeys = map[string]bool{
 		"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true,
+		"router.tier0.enabled":         true,
+		"router.tier1.enabled":         true,
+		"router.main.enabled":          true,
+		"router.speculation.enabled":   true,
+		"router.quick_tools.enabled":   true,
 		"router.voice_approve.enabled": true,
 		"router.promotion.enabled":     true,
 	}
@@ -422,6 +536,21 @@ func (r *Resolved) Flat() map[string]string {
 		"agent.forward_to":                      r.Agent.ForwardTo,
 		"agent.signature_name":                  r.Agent.SignatureName,
 		"github.repo":                           r.GitHub.Repo,
+		"router.tier0.enabled":                  strconv.FormatBool(r.Router.Tier0.Enabled),
+		"router.tier0.timeout_ms":               strconv.Itoa(r.Router.Tier0.TimeoutMS),
+		"router.tier1.enabled":                  strconv.FormatBool(r.Router.Tier1.Enabled),
+		"router.tier1.timeout_ms":               strconv.Itoa(r.Router.Tier1.TimeoutMS),
+		"router.tier1.server_bin":               r.Router.Tier1.ServerBin,
+		"router.tier1.model_path":               r.Router.Tier1.ModelPath,
+		"router.main.enabled":                   strconv.FormatBool(r.Router.Main.Enabled),
+		"router.breaker.failures":               strconv.Itoa(r.Router.Breaker.Failures),
+		"router.breaker.cooldown_seconds":       strconv.Itoa(r.Router.Breaker.CooldownSeconds),
+		"router.breaker.max_miss_rate_pct":      strconv.Itoa(r.Router.Breaker.MaxMissRatePct),
+		"router.possible_miss_window_seconds":   strconv.Itoa(r.Router.PossibleMissWindowSeconds),
+		"router.log_retention_days":             strconv.Itoa(r.Router.LogRetentionDays),
+		"router.ack_ms":                         strconv.Itoa(r.Router.AckMS),
+		"router.speculation.enabled":            strconv.FormatBool(r.Router.Speculation.Enabled),
+		"router.quick_tools.enabled":            strconv.FormatBool(r.Router.QuickTools.Enabled),
 		"router.voice_approve.enabled":          strconv.FormatBool(r.Router.VoiceApprove.Enabled),
 		"router.voice_approve.window_seconds":   strconv.Itoa(r.Router.VoiceApprove.WindowSeconds),
 		"router.voice_approve.internal_domains": r.Router.VoiceApprove.InternalDomains,

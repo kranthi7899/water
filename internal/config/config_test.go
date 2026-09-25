@@ -249,6 +249,10 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 			continue
 		case boolKeys[k]:
 			flags[k] = "true"
+		case k == "router.ack_ms":
+			// apply() rejects any value >= 300; the generic intKeys branch
+			// below would otherwise pick 1000+i, which always fails.
+			flags[k] = "290"
 		case intKeys[k]:
 			flags[k] = strconv.Itoa(1000 + i)
 		case k == "brief.ready_after":
@@ -274,5 +278,114 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 		if flat[k] != want {
 			t.Errorf("%s: set %q, Flat returned %q (missing from apply or Flat?)", k, flags[k], flat[k])
 		}
+	}
+}
+
+// TestRouterConfigDefaults is R-25's own defaults check: every key
+// docs/slices/R.md Design §17's table adds in this task defaults exactly as
+// documented, and the numeric ones match the code defaults
+// internal/nervous.DefaultConfig()/DefaultBreakerConfig() already use, so
+// the daemon's real wiring (internal/cli/cmd_daemon.go) behaves identically
+// whether or not the owner has ever touched config.yaml.
+func TestRouterConfigDefaults(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	r, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Router.Tier0.Enabled {
+		t.Error("router.tier0.enabled default should be true")
+	}
+	if r.Router.Tier0.TimeoutMS != 150 {
+		t.Errorf("router.tier0.timeout_ms default = %d, want 150", r.Router.Tier0.TimeoutMS)
+	}
+	if r.Router.Tier1.Enabled {
+		t.Error("router.tier1.enabled default should be false")
+	}
+	if r.Router.Tier1.TimeoutMS != 400 {
+		t.Errorf("router.tier1.timeout_ms default = %d, want 400", r.Router.Tier1.TimeoutMS)
+	}
+	if r.Router.Tier1.ServerBin != "llama-server" {
+		t.Errorf("router.tier1.server_bin default = %q, want llama-server", r.Router.Tier1.ServerBin)
+	}
+	if r.Router.Tier1.ModelPath != "" {
+		t.Errorf("router.tier1.model_path default = %q, want empty (means $WATER_HOME/models/functiongemma.gguf)", r.Router.Tier1.ModelPath)
+	}
+	if !r.Router.Main.Enabled {
+		t.Error("router.main.enabled default should be true")
+	}
+	if r.Router.Breaker.Failures != 5 {
+		t.Errorf("router.breaker.failures default = %d, want 5", r.Router.Breaker.Failures)
+	}
+	if r.Router.Breaker.CooldownSeconds != 60 {
+		t.Errorf("router.breaker.cooldown_seconds default = %d, want 60", r.Router.Breaker.CooldownSeconds)
+	}
+	if r.Router.Breaker.MaxMissRatePct != 20 {
+		t.Errorf("router.breaker.max_miss_rate_pct default = %d, want 20", r.Router.Breaker.MaxMissRatePct)
+	}
+	if r.Router.PossibleMissWindowSeconds != 60 {
+		t.Errorf("router.possible_miss_window_seconds default = %d, want 60", r.Router.PossibleMissWindowSeconds)
+	}
+	if r.Router.LogRetentionDays != 90 {
+		t.Errorf("router.log_retention_days default = %d, want 90", r.Router.LogRetentionDays)
+	}
+	if r.Router.AckMS != 250 {
+		t.Errorf("router.ack_ms default = %d, want 250", r.Router.AckMS)
+	}
+	if !r.Router.Speculation.Enabled {
+		t.Error("router.speculation.enabled default should be true")
+	}
+	if !r.Router.QuickTools.Enabled {
+		t.Error("router.quick_tools.enabled default should be true")
+	}
+}
+
+// TestRouterAckMSRejectsAtOrAbove300 is Design §17's own hard rule: the
+// handoff acknowledgement must arrive well inside the 300ms budget R-12's
+// tests lock in, so apply() refuses to even load a config that couldn't
+// possibly meet it.
+func TestRouterAckMSRejectsAtOrAbove300(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	for _, bad := range []string{"300", "301", "1000"} {
+		if _, err := Load(map[string]string{"router.ack_ms": bad}); err == nil {
+			t.Errorf("router.ack_ms=%s should fail to load", bad)
+		} else if !strings.Contains(err.Error(), "router.ack_ms") {
+			t.Errorf("router.ack_ms=%s error = %q, want it to name the key", bad, err.Error())
+		}
+	}
+	for _, good := range []string{"0", "1", "100", "299"} {
+		r, err := Load(map[string]string{"router.ack_ms": good})
+		if err != nil {
+			t.Errorf("router.ack_ms=%s should load: %v", good, err)
+			continue
+		}
+		if strconv.Itoa(r.Router.AckMS) != good {
+			t.Errorf("router.ack_ms=%s did not round trip: got %d", good, r.Router.AckMS)
+		}
+	}
+	// Save must refuse it too, exactly like the other rejected values in
+	// TestSaveRejectsInvalidValues.
+	if err := Save(map[string]string{"router.ack_ms": "300"}); err == nil {
+		t.Error("Save(router.ack_ms=300) should fail")
+	}
+}
+
+// TestRouterIntBoolCoercion exercises int/bool coercion for a
+// representative new key of each kind, the same style
+// TestSaveRejectsInvalidValues already uses for the pre-existing keys.
+func TestRouterIntBoolCoercion(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	if _, err := Load(map[string]string{"router.tier0.timeout_ms": "soon"}); err == nil {
+		t.Fatal("router.tier0.timeout_ms=soon should fail to load")
+	}
+	if _, err := Load(map[string]string{"router.tier1.enabled": "sure"}); err == nil {
+		t.Fatal("router.tier1.enabled=sure should fail to load")
+	}
+	r, err := Load(map[string]string{"router.tier0.timeout_ms": "75", "router.tier1.enabled": "true"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Router.Tier0.TimeoutMS != 75 || !r.Router.Tier1.Enabled {
+		t.Fatalf("coercion lost values: %+v", r.Flat())
 	}
 }

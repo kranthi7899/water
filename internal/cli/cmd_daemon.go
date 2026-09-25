@@ -27,6 +27,8 @@ import (
 	"water/internal/nervous"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/promote"
+	"water/internal/nervous/sidecar"
+	"water/internal/nervous/t1"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -155,6 +157,77 @@ func voiceApproveDomains(csv string) []string {
 	return out
 }
 
+// buildNervousConfig maps every docs/slices/R.md Design §17 router.* key
+// this task (R-25) settles onto the subset of nervous.Config that has a
+// real field for it, starting from nervous.DefaultConfig() so every field
+// Design §17 does not name a key for (Clock, SenderWindow, SenderLimit,
+// Breaker.MissSample/MinMissSamples, ...) keeps its existing code default.
+// It performs no I/O, so it can be called directly by a test without
+// booting a real daemon — the regression test this task's own brief asks
+// for (a resolved config with non-default values produces a matching
+// nervous.Config) targets this function. Tier1Enabled/T1 are deliberately
+// left unset here: starting the Tier 1 sidecar needs real I/O (the
+// eval-gate file, the subprocess) that belongs in runDaemon, not in a pure
+// mapping function.
+func buildNervousConfig(cfg *config.Resolved) nervous.Config {
+	nvCfg := nervous.DefaultConfig()
+	nvCfg.Tier0Enabled = cfg.Router.Tier0.Enabled
+	nvCfg.MainEnabled = cfg.Router.Main.Enabled
+	nvCfg.Breaker = nervous.BreakerConfig{
+		Failures:       cfg.Router.Breaker.Failures,
+		Cooldown:       time.Duration(cfg.Router.Breaker.CooldownSeconds) * time.Second,
+		MaxMissRatePct: cfg.Router.Breaker.MaxMissRatePct,
+		// MissSample/MinMissSamples have no config key (Design §17's table
+		// doesn't list them): keep the code defaults.
+		MissSample:     nervous.DefaultBreakerConfig().MissSample,
+		MinMissSamples: nervous.DefaultBreakerConfig().MinMissSamples,
+	}
+	nvCfg.MissWindow = time.Duration(cfg.Router.PossibleMissWindowSeconds) * time.Second
+	nvCfg.Retention = time.Duration(cfg.Router.LogRetentionDays) * 24 * time.Hour
+	nvCfg.AckAfter = time.Duration(cfg.Router.AckMS) * time.Millisecond
+	nvCfg.Speculation = cfg.Router.Speculation.Enabled
+	nvCfg.VoiceApprove = nervous.VoiceApproveConfig{
+		Enabled:         cfg.Router.VoiceApprove.Enabled,
+		Window:          time.Duration(cfg.Router.VoiceApprove.WindowSeconds) * time.Second,
+		InternalDomains: voiceApproveDomains(cfg.Router.VoiceApprove.InternalDomains),
+	}
+	nvCfg.Promotion = nervous.PromotionConfig{
+		DemoteMinSamples:  cfg.Router.Promotion.DemoteMinSamples,
+		DemoteMissRatePct: cfg.Router.Promotion.DemoteMissRatePct,
+	}
+	return nvCfg
+}
+
+// Note: router.tier0.timeout_ms/router.tier1.timeout_ms and
+// router.quick_tools.enabled are settable (they round-trip through
+// internal/config exactly like every other Design §17 key, and
+// TestEveryKeyRoundTrips/TestRouterConfigDefaults cover them) but have no
+// live consumer wired here: nervous.Config has no per-tier context-deadline
+// field (Tier 0 runs no I/O to bound; Tier 1's own request timeout is
+// t1.requestTimeout, a package constant, not yet derived from a
+// Handle-level ctx deadline — see that file's own comment), and
+// router.quick_tools.enabled's only real gate point is
+// gateway.Daemon.TwinToolPolicy's Quick field, in internal/gateway/
+// daemon.go, outside this task's file list (internal/config/config.go,
+// config_test.go, internal/cli/cmd_daemon.go). Wiring either belongs to a
+// later task, not invented here.
+
+// tier1GateReady reports whether Tier 1 may actually be started, given the
+// eval-gate record ReadEvalRecord just returned (or its error) and the
+// hash of the intent registry the daemon is about to serve turns against
+// (docs/slices/R.md §10: the recorded live eval must match today's model
+// and intent registry and clear every threshold — router.tier1.enabled
+// alone is never enough). recErr non-nil (missing or unreadable record)
+// fails closed with "eval_missing", the same reason GET /v1/router
+// documents for this case. Pure and I/O-free, so it's tested directly
+// without a real sidecar or a real $WATER_HOME/router/tier1_eval.json.
+func tier1GateReady(rec sidecar.EvalRecord, recErr error, registryHash string) (ok bool, reason string) {
+	if recErr != nil {
+		return false, "eval_missing"
+	}
+	return rec.Check(sidecar.ModelSHA256, registryHash)
+}
+
 // daemonPrewarmer wires nervous.Config.Prewarm to the real warm session,
 // warming it with exactly the request — system prompt, model, tool policy —
 // a real main-path turn would use (Design §11.5), so a successful prewarm
@@ -241,7 +314,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// process's own gate/store/backend; shared between the daemon's
 	// /v1/decisions endpoint and the morning brief's open-cards signal so
 	// both see the same in-memory classification cache.
-	trigger := buildDecisionsTrigger(deps, sel.Backend)
+	trigger := buildDecisionsTrigger(deps, sel.Backend, cfg.Decider.Provider)
 
 	// Slice R's sous chef reads through a separate read-only connection pool
 	// (Design §1(e)'s defense in depth: a write attempt fails at the SQLite
@@ -283,7 +356,41 @@ func (a *App) runDaemon(ctx context.Context) error {
 		manifest: deps.manifest, connectors: deps.registry, store: deps.store,
 		home: config.Home(), promotionOn: cfg.Router.Promotion.Enabled,
 	}
-	nvCfg := nervous.DefaultConfig()
+	// Tier 1 (the FunctionGemma sidecar) only ever starts when
+	// router.tier1.enabled is true AND the recorded live eval
+	// ($WATER_HOME/router/tier1_eval.json, R-17/R-18) passes for today's
+	// model and intent registry (docs/slices/R.md §10) — an unvetted Tier 1
+	// must never silently answer real turns. deps.intents is the base
+	// registry (no learned overlay), loaded exactly the way `water route
+	// eval --tier1` loads it, so its Hash() is the right comparison.
+	var t1Client t1.Client
+	if cfg.Router.Tier1.Enabled {
+		rec, recErr := sidecar.ReadEvalRecord(config.Home())
+		if ok, reason := tier1GateReady(rec, recErr, deps.intents.Hash()); !ok {
+			logf("tier1 not started: %s", reason)
+		} else {
+			modelPath := cfg.Router.Tier1.ModelPath
+			if modelPath == "" {
+				modelPath = filepath.Join(config.Home(), "models", sidecar.ModelFileName)
+			}
+			sup := sidecar.New(sidecar.Config{
+				Bin: cfg.Router.Tier1.ServerBin, ModelPath: modelPath, Home: config.Home(),
+			})
+			if err := sup.Start(context.Background()); err != nil {
+				logf("tier1 not started: sidecar: %v", err)
+			} else {
+				defer sup.Stop()
+				client, err := t1.NewHTTP(sup.Endpoint())
+				if err != nil {
+					logf("tier1 not started: client: %v", err)
+				} else {
+					t1Client = client
+				}
+			}
+		}
+	}
+
+	nvCfg := buildNervousConfig(cfg)
 	nvCfg.Registry = func() *intents.Registry { return deps.intents }
 	nvCfg.Style = deps.style
 	nvCfg.Turns = turn.NewTable(time.Now)
@@ -295,15 +402,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 	nvCfg.Prewarm = prewarmer.Prewarm
 	nvCfg.Actions = as
 	nvCfg.Approver = ap
-	nvCfg.VoiceApprove = nervous.VoiceApproveConfig{
-		Enabled:         cfg.Router.VoiceApprove.Enabled,
-		Window:          time.Duration(cfg.Router.VoiceApprove.WindowSeconds) * time.Second,
-		InternalDomains: voiceApproveDomains(cfg.Router.VoiceApprove.InternalDomains),
-	}
-	nvCfg.Promotion = nervous.PromotionConfig{
-		DemoteMinSamples:  cfg.Router.Promotion.DemoteMinSamples,
-		DemoteMissRatePct: cfg.Router.Promotion.DemoteMissRatePct,
-	}
+	nvCfg.Tier1Enabled = t1Client != nil
+	nvCfg.T1 = t1Client
 	nvCfg.Logf = logf
 	nv, err := nervous.New(nvCfg)
 	if err != nil {

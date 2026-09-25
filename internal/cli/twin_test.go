@@ -13,6 +13,7 @@ import (
 
 	"water"
 	"water/internal/backend"
+	"water/internal/config"
 	"water/internal/connectors/fake"
 	"water/internal/connectors/github"
 	"water/internal/store"
@@ -256,12 +257,15 @@ func TestBuildCEORegistryPicksRealOrFakeGitHubLinearHubSpot(t *testing.T) {
 }
 
 // TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier is
-// R-24's regression guard: buildDecisionsTrigger now wraps its
-// ModelClassifier with decider.Wrap(decider.Null{}, classifier, reg) before
-// StoreCache. decider.Wrap with a Null decider returns the classifier it
-// was given UNCHANGED (see internal/decider/classifier.go), so this must
-// classify and build a card exactly as the pre-R-24 unwrapped
-// ModelClassifier did — same backend call, same matched type, same card.
+// R-24's regression guard: buildDecisionsTrigger wraps its ModelClassifier
+// with decider.Wrap(decider.New(deciderProvider), classifier, reg) before
+// StoreCache (R-25 sources the provider from the caller instead of
+// hardcoding decider.Null{}; see buildDecisionsTrigger's own comment in
+// twin.go). decider.Wrap with a Null decider returns the classifier it was
+// given UNCHANGED (see internal/decider/classifier.go), so passing "none"
+// (the only supported provider) must classify and build a card exactly as
+// the pre-R-24 unwrapped ModelClassifier did — same backend call, same
+// matched type, same card.
 func TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WATER_HOME", home)
@@ -286,7 +290,7 @@ func TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier(t *testi
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be)
+	trig := buildDecisionsTrigger(deps, be, "none")
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
 	}
@@ -302,5 +306,100 @@ func TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier(t *testi
 	}
 	if be.Calls() < 1 {
 		t.Fatal("expected the (unwrapped-behavior) classifier to have called the backend at least once")
+	}
+}
+
+// TestBuildDecisionsTriggerSourcesProviderFromResolvedConfig is R-25's own
+// regression guard: cmd_daemon.go now calls
+// buildDecisionsTrigger(deps, sel.Backend, cfg.Decider.Provider) instead of
+// hardcoding decider.Null{} (R-24 left that as its own explicit follow-up).
+// Since apply() only ever resolves decider.provider to "none", the real
+// resolved config's own value, fed straight through, must produce the
+// exact same triage result TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier
+// gets from the literal "none" — proving the value genuinely flows from
+// config, not just that the literal string still works.
+func TestBuildDecisionsTriggerSourcesProviderFromResolvedConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WATER_HOME", home)
+	deps, err := buildTwinDepsFS(water.TwinsFS(), demoTwinID, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deps.Close()
+
+	resolved, err := config.Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Decider.Provider != "none" {
+		t.Fatalf("decider.provider default = %q, want %q", resolved.Decider.Provider, "none")
+	}
+
+	be := backend.NewFake("test")
+	be.Reply = func(req backend.Request) string {
+		return `{"needs_decision": true, "type_id": "investor_request", "confidence": 0.9}`
+	}
+	msg := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "r25-config-provider-1", External: true},
+		From:    "investor@meridian.example",
+		Subject: "Series B follow-on",
+		Body:    "Can you send the latest deck by Friday?",
+	}
+	if err := deps.store.Upsert(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	trig := buildDecisionsTrigger(deps, be, resolved.Decider.Provider)
+	if trig == nil {
+		t.Fatal("buildDecisionsTrigger returned nil")
+	}
+	cards, err := trig.Run(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 || cards[0].TypeID != "investor_request" {
+		t.Fatalf("cards = %+v, want exactly one investor_request card", cards)
+	}
+}
+
+// TestBuildDecisionsTriggerFallsBackToNullOnUnsupportedProvider covers the
+// defensive branch buildDecisionsTrigger takes when decider.New errors
+// (unreachable through real config today, since apply() already rejects
+// anything but "none" before this ever runs) — it must fall back to
+// decider.Null{} and keep classifying normally, not fail daemon startup
+// over a decider nothing outward-facing depends on.
+func TestBuildDecisionsTriggerFallsBackToNullOnUnsupportedProvider(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WATER_HOME", home)
+	deps, err := buildTwinDepsFS(water.TwinsFS(), demoTwinID, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deps.Close()
+
+	be := backend.NewFake("test")
+	be.Reply = func(req backend.Request) string {
+		return `{"needs_decision": true, "type_id": "investor_request", "confidence": 0.9}`
+	}
+	msg := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "r25-bad-provider-1", External: true},
+		From:    "investor@meridian.example",
+		Subject: "Series B follow-on",
+		Body:    "Can you send the latest deck by Friday?",
+	}
+	if err := deps.store.Upsert(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	trig := buildDecisionsTrigger(deps, be, "bogus-provider")
+	if trig == nil {
+		t.Fatal("buildDecisionsTrigger returned nil")
+	}
+	cards, err := trig.Run(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 || cards[0].TypeID != "investor_request" {
+		t.Fatalf("cards = %+v, want exactly one investor_request card", cards)
 	}
 }
