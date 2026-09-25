@@ -2,6 +2,7 @@ package reflex
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -264,6 +265,23 @@ func TestCachedBriefHitAndMiss(t *testing.T) {
 	}
 	if res.Text != "Today: 1 event." || !res.Tainted {
 		t.Fatalf("got %+v", res)
+	}
+}
+
+// TestCachedBriefNilFunc reproduces a real panic found during Slice R's
+// live Phase 4 verification: internal/nervous/eval/live.go builds a
+// reflex.Deps without ever setting Brief (the eval harness has no real
+// brief cache to query), and every existing test's shared testFixture
+// papers over this by always setting a non-nil stub, so the bug went
+// uncaught until a live "brief.today"-shaped case actually reached this
+// handler through the real Tier 1 eval. A nil Deps.Brief must read as an
+// honest cache miss, not a nil-func-call panic.
+func TestCachedBriefNilFunc(t *testing.T) {
+	deps, _, _ := testFixture(t)
+	deps.Brief = nil
+	_, err := cachedBriefHandler(context.Background(), deps, Args{})
+	if !errors.Is(err, ErrBriefCacheMiss) {
+		t.Fatalf("err = %v, want ErrBriefCacheMiss", err)
 	}
 }
 

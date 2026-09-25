@@ -118,6 +118,15 @@ func RunTier1Live(ctx context.Context, opts Tier1LiveOptions) (sidecar.EvalRecor
 			Store:     reflex.NewStoreView(st),
 			Approvals: fixturePendingLister{},
 			Now:       func() time.Time { return fixture.Now },
+			// The eval harness has no real brief cache to query, and a
+			// brief.today-shaped eval case must escalate cleanly (matching
+			// production's own fail-closed behavior on a cache miss), not
+			// crash the eval run. reflex.cachedBriefHandler also nil-checks
+			// this itself now, but set it explicitly here too so intent is
+			// unambiguous at the call site.
+			Brief: func(context.Context, string) (string, bool, bool, error) {
+				return "", false, false, nil
+			},
 		},
 		ents: fixtureEntities(fixture),
 		now:  fixture.Now,

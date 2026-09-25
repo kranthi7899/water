@@ -208,6 +208,13 @@ func latestFromHandler(ctx context.Context, d Deps, a Args) (render.Result, erro
 }
 
 func cachedBriefHandler(ctx context.Context, d Deps, a Args) (render.Result, error) {
+	if d.Brief == nil {
+		// A caller that never wires Deps.Brief (the eval harness has no
+		// real brief cache to query) reads as an honest cache miss, not a
+		// nil-call panic — the same fail-safe posture d.Tasks/d.Manifest/
+		// d.Health already get in this file.
+		return render.Result{}, ErrBriefCacheMiss
+	}
 	day := d.now().Format("2006-01-02")
 	text, tainted, ok, err := d.Brief(ctx, day)
 	if err != nil {
