@@ -1313,7 +1313,7 @@ Each task is one commit (message prefix `R-<n>:`) with its own tests, and each c
     - `eligibility_test.go`: every escalate word and phrase; the multi-clause cases; `too_long`;
     - `tier0_test.go`: a tie gives `ambiguous_match`; unresolved or ambiguous person gives `slot_unresolved`; a deny word gives `action_word`; an inactive intent gives `intent_inactive:<id>`; a handler error escalates; "yes" with 0 pending is not matched; the timeout path; the fake backend shows 0 calls.
   - Flag: `router.tier0.enabled` (code default on).
-- [ ] **R-12 Runtime split, main path, front door** (`internal/nervous/{nervous.go,mainpath.go,ack.go}`, `internal/runtime/runtime.go`).
+- [x] **R-12 Runtime split, main path, front door** (`internal/nervous/{nervous.go,mainpath.go,ack.go}`, `internal/runtime/runtime.go`).
   - Delete `internal/runtime/fastpath.go` and `fastpath_test.go`, whose cases now live in the eval set and the embedded tests. Update `runtime_test.go` and `turnfixes_test.go` to `ModelTurn`.
   - Tests (`nervous_test.go`, `backend.NewFake`, fake `Clock`):
     - the earlier plan's R1-13 cases, with `main` in place of `t2`;
