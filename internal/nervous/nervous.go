@@ -11,6 +11,7 @@ import (
 	"water/internal/nervous/render"
 	"water/internal/nervous/slots"
 	"water/internal/nervous/speak"
+	"water/internal/nervous/t1"
 	"water/internal/nervous/tmpl"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
@@ -66,6 +67,15 @@ type Config struct {
 
 	Tier0Enabled bool
 	MainEnabled  bool
+
+	// Tier1Enabled and T1 gate Tier 1 (R-18): both must be set (T1 non-nil)
+	// for Handle to ever attempt it. T1 is nil in every test and daemon
+	// build until something has actually passed the live eval gate and
+	// built a real sidecar client — there is no default here, unlike
+	// Tier0Enabled/MainEnabled, because a present-but-untrusted T1 client
+	// must never be attempted implicitly.
+	Tier1Enabled bool
+	T1           t1.Client
 
 	// AckAfter bounds how long an unrouted turn waits before Handle emits a
 	// handoff acknowledgement on its own (Design §17: default 250ms).
@@ -126,6 +136,7 @@ type Nervous struct {
 
 	ring         *reflexRing
 	tier0Breaker *Breaker
+	tier1Breaker *Breaker
 	toolTracer   *ToolTracer
 
 	quickOnce sync.Once
@@ -170,6 +181,10 @@ func New(cfg Config) (*Nervous, error) {
 		toolTracer: NewToolTracer(),
 	}
 	n.tier0Breaker = NewBreaker(cfg.Breaker, cfg.Clock)
+	// Tier 1 gets its own breaker instance (same config shape, independent
+	// state): a run of Tier 1 handler errors must not also silence Tier 0,
+	// and vice versa.
+	n.tier1Breaker = NewBreaker(cfg.Breaker, cfg.Clock)
 	return n, nil
 }
 
@@ -373,6 +388,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 	var result *render.Result
 	escReason := elReason
 	var briefCacheMiss bool
+	answeredTier := ""
 
 	if eligible && n.cfg.Tier0Enabled && n.tier0Breaker.Allow() {
 		rec.beginTier("t0")
@@ -395,6 +411,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 			}
 		} else if result != nil {
 			n.tier0Breaker.RecordSuccess()
+			answeredTier = "t0"
 		}
 		// A clean "escalate, no match" outcome (no_match/ambiguous_match/
 		// slot_unresolved/action_word) is not itself a Tier 0 failure —
@@ -403,32 +420,61 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 		escReason = "breaker_open"
 	}
 
+	// Tier 1 (R-18) is tried only when Tier 0 itself came back with a clean
+	// "no_match": never for an eligibility rejection (escalate_word,
+	// multi_clause, too_long, empty), never for breaker_open, and never for
+	// any of Tier 0's own other escalation reasons (action_word,
+	// slot_unresolved, ambiguous_match, handler_error, brief_cache_miss) —
+	// those all mean a quick tier already recognized something about the
+	// utterance that Tier 1 guessing again would not safely resolve.
+	if result == nil && escReason == "no_match" && n.cfg.Tier1Enabled && n.cfg.T1 != nil {
+		if n.tier1Breaker.Allow() {
+			rec.beginTier("t1")
+			var err error
+			result, escReason, err = TryTier1(ctx, reg, deps, n.cfg.T1, u, at, ents)
+			rec.endTier("t1")
+			if err != nil {
+				escReason = "handler_error"
+				n.tier1Breaker.RecordFailure(escReason)
+			} else if result != nil {
+				n.tier1Breaker.RecordSuccess()
+				answeredTier = "t1"
+			}
+			// A clean Tier 1 escalation (t1_no_call/t1_multi_call/t1_text/
+			// t1_unknown_intent/t1_ungrounded/action_word/slot_unresolved/
+			// ambiguous_match) is not itself a Tier 1 failure, exactly like
+			// Tier 0's own clean escalations above.
+		} else {
+			escReason = "t1_breaker_open"
+		}
+	}
+
 	rec.escalationReason = escReason
 
 	if result != nil {
-		n.answerQuick(id, t, *result, env, emit, rec)
+		n.answerQuick(id, t, *result, env, emit, rec, answeredTier)
 		return
 	}
 
 	n.answerMain(ctx, id, t, env, emit, fireAck, ackTimer, briefCacheMiss, rec)
 }
 
-// answerQuick delivers a Tier 0 (or, once a later task adds it, Tier 1)
-// answer: it owns the turn from here, renders through the twin's one style,
-// escalates taint, and surfaces an approval request if the intent staged
-// one (a write intent, wired by a later task — Tier 0 as built in R-12
-// never sets ApprovalID itself, but the delivery path already handles it so
-// that task needs no change here).
-func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event), rec *routeRecorder) {
+// answerQuick delivers a Tier 0 or Tier 1 answer: it owns the turn from
+// here, renders through the twin's one style, escalates taint, and
+// surfaces an approval request if the intent staged one (a write intent,
+// wired by a later task — neither TryTier0 nor TryTier1 as built here ever
+// sets ApprovalID itself, but the delivery path already handles it so that
+// task needs no change here). tier is "t0" or "t1", whichever answered.
+func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event), rec *routeRecorder, tier string) {
 	rec.owner = "quick"
-	rec.answeredBy = "t0" // Tier 1 (R-18) will pass its own tier id once it exists
+	rec.answeredBy = tier
 	rec.intent = result.Intent
-	// Tier 0 as built (R-11's TryTier0) only ever runs a read intent's
-	// handler — write intents route through a separate proposal path a
-	// later task builds (Design §12) — so every quick answer reaching here
-	// today is intent_kind "read". IntentOrigin ("embedded" vs "learned")
-	// has no meaning yet either: the promotion loop that creates learned
-	// intents doesn't exist until R-22/23.
+	// Neither TryTier0 nor TryTier1 as built here ever runs a write
+	// intent's proposer — write intents route through a separate proposal
+	// path a later task builds (Design §12) — so every quick answer
+	// reaching here today is intent_kind "read". IntentOrigin ("embedded"
+	// vs "learned") has no meaning yet either: the promotion loop that
+	// creates learned intents doesn't exist until R-22/23.
 	rec.intentKind = "read"
 	rec.outcome = quickOutcome(result)
 
