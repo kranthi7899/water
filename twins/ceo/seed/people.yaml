@@ -1,0 +1,213 @@
+# Water seed: people roster
+# Source of truth for who works on what. Connectors (Linear, Gmail, Slack) resolve to these records;
+# they never define people themselves.
+#
+# As of: 2026-09-25
+# allocation: fraction of a 40h week, per project. Hours invested are derived, not stored:
+#   hours = allocation * 40 * weeks_since(project.start_date)
+# identities: how each connector refers to this person. Linear uses the Owner label for now
+# (people are not real Linear members). Email and Slack handles are placeholders to fill in.
+
+company:
+  name: Renaissance
+  headcount: 19
+  blended_hourly_cost_usd: 85   # illustrative, used only for people-cost estimates
+
+teams:
+  - {id: water,        name: Water,        linear_key: WAT}
+  - {id: kevin,        name: Kevin,        linear_key: KEV}
+  - {id: yt-recamendo, name: YT-Recamendo, linear_key: YTR}
+  - {id: crawler,      name: Crawler,      linear_key: CRA}
+  - {id: voice-text,   name: Voice_text,   linear_key: VOI}
+  - {id: econ-rag,     name: Econ-RAG,     linear_key: ECO}
+  - {id: operations,   name: Operations,   linear_key: OPE}
+
+projects:
+  - {id: ingestion-v2,       name: Ingestion v2,             team: crawler,      linear: P-CRA-1,  start: 2026-08-18, target: 2026-11-15}
+  - {id: ranking-quality,    name: Ranking quality,          team: crawler,      linear: P-CRA-2,  start: 2026-09-01, target: 2026-12-01}
+  - {id: halcyon-rollout,    name: Halcyon rollout,          team: econ-rag,     linear: P-ECO-3,  start: 2026-08-25, target: 2026-10-30}
+  - {id: citation-accuracy,  name: Citation accuracy,        team: econ-rag,     linear: P-ECO-4,  start: 2026-09-08, target: 2026-11-20}
+  - {id: taste-profile-v2,   name: Taste profile v2,         team: yt-recamendo, linear: P-YTR-5,  start: 2026-08-11, target: 2026-11-10}
+  - {id: meridian-renewal,   name: Meridian renewal,         team: yt-recamendo, linear: P-YTR-6,  start: 2026-09-01, target: 2026-10-15}
+  - {id: fenwick-pilot,      name: Fenwick enterprise pilot, team: voice-text,   linear: P-VOI-7,  start: 2026-09-02, target: 2026-10-20}
+  - {id: latency-reduction,  name: Latency reduction,        team: voice-text,   linear: P-VOI-8,  start: 2026-10-21, target: 2026-11-30}
+  - {id: memory-api-beta,    name: Memory API beta,          team: kevin,        linear: P-KEV-9,  start: 2026-08-04, target: 2026-12-15}
+  - {id: ceo-assistant-v1,   name: CEO assistant v1,         team: water,        linear: P-WAT-10, start: 2026-09-15, target: 2026-11-30}
+
+people:
+  # --- Water ---
+  - id: kranthi
+    name: Kranthi
+    role: CEO
+    home_team: water
+    leads: [water, ceo-assistant-v1]
+    allocation: {ceo-assistant-v1: 0.4}     # remaining 0.6 = company-wide CEO work
+    identities: {linear_owner_label: Kranthi, email: null, slack: null}
+
+  - id: devon
+    name: Devon
+    role: Engineer
+    home_team: water
+    allocation: {ceo-assistant-v1: 1.0}
+    identities: {linear_owner_label: Devon, email: null, slack: null}
+
+  # --- Kevin ---
+  - id: sam
+    name: Sam
+    role: Lead
+    home_team: kevin
+    leads: [kevin, memory-api-beta]
+    allocation: {memory-api-beta: 1.0}
+    identities: {linear_owner_label: Sam, email: null, slack: null}
+
+  - id: casey
+    name: Casey
+    role: Engineer
+    home_team: kevin
+    allocation: {memory-api-beta: 1.0}
+    identities: {linear_owner_label: Casey, email: null, slack: null}
+
+  # --- YT-Recamendo ---
+  - id: priya
+    name: Priya
+    role: Lead
+    home_team: yt-recamendo
+    leads: [yt-recamendo, taste-profile-v2, meridian-renewal]
+    allocation: {taste-profile-v2: 0.5, meridian-renewal: 0.5}
+    owns_clients: [meridian-records, northstar-radio]
+    identities: {linear_owner_label: Priya, email: null, slack: null}
+
+  - id: harper
+    name: Harper
+    role: Engineer
+    home_team: yt-recamendo
+    allocation: {taste-profile-v2: 0.7, meridian-renewal: 0.3}
+    identities: {linear_owner_label: Harper, email: null, slack: null}
+
+  # --- Crawler ---
+  - id: lee
+    name: Lee
+    role: Lead
+    home_team: crawler
+    leads: [crawler]
+    allocation: {ingestion-v2: 0.5, ranking-quality: 0.5}
+    owns_clients: [atlas-research]
+    identities: {linear_owner_label: Lee, email: null, slack: null}
+
+  - id: theo
+    name: Theo
+    role: Engineer, ingestion and traversal
+    home_team: crawler
+    leads: [ingestion-v2]
+    allocation: {ingestion-v2: 1.0}
+    identities: {linear_owner_label: Theo, email: null, slack: null}
+
+  - id: nina
+    name: Nina
+    role: Engineer, ranking and embeddings
+    home_team: crawler
+    leads: [ranking-quality]
+    allocation: {ranking-quality: 1.0}
+    identities: {linear_owner_label: Nina, email: null, slack: null}
+
+  # --- Voice_text ---
+  - id: jordan
+    name: Jordan
+    role: Lead
+    home_team: voice-text
+    leads: [voice-text, fenwick-pilot]
+    allocation: {fenwick-pilot: 1.0}        # moves to latency-reduction from 2026-10-21
+    owns_clients: [fenwick-legal]
+    identities: {linear_owner_label: Jordan, email: null, slack: null}
+
+  - id: sasha
+    name: Sasha
+    role: Engineer
+    home_team: voice-text
+    leads: [latency-reduction]
+    allocation: {fenwick-pilot: 1.0}        # moves to latency-reduction from 2026-10-21
+    identities: {linear_owner_label: Sasha, email: null, slack: null}
+
+  # --- Econ-RAG ---
+  - id: dana
+    name: Dana
+    role: Lead
+    home_team: econ-rag
+    leads: [econ-rag, halcyon-rollout]
+    allocation: {halcyon-rollout: 0.7, citation-accuracy: 0.3}
+    owns_clients: [halcyon-university, ridgeview-college]
+    identities: {linear_owner_label: Dana, email: null, slack: null}
+
+  - id: kai
+    name: Kai
+    role: Engineer
+    home_team: econ-rag
+    leads: [citation-accuracy]
+    allocation: {halcyon-rollout: 0.4, citation-accuracy: 0.6}
+    identities: {linear_owner_label: Kai, email: null, slack: null}
+
+  # --- Operations (shared across teams) ---
+  - id: riley
+    name: Riley
+    role: Finance and ops lead
+    home_team: operations
+    allocation: {}                          # company-wide: payroll, vendors, investor update numbers
+    identities: {linear_owner_label: Riley, email: null, slack: null}
+
+  - id: morgan
+    name: Morgan
+    role: People and HR lead
+    home_team: operations
+    allocation: {}                          # company-wide: hiring, onboarding
+    identities: {linear_owner_label: Morgan, email: null, slack: null}
+
+  - id: avery
+    name: Avery
+    role: BD and partnerships lead
+    home_team: operations
+    also_on_teams: [yt-recamendo, voice-text]
+    allocation: {meridian-renewal: 0.25, fenwick-pilot: 0.15}   # remaining 0.6 = new business
+    identities: {linear_owner_label: Avery, email: null, slack: null}
+
+  - id: blair
+    name: Blair
+    role: Customer success
+    home_team: operations
+    also_on_teams: [econ-rag, voice-text]
+    allocation: {halcyon-rollout: 0.2, fenwick-pilot: 0.3}      # remaining 0.5 = subscribers, Atlas
+    owns_clients: [voice-text-subscribers]
+    identities: {linear_owner_label: Blair, email: null, slack: null}
+
+  - id: quinn
+    name: Quinn
+    role: Design lead
+    home_team: operations
+    also_on_teams: [econ-rag, yt-recamendo, voice-text]
+    allocation: {halcyon-rollout: 0.3, taste-profile-v2: 0.2, fenwick-pilot: 0.2}  # remaining 0.3 = brand
+    identities: {linear_owner_label: Quinn, email: null, slack: null}
+
+  - id: rowan
+    name: Rowan
+    role: Platform engineer
+    home_team: crawler
+    also_on_teams: [econ-rag, yt-recamendo]
+    allocation: {ingestion-v2: 0.6}         # remaining 0.4 = consumer integrations
+    identities: {linear_owner_label: Rowan, email: null, slack: null}
+
+external:
+  clients:
+    - {id: meridian-records,     name: Meridian Records,     product: yt-recamendo, owner: priya,  mrr_usd: 9000,  renewal: 2026-10-15}
+    - {id: northstar-radio,      name: Northstar Radio,      product: yt-recamendo, owner: priya,  mrr_usd: 5000}
+    - {id: fenwick-legal,        name: Fenwick Legal,        product: voice-text,   owner: jordan, mrr_usd: 0, potential_mrr_usd: 6000, status: pilot}
+    - {id: halcyon-university,   name: Halcyon University,   product: econ-rag,     owner: dana,   mrr_usd: 0, potential_mrr_usd: 4000, status: pilot}
+    - {id: ridgeview-college,    name: Ridgeview College,    product: econ-rag,     owner: dana}
+    - {id: nimbus-ai,            name: Nimbus AI,            product: kevin,        owner: sam,    mrr_usd: 0, status: design_partner}
+    - {id: atlas-research,       name: Atlas Research,       product: crawler,      owner: lee,    mrr_usd: 4000}
+    - {id: voice-text-subscribers, name: Voice_text subscribers (~40), product: voice-text, owner: blair, mrr_usd: 9000}
+  vendors:
+    - {id: aria-speech,     name: Aria Speech API,   product: voice-text}
+    - {id: cortex-metadata, name: Cortex Metadata,   product: yt-recamendo}
+    - {id: lexicon-archive, name: Lexicon Archive,   product: econ-rag, monthly_usd: 2800, renewal: 2026-11-30}
+  contacts:
+    - {id: marcus, name: Marcus, role: Investor}
+    - {id: alex,   name: Alex,   role: Candidate, for_team: crawler, stage: final_interview}

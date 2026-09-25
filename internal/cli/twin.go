@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"water/internal/nervous/propose"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
+	"water/internal/roster"
 	"water/internal/store"
 	"water/internal/twinlink"
 	"water/internal/twins"
@@ -284,6 +286,16 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 	st, err := store.Open(twinStorePath(id))
 	if err != nil {
 		return nil, fmt.Errorf("store: %w", err)
+	}
+	// The people roster (twins/<id>/seed/people.yaml, internal/roster) is
+	// additive and optional — most twins (ceo-demo, counterparty) have
+	// none, and roster.Load returns nil for that case. A present-but-
+	// malformed file fails loudly here, before anything else opens, the
+	// same posture every other twin file already has. Idempotent: safe to
+	// re-run on every daemon startup.
+	if err := roster.Load(context.Background(), fsys, id, st); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("roster: %w", err)
 	}
 	reg, err := buildCEORegistry(id, st, mailAddress, signatureName, githubRepo)
 	if err != nil {
