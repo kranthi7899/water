@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"os"
@@ -8,10 +9,13 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"water"
+	"water/internal/backend"
 	"water/internal/connectors/fake"
 	"water/internal/connectors/github"
+	"water/internal/store"
 	"water/internal/twins"
 )
 
@@ -248,5 +252,55 @@ func TestBuildCEORegistryPicksRealOrFakeGitHubLinearHubSpot(t *testing.T) {
 	}
 	if _, isFake := conn.(*fake.GitHub); !isFake {
 		t.Fatalf("demo registry's github connector is %T, want *fake.GitHub", conn)
+	}
+}
+
+// TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier is
+// R-24's regression guard: buildDecisionsTrigger now wraps its
+// ModelClassifier with decider.Wrap(decider.Null{}, classifier, reg) before
+// StoreCache. decider.Wrap with a Null decider returns the classifier it
+// was given UNCHANGED (see internal/decider/classifier.go), so this must
+// classify and build a card exactly as the pre-R-24 unwrapped
+// ModelClassifier did — same backend call, same matched type, same card.
+func TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("WATER_HOME", home)
+	deps, err := buildTwinDepsFS(water.TwinsFS(), demoTwinID, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer deps.Close()
+
+	be := backend.NewFake("test")
+	be.Reply = func(req backend.Request) string {
+		return `{"needs_decision": true, "type_id": "investor_request", "confidence": 0.9}`
+	}
+
+	msg := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "r24-regress-1", External: true},
+		From:    "investor@meridian.example",
+		Subject: "Series B follow-on",
+		Body:    "Can you send the latest deck by Friday?",
+	}
+	if err := deps.store.Upsert(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	trig := buildDecisionsTrigger(deps, be)
+	if trig == nil {
+		t.Fatal("buildDecisionsTrigger returned nil")
+	}
+	cards, err := trig.Run(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 {
+		t.Fatalf("cards = %d, want exactly 1", len(cards))
+	}
+	if cards[0].TypeID != "investor_request" {
+		t.Fatalf("card TypeID = %q, want %q", cards[0].TypeID, "investor_request")
+	}
+	if be.Calls() < 1 {
+		t.Fatal("expected the (unwrapped-behavior) classifier to have called the backend at least once")
 	}
 }

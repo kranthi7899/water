@@ -32,6 +32,17 @@ type Config struct {
 	Agent    AgentConfig    `yaml:"agent"`
 	GitHub   GitHubConfig   `yaml:"github"`
 	Router   RouterConfig   `yaml:"router"`
+	Decider  DeciderConfig  `yaml:"decider"`
+}
+
+// DeciderConfig selects the internal/decider.Decider implementation
+// (docs/slices/R.md §15/§17). Landed with R-24, the task that builds
+// internal/decider, the same early-landing call R-21/R-23 made for their
+// own flags: only "none" (internal/decider.Null) is supported today, and
+// apply() rejects anything else — there is no Jev or other adapter to
+// select yet.
+type DeciderConfig struct {
+	Provider string `yaml:"provider"`
 }
 
 // RouterConfig configures Slice R's nervous-system router
@@ -228,6 +239,7 @@ func defaults() map[string]string {
 		"router.promotion.max_learned":          "20",
 		"router.promotion.demote_miss_rate_pct": "20",
 		"router.promotion.demote_min_samples":   "10",
+		"decider.provider":                      "none",
 	}
 }
 
@@ -356,6 +368,10 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Router.Promotion.MaxLearned = atoi("router.promotion.max_learned")
 	r.Router.Promotion.DemoteMissRatePct = atoi("router.promotion.demote_miss_rate_pct")
 	r.Router.Promotion.DemoteMinSamples = atoi("router.promotion.demote_min_samples")
+	r.Decider.Provider = flat["decider.provider"]
+	if r.Decider.Provider != "none" && err == nil {
+		err = fmt.Errorf("decider.provider: only \"none\" is supported")
+	}
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -414,6 +430,7 @@ func (r *Resolved) Flat() map[string]string {
 		"router.promotion.max_learned":          strconv.Itoa(r.Router.Promotion.MaxLearned),
 		"router.promotion.demote_miss_rate_pct": strconv.Itoa(r.Router.Promotion.DemoteMissRatePct),
 		"router.promotion.demote_min_samples":   strconv.Itoa(r.Router.Promotion.DemoteMinSamples),
+		"decider.provider":                      r.Decider.Provider,
 	}
 }
 

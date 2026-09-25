@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,7 @@ func TestSaveRejectsInvalidValues(t *testing.T) {
 		"voice.allow_metered":   "maybe",
 		"schema":                "7",
 		"brief.ready_after":     "7am",
+		"decider.provider":      "jev",
 	} {
 		if err := Save(map[string]string{k: v}); err == nil {
 			t.Errorf("Save(%s=%q) succeeded; want an error", k, v)
@@ -125,6 +127,36 @@ func TestLoadRejectsBadReadyAfter(t *testing.T) {
 	t.Setenv("WATER_HOME", t.TempDir())
 	if _, err := Load(map[string]string{"brief.ready_after": "7am"}); err == nil {
 		t.Fatal("brief.ready_after=7am should fail to load")
+	}
+}
+
+// TestDeciderProviderDefaultsToNoneAndRejectsAnythingElse is R-24's own
+// config test: decider.provider defaults to "none" (internal/decider.Null),
+// round-trips when explicitly set to "none", and apply() refuses any other
+// value with a clear error naming the key — there is no Jev or other
+// adapter to select yet (docs/slices/R.md §15/§17).
+func TestDeciderProviderDefaultsToNoneAndRejectsAnythingElse(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	r, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Decider.Provider != "none" {
+		t.Fatalf("decider.provider default = %q, want %q", r.Decider.Provider, "none")
+	}
+
+	r, err = Load(map[string]string{"decider.provider": "none"})
+	if err != nil {
+		t.Fatalf("decider.provider=none should load: %v", err)
+	}
+	if r.Decider.Provider != "none" || r.Flat()["decider.provider"] != "none" {
+		t.Fatalf("decider.provider did not round trip: %+v", r.Flat())
+	}
+
+	if _, err := Load(map[string]string{"decider.provider": "jev"}); err == nil {
+		t.Fatal("decider.provider=jev should fail to load")
+	} else if !strings.Contains(err.Error(), `decider.provider: only "none" is supported`) {
+		t.Fatalf("decider.provider=jev error = %q, want it to say only \"none\" is supported", err.Error())
 	}
 }
 
@@ -221,6 +253,11 @@ func TestEveryKeyRoundTrips(t *testing.T) {
 			flags[k] = strconv.Itoa(1000 + i)
 		case k == "brief.ready_after":
 			flags[k] = "05:4" + strconv.Itoa(i%10)
+		case k == "decider.provider":
+			// apply() rejects anything but "none" (only Null is supported
+			// today), so this key can't take an arbitrary "v-<key>" value
+			// like the other string keys below.
+			flags[k] = "none"
 		default:
 			flags[k] = "v-" + k
 		}

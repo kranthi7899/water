@@ -20,6 +20,7 @@ import (
 	"water/internal/connectors/google/gmail"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
+	"water/internal/decider"
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/nervous/intents"
@@ -328,11 +329,20 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 // backend selection happens later in the daemon's startup); the result is
 // always non-nil given a valid deps (NewTriager only errors on a nil
 // classifier or candidate, and neither is ever nil here).
+//
+// R-24: the classifier is wrapped with decider.Wrap(decider.Null{}, ...)
+// before StoreCache sees it. decider.provider has no settable config key
+// yet (that lands in R-25 alongside the rest of §17's keys), so Null{} is
+// hardcoded here; Wrap with a Null decider returns the ModelClassifier
+// UNCHANGED (see decider.Wrap's doc comment), so this line is provably a
+// no-op today — TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier
+// in twin_test.go is the regression guard.
 func buildDecisionsTrigger(deps *twinDeps, be backend.Backend) *decisions.Trigger {
 	model := deps.manifest.ModelFor(twins.TierFast)
 	charge := func() error { return deps.gate.ModelCall(gate.P1) }
 	classifier := &decisions.ModelClassifier{Registry: deps.decisions, Backend: be, Model: model, Charge: charge}
-	cached := &decisions.StoreCache{Store: deps.store, Inner: classifier}
+	wrapped := decider.Wrap(decider.Null{}, classifier, deps.decisions)
+	cached := &decisions.StoreCache{Store: deps.store, Inner: wrapped}
 	triager, err := decisions.NewTriager(cached, decisions.Candidate)
 	if err != nil {
 		return nil
