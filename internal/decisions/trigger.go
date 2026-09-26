@@ -42,6 +42,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"water/internal/store"
@@ -124,6 +125,55 @@ type Trigger struct {
 	// Window bounds how far back Run looks ("Since" on store.Query). Zero
 	// means DefaultWindow.
 	Window time.Duration
+	// CardTTL is how long a pass's cards are reused before Run builds them
+	// again (config decisions.card_ttl_seconds). Every build fetches each
+	// card's evidence through the gate, so without it the needs-you ticker,
+	// GET /v1/decisions and the brief each spend the hourly rate caps the
+	// CEO's own questions share. Zero caches nothing (every Run rebuilds).
+	CardTTL time.Duration
+
+	// The card cache (see RunReport). mu guards cached, cachedAt and gen;
+	// buildMu is held for a whole rebuild so racing callers on a stale
+	// cache share one build instead of each fetching every card's evidence.
+	mu       sync.Mutex
+	buildMu  sync.Mutex
+	cached   *Report
+	cachedAt time.Time
+	gen      uint64
+}
+
+// Invalidate drops the cached pass, so the next Run rebuilds every card. A
+// pass already being built when Invalidate is called is still returned to
+// its own caller but is not cached. Nothing needs to call it for card
+// state: dismissed cards are filtered and staged state is read from the
+// store on every request (internal/gateway, internal/needsyou), never from
+// the cached cards. It is for a change to what a card itself is built
+// from that must show before CardTTL runs out.
+func (tr *Trigger) Invalidate() {
+	tr.mu.Lock()
+	tr.cached = nil
+	tr.gen++
+	tr.mu.Unlock()
+}
+
+// fresh returns a copy of the cached pass when one was built within
+// CardTTL of now. A now earlier than the cached build (a clock that went
+// backwards, or a caller asking about the past) is never served from it.
+func (tr *Trigger) fresh(now time.Time) (Report, uint64, bool) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.cached == nil || now.Before(tr.cachedAt) || now.Sub(tr.cachedAt) >= tr.CardTTL {
+		return Report{}, tr.gen, false
+	}
+	return tr.cached.clone(), tr.gen, true
+}
+
+// clone copies r's slices, so a caller sorting or filtering the cards it
+// got (decisions.Rank sorts in place) never touches the cached pass. The
+// cards themselves are shared and read-only, as they always were between
+// the gateway handlers and the brief.
+func (r Report) clone() Report {
+	return Report{Cards: append([]*Card(nil), r.Cards...), Skipped: append([]error(nil), r.Skipped...)}
 }
 
 // Report is one RunReport pass: the cards that built, and one error per
@@ -138,9 +188,10 @@ type Report struct {
 // Run scans messages created since now-Window and, for each the Triager's
 // candidate predicate flags, classifies it (a no-op against either cache
 // once already classified) and builds a Card when the classification says a
-// decision is needed. It returns the cards built on this call; nothing here
-// persists cards themselves (only the classification verdict is cached, so
-// a rebuilt card always reflects current gate/connector state).
+// decision is needed. Nothing here persists cards themselves (only the
+// classification verdict is stored); with CardTTL set, the last pass is
+// kept in memory and returned again until it is CardTTL old, so a card
+// reflects gate/connector state as of at most CardTTL ago (see RunReport).
 //
 // A per-item failure is skipped, not fatal: the cards that did build are
 // still returned (use RunReport to see what was skipped). Only failing to
@@ -151,10 +202,43 @@ func (tr *Trigger) Run(ctx context.Context, now time.Time) ([]*Card, error) {
 }
 
 // RunReport is Run, also reporting each skipped item.
+//
+// With CardTTL set, a pass built less than CardTTL ago is returned again
+// (skipped items included: they are retried when the pass is rebuilt)
+// instead of rebuilding. Only a complete pass is cached: a listing error
+// or a context that ended mid-build (whose failed fetches became card
+// gaps) is returned to its caller and never served to anyone else.
 func (tr *Trigger) RunReport(ctx context.Context, now time.Time) (Report, error) {
 	if tr == nil || tr.Store == nil || tr.Triager == nil || tr.Builder == nil {
 		return Report{}, fmt.Errorf("decisions: trigger needs a store, a triager and a builder")
 	}
+	if tr.CardTTL <= 0 {
+		return tr.build(ctx, now)
+	}
+	if rep, _, ok := tr.fresh(now); ok {
+		return rep, nil
+	}
+	tr.buildMu.Lock()
+	defer tr.buildMu.Unlock()
+	rep, gen, ok := tr.fresh(now) // another caller may have rebuilt meanwhile
+	if ok {
+		return rep, nil
+	}
+	rep, err := tr.build(ctx, now)
+	if err != nil || ctx.Err() != nil {
+		return rep, err
+	}
+	tr.mu.Lock()
+	if tr.gen == gen {
+		c := rep.clone()
+		tr.cached, tr.cachedAt = &c, now
+	}
+	tr.mu.Unlock()
+	return rep, nil
+}
+
+// build is one uncached pass: list, classify, build.
+func (tr *Trigger) build(ctx context.Context, now time.Time) (Report, error) {
 	window := tr.Window
 	if window <= 0 {
 		window = DefaultWindow

@@ -225,7 +225,11 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 		return refuse(err)
 	}
 	f, _ := g.cfg.Manifest.Function(c.Function)
-	if !g.takeRate(c.Function, f.Rate) {
+	if limit, ok := g.takeRate(c.Function, f.Rate, c.Origin); !ok {
+		if limit < f.Rate.Max {
+			return refuse(deny("rate cap for %s reached for background origin %s (%d of %d per %s; the rest is reserved for P0)",
+				c.Function, c.Origin, limit, f.Rate.Max, time.Duration(f.Rate.Per)))
+		}
 		return refuse(deny("rate cap for %s reached (%d per %s)", c.Function, f.Rate.Max, time.Duration(f.Rate.Per)))
 	}
 	var cred vault.Secret
@@ -351,11 +355,37 @@ func NeedsEnvelope(level twins.Level, taint Taint) bool {
 	return level == twins.A || (level == twins.S && taint != Clean)
 }
 
-func (g *Gate) takeRate(key string, rc *twins.RateCap) bool {
-	if rc == nil {
-		return true
+// backgroundRateSharePct is the share of a function's rate cap that any
+// origin other than P0 (the CEO's own immediate request) may use. The rest
+// of the window is held back for P0, so background work (the needs-you
+// ticker's card evidence at P1, mail polling at P2) can exhaust at most
+// this share and never lock the CEO's own questions out of a function.
+// Every origin's calls count toward the one shared window; the share only
+// makes non-P0 calls stop earlier. It never raises any cap.
+const backgroundRateSharePct = 75
+
+// rateLimitFor is how many calls origin may have in rc's window: the full
+// Max for P0, backgroundRateSharePct of it (rounded down, at least 1, and
+// never more than Max) for every other origin.
+func rateLimitFor(rc *twins.RateCap, origin Origin) int {
+	if origin == P0 {
+		return rc.Max
 	}
-	return g.take(key, rc.Max, time.Duration(rc.Per))
+	n := rc.Max * backgroundRateSharePct / 100
+	if n < 1 {
+		n = 1
+	}
+	return min(n, rc.Max)
+}
+
+// takeRate charges one call to key's rate window at origin's limit
+// (rateLimitFor). It returns that limit and whether the call fits.
+func (g *Gate) takeRate(key string, rc *twins.RateCap, origin Origin) (int, bool) {
+	if rc == nil {
+		return 0, true
+	}
+	limit := rateLimitFor(rc, origin)
+	return limit, g.take(key, limit, time.Duration(rc.Per))
 }
 
 // take records one use of key in a sliding window if the cap allows it. When

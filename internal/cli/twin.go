@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"water"
 	"water/internal/agentmail"
@@ -368,7 +369,10 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 // a decider nothing outward-facing depends on.
 // TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier in
 // twin_test.go is the regression guard.
-func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider string) *decisions.Trigger {
+//
+// cardTTL (config decisions.card_ttl_seconds) is how long the trigger
+// reuses its last pass of cards; see decisions.Trigger.CardTTL.
+func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider string, cardTTL time.Duration) *decisions.Trigger {
 	model := deps.manifest.ModelFor(twins.TierFast)
 	charge := func() error { return deps.gate.ModelCall(gate.P1) }
 	classifier := &decisions.ModelClassifier{Registry: deps.decisions, Backend: be, Model: model, Charge: charge}
@@ -386,5 +390,5 @@ func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider s
 		Registry: deps.decisions, Gate: deps.gate, Origin: gate.P1,
 		Phraser: &decisions.ModelPhraser{Backend: be, Model: model, Charge: charge},
 	}
-	return &decisions.Trigger{Store: deps.store, Triager: triager, Builder: builder}
+	return &decisions.Trigger{Store: deps.store, Triager: triager, Builder: builder, CardTTL: cardTTL}
 }

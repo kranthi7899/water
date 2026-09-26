@@ -414,6 +414,13 @@ connectors:
 // types and a classifier that always answers typeID.
 func newStageTestDaemon(t *testing.T, types fstest.MapFS, typeID string) (*httptest.Server, string, *approvals.Queue, *store.Store) {
 	t.Helper()
+	return newStageTestDaemonTTL(t, types, typeID, 0)
+}
+
+// newStageTestDaemonTTL is newStageTestDaemon with the trigger's card cache
+// on (cardTTL, as the daemon wires decisions.card_ttl_seconds).
+func newStageTestDaemonTTL(t *testing.T, types fstest.MapFS, typeID string, cardTTL time.Duration) (*httptest.Server, string, *approvals.Queue, *store.Store) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "water.db"))
 	if err != nil {
@@ -451,7 +458,7 @@ func newStageTestDaemon(t *testing.T, types fstest.MapFS, typeID string) (*httpt
 	if err != nil {
 		t.Fatal(err)
 	}
-	trigger := &decisions.Trigger{Store: st, Triager: triager, Builder: &decisions.Builder{Registry: decisionsReg, Gate: g, Origin: gate.P1}}
+	trigger := &decisions.Trigger{Store: st, Triager: triager, Builder: &decisions.Builder{Registry: decisionsReg, Gate: g, Origin: gate.P1}, CardTTL: cardTTL}
 	clients, err := LoadClients(filepath.Join(dir, "clients.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -650,6 +657,49 @@ func TestDismissDecisionHidesItAndBlocksStaging(t *testing.T) {
 	}
 	if got := statusOf(do(t, srv.URL, "POST", "/v1/decisions/"+id+"/dismiss", `{"reason":"`+strings.Repeat("x", 1001)+`"}`, tok)); got != http.StatusBadRequest {
 		t.Fatalf("long reason: status %d, want 400", got)
+	}
+}
+
+// TestCardStateIsNeverServedStaleFromTheCardCache: with the trigger's card
+// cache on (the daemon's default), GET /v1/decisions and the stage/dismiss
+// lookups reuse one pass of cards, but what the CEO did to a card is read
+// from the store on every request: staging shows at once, a dismissed card
+// disappears at once and can't be staged, even though the cached pass
+// still holds it.
+func TestCardStateIsNeverServedStaleFromTheCardCache(t *testing.T) {
+	srv, tok, _, st := newStageTestDaemonTTL(t, decisionType("[gmail.send_message]"), "inbound", time.Hour)
+	cards := decisionsRaw(t, srv.URL, tok)
+	if len(cards) != 1 {
+		t.Fatalf("cards = %d, want 1", len(cards))
+	}
+	var id string
+	_ = json.Unmarshal(cards[0]["ID"], &id)
+
+	// The cache is live: a second candidate stored now is not built until
+	// the pass expires.
+	if err := st.Upsert(context.Background(), &store.Message{
+		Meta: store.Meta{Source: "gmail", SourceID: "msg-2", External: true, CreatedAt: time.Now()},
+		From: "lee@example.com", Subject: "Board seat", Body: "Could you decide on the board seat by Monday?",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := decisionsRaw(t, srv.URL, tok); len(got) != 1 {
+		t.Fatalf("cards = %d, want the cached pass's 1 (is the cache on?)", len(got))
+	}
+
+	var staged decisionStageResponse
+	decodeInto(t, do(t, srv.URL, "POST", "/v1/decisions/"+id+"/stage",
+		`{"payload":{"to":["dana@example.com"],"subject":"Re: Speaking invite","body":"Yes."}}`, tok), http.StatusOK, &staged)
+	if cs := cardStateOf(t, decisionsRaw(t, srv.URL, tok)[0]); cs == nil || cs.Status != "staged" || cs.ApprovalID != staged.ApprovalID {
+		t.Fatalf("card_state after staging = %+v, want staged on %s", cs, staged.ApprovalID)
+	}
+
+	decodeInto(t, do(t, srv.URL, "POST", "/v1/decisions/"+id+"/dismiss", `{"reason":"not now"}`, tok), http.StatusOK, &decisionDismissResponse{})
+	if got := decisionsRaw(t, srv.URL, tok); len(got) != 0 {
+		t.Fatalf("GET /v1/decisions after dismiss = %d cards, want 0", len(got))
+	}
+	if got := statusOf(do(t, srv.URL, "POST", "/v1/decisions/"+id+"/stage", `{"payload":{"to":["a@b.c"],"subject":"s","body":"b"}}`, tok)); got != http.StatusConflict {
+		t.Fatalf("stage after dismiss: status %d, want 409", got)
 	}
 }
 

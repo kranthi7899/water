@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLayersAndProvenance(t *testing.T) {
@@ -383,8 +384,9 @@ func TestRouterIntBoolCoercion(t *testing.T) {
 // The needs-you ticker rebuilds every candidate decision card each tick, and
 // each rebuild fetches evidence through the gate (gmail/gdrive at P1). At
 // 120s that spent ~90 calls/h per function and exhausted the hourly rate caps
-// the CEO's own questions share, so the default must stay at 15 minutes until
-// the ticker reuses recently built cards.
+// the CEO's own questions share. The proper fix has since landed (cards are
+// reused for decisions.card_ttl_seconds, and the gate holds 25% of every rate
+// cap for P0), but this default stays at 15 minutes as a second bound.
 func TestNotifyIntervalDefaultDoesNotStarveRateCaps(t *testing.T) {
 	t.Setenv("WATER_HOME", t.TempDir())
 	r, err := Load(nil)
@@ -393,5 +395,37 @@ func TestNotifyIntervalDefaultDoesNotStarveRateCaps(t *testing.T) {
 	}
 	if r.Notify.IntervalSeconds < 900 {
 		t.Fatalf("notify.interval_seconds default = %d, want >= 900", r.Notify.IntervalSeconds)
+	}
+}
+
+// decisions.card_ttl_seconds is how long decisions.Trigger reuses its last
+// pass of cards (the rate-cap fix for the needs-you ticker): 600s by
+// default, an int key that round-trips through Flat, and never negative.
+func TestDecisionsCardTTL(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	r, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Decisions.CardTTLSeconds != 600 || r.Decisions.CardTTL() != 10*time.Minute {
+		t.Fatalf("decisions.card_ttl_seconds default = %d (%s), want 600 (10m)", r.Decisions.CardTTLSeconds, r.Decisions.CardTTL())
+	}
+	if r.Flat()["decisions.card_ttl_seconds"] != "600" {
+		t.Fatalf("Flat lost decisions.card_ttl_seconds: %q", r.Flat()["decisions.card_ttl_seconds"])
+	}
+	r, err = Load(map[string]string{"decisions.card_ttl_seconds": "0"})
+	if err != nil || r.Decisions.CardTTL() != 0 {
+		t.Fatalf("0 (no cache) should load: %v %v", r, err)
+	}
+	for _, bad := range []string{"-1", "soon"} {
+		if _, err := Load(map[string]string{"decisions.card_ttl_seconds": bad}); err == nil || !strings.Contains(err.Error(), "decisions.card_ttl_seconds") {
+			t.Errorf("decisions.card_ttl_seconds=%s: err = %v, want a refusal naming the key", bad, err)
+		}
+	}
+	if err := Save(map[string]string{"decisions.card_ttl_seconds": "900"}); err != nil {
+		t.Fatal(err)
+	}
+	if r, err = Load(nil); err != nil || r.Decisions.CardTTLSeconds != 900 {
+		t.Fatalf("saved decisions.card_ttl_seconds did not round trip: %v %v", r, err)
 	}
 }

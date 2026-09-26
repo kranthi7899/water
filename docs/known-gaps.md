@@ -500,7 +500,7 @@ daemon predates both, and no agent reported touching `~/.water`.
 - Not verified live: needs a daemon rebuild and restart, plus
   `build.sh --install`.
 
-## The needs-you ticker spends the CEO's gate rate caps (found live, 2026-09-25)
+## The needs-you ticker spends the CEO's gate rate caps (found live, 2026-09-25; fixed)
 
 `needsyou.Service.Tick` runs `decisions.Trigger.Run` every tick. That
 rebuilds every candidate card and fetches its evidence through the gate at
@@ -514,6 +514,23 @@ pinned by `TestNotifyIntervalDefaultDoesNotStarveRateCaps`. **The proper fix
 is still owed:** the ticker should reuse recently built cards (a short TTL
 cache) instead of re-fetching every tick, and background work should never be
 able to spend the budget interactive (P0) questions need.
+
+**Fixed 2026-09-25 (uncommitted at time of writing), in two parts:**
+- `decisions.Trigger` reuses its last pass of cards for `CardTTL` (new config
+  key `decisions.card_ttl_seconds`, default 600) instead of rebuilding them.
+  The needs-you ticker, `GET /v1/decisions`, the stage/dismiss/email lookups
+  and the brief all share the daemon's one trigger, so evidence is fetched at
+  most once per TTL. Card state is never cached: dismissed cards are filtered
+  and staged state is read from the store on every request. A pass whose
+  context ended mid-build is never cached, and racing callers share one build.
+- The gate holds part of every rate cap back for P0. Any origin other than P0
+  may use at most 75% of a function's cap (rounded down, at least 1), while P0
+  may use all of it. The count is one shared window, so this only makes
+  background calls stop earlier. The denial says so: "rate cap for X reached
+  for background origin p1 (N of M per ...; the rest is reserved for P0)".
+
+The 900 s `notify.interval_seconds` default stays as a second bound. Not
+verified live yet: that needs a daemon rebuild and restart.
 
 ## An "isolated" `WATER_HOME` is not isolated from real accounts (found in V-verify, 2026-09-25)
 

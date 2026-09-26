@@ -34,6 +34,24 @@ type Config struct {
 	Router   RouterConfig   `yaml:"router"`
 	Decider  DeciderConfig  `yaml:"decider"`
 	Notify   NotifyConfig   `yaml:"notify"`
+	// Decisions configures the decision-card layer (internal/decisions).
+	Decisions DecisionsConfig `yaml:"decisions"`
+}
+
+// DecisionsConfig configures internal/decisions' Trigger.
+type DecisionsConfig struct {
+	// CardTTLSeconds is how long decisions.Trigger reuses its last pass of
+	// cards before building them again (decisions.card_ttl_seconds). Each
+	// build fetches every card's evidence through the gate, so this is what
+	// keeps the needs-you ticker, GET /v1/decisions and the brief from
+	// spending the hourly rate caps the CEO's own questions share. 0 turns
+	// the cache off (every request rebuilds); negative is refused.
+	CardTTLSeconds int `yaml:"card_ttl_seconds"`
+}
+
+// CardTTL is CardTTLSeconds as a time.Duration.
+func (c DecisionsConfig) CardTTL() time.Duration {
+	return time.Duration(c.CardTTLSeconds) * time.Second
 }
 
 // DeciderConfig selects the internal/decider.Decider implementation
@@ -340,6 +358,7 @@ func defaults() map[string]string {
 		"notify.min_severity":                   "2",
 		"notify.approval_grace_seconds":         "30",
 		"notify.interval_seconds":               "900", // 15 min: each tick re-fetches card evidence through the gate; see TestNotifyIntervalDefaultDoesNotStarveRateCaps
+		"decisions.card_ttl_seconds":            "600", // 10 min: how long decision cards (and their gate-fetched evidence) are reused
 	}
 }
 
@@ -491,6 +510,10 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Notify.MinSeverity = atoi("notify.min_severity")
 	r.Notify.ApprovalGraceSeconds = atoi("notify.approval_grace_seconds")
 	r.Notify.IntervalSeconds = atoi("notify.interval_seconds")
+	r.Decisions.CardTTLSeconds = atoi("decisions.card_ttl_seconds")
+	if r.Decisions.CardTTLSeconds < 0 && err == nil {
+		err = fmt.Errorf("decisions.card_ttl_seconds: %d is negative (set by %s)", r.Decisions.CardTTLSeconds, r.Provenance["decisions.card_ttl_seconds"])
+	}
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -522,6 +545,7 @@ var (
 		"notify.min_severity":                   true,
 		"notify.approval_grace_seconds":         true,
 		"notify.interval_seconds":               true,
+		"decisions.card_ttl_seconds":            true,
 	}
 	boolKeys = map[string]bool{
 		"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true,
@@ -578,6 +602,7 @@ func (r *Resolved) Flat() map[string]string {
 		"notify.min_severity":                   strconv.Itoa(r.Notify.MinSeverity),
 		"notify.approval_grace_seconds":         strconv.Itoa(r.Notify.ApprovalGraceSeconds),
 		"notify.interval_seconds":               strconv.Itoa(r.Notify.IntervalSeconds),
+		"decisions.card_ttl_seconds":            strconv.Itoa(r.Decisions.CardTTLSeconds),
 	}
 }
 

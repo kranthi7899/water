@@ -290,7 +290,7 @@ func TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier(t *testi
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be, "none")
+	trig := buildDecisionsTrigger(deps, be, "none", 0)
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
 	}
@@ -349,9 +349,15 @@ func TestBuildDecisionsTriggerSourcesProviderFromResolvedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be, resolved.Decider.Provider)
+	trig := buildDecisionsTrigger(deps, be, resolved.Decider.Provider, resolved.Decisions.CardTTL())
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
+	}
+	// The card cache's TTL flows from decisions.card_ttl_seconds too: the
+	// daemon's one shared trigger is what keeps the needs-you ticker, GET
+	// /v1/decisions and the brief from re-fetching evidence on every call.
+	if trig.CardTTL != 10*time.Minute {
+		t.Fatalf("trigger CardTTL = %s, want decisions.card_ttl_seconds' default 10m", trig.CardTTL)
 	}
 	cards, err := trig.Run(context.Background(), time.Now())
 	if err != nil {
@@ -391,7 +397,7 @@ func TestBuildDecisionsTriggerFallsBackToNullOnUnsupportedProvider(t *testing.T)
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be, "bogus-provider")
+	trig := buildDecisionsTrigger(deps, be, "bogus-provider", 0)
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
 	}
