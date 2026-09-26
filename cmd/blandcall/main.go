@@ -76,7 +76,7 @@ comment at the top of cmd/blandcall/main.go before touching this.
 Usage:
   blandcall connect --token <bland API key>
   blandcall call --to <+15551234567> --pointers "what to convey"
-                 [--wait-for-greeting=true] [--voice Karen] [--max-duration 5]
+                 [--wait-for-greeting=true] [--voice Matilda] [--max-duration 5]
                  [--retry-after 5m] [--dry-run] [--no-poll]
   blandcall status --id <call_id>
   blandcall budget
@@ -183,7 +183,7 @@ func cmdCall(args []string) error {
 	pointers := fs.String("pointers", "", "this call's objective and rubric (what to accomplish, what's worth covering) — not a script; see the basePersona doc comment")
 	pointersFile := fs.String("pointers-file", "", "read --pointers from this file instead (avoids fragile multi-line shell quoting); mutually exclusive with --pointers")
 	waitForGreeting := fs.Bool("wait-for-greeting", true, "wait for the recipient to speak first")
-	voice := fs.String("voice", "Karen", "Bland voice name")
+	voice := fs.String("voice", "Matilda", "Bland voice name")
 	maxDuration := fs.Int("max-duration", 5, "max call length in minutes")
 	retryAfter := fs.Duration("retry-after", 0, "if unanswered/voicemail, wait this long and place exactly one retry (still counts against the 3-call budget); 0 disables")
 	dryRun := fs.Bool("dry-run", false, "print the request that would be sent; do not call, do not spend budget")
