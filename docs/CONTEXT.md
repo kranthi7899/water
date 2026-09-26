@@ -103,3 +103,22 @@ code and in `docs/EVOLUTION_PLAN.md`'s keep/move/retire table:
 - Twin-to-twin messaging (Slice E) will be designed and built fresh on its
   own envelope when that slice starts, rather than reusing anything from the
   deleted `orchestrator.AgentMessage`/outbox.
+
+## Amendment (2026-09-25)
+
+The owner decided, at Slice F's Approve, that **long-term memory is stored
+in SQLite, not markdown files.** Principle 6 above still holds in full:
+memory has three tiers, and long-term memory is written only from explicit
+CEO statements and approved corrections, each with provenance. Only the
+storage medium changes. Long-term memory is the `memory_records` table in
+the same `~/.water/water.db` as the state store (migration `0014`),
+reached only through `internal/memory`. So read "(markdown files, ...)" in
+principle 6, "long-term markdown memory" in the `memory/` line of the
+layout, and "long-term memory files" under runtime data as that table.
+The reasons: real indexes, a transactional supersede (a correction writes
+the new record and invalidates the old one atomically), and the records
+sit next to what later slices join against. The trade is that memory is no
+longer human-readable or diffable as plain files. `internal/memory` never
+edits or deletes a record. A correction invalidates the old record and
+links the new one to it, and invalidated records are kept for now (no
+compaction or archive).
