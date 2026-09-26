@@ -48,12 +48,11 @@ type ActionSink interface {
 }
 
 // writeHandler builds a matched write intent's answer: either a queued
-// approval (level A) or a level-D draft delivered directly. Tier 0 and
-// Tier 1 both take one (tier0.go's runTier0Match, tier1.go's TryTier1) so
-// every existing caller that never matches a write intent -- which is every
-// test written before this task, and any Config with no ActionSink -- can
-// pass nil safely: it is only ever invoked after the matched candidate's
-// Kind is confirmed to be write.
+// approval (level A) or a level-D draft delivered directly. Tier 0 takes
+// one (tier0.go's runTier0Match) so every existing caller that never
+// matches a write intent -- which is every test written before this task,
+// and any Config with no ActionSink -- can pass nil safely: it is only ever
+// invoked after the matched candidate's Kind is confirmed to be write.
 type writeHandler func(ctx context.Context, it intents.Intent, args reflex.Args) (*render.Result, string, error)
 
 // tryWriteIntent builds a matched write intent's proposal and turns it into

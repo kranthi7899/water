@@ -26,13 +26,19 @@ import (
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/meetings"
+	"water/internal/needsyou"
 	"water/internal/nervous"
 	"water/internal/runtime"
 	"water/internal/store"
 	"water/internal/tools"
 	"water/internal/twinlink"
 	"water/internal/twins"
+	"water/internal/webui"
 )
+
+// UIPrefix is where the daemon serves the embedded workspace UI
+// (internal/webui). The macOS app loads it as water://app/ui/.
+const UIPrefix = "/ui/"
 
 // Config wires the daemon to one twin's runtime dependencies. All fields are
 // required except Warm.
@@ -89,6 +95,15 @@ type Config struct {
 	// the endpoint; a real daemon always sets it
 	// (internal/cli/cmd_daemon.go's daemonIntentsReloader).
 	ReloadIntents func(ctx context.Context) error
+	// NeedsYou holds the last computed "needs you" snapshot (Slice V-3/V-4,
+	// docs/slices/V.md §5): GET /v1/today reads it via Snapshot(), never
+	// recomputing on the request path itself (see internal/needsyou's own
+	// cost warning). Recomputation happens on its own background tick in
+	// internal/cli/cmd_daemon.go's runDaemon, independent of this Config.
+	// Optional: nil (a twin whose decisions trigger never built, or a test
+	// that doesn't exercise it) makes GET /v1/today report an empty
+	// needs_you list rather than erroring.
+	NeedsYou *needsyou.Service
 }
 
 // turnAuth is what a tool-proxy token grants: an origin and a taint. In
@@ -124,11 +139,22 @@ type Daemon struct {
 	// partialLimiter bounds POST /v1/turns/{id}/partial's rate (Design
 	// §11.5: at most 20/s per turn id).
 	partialLimiter *partialLimiter
+
+	// recapMu/recaps track each meeting session's after-meeting recap
+	// (recap-on-stop, workspace_meetings.go) while it runs or once it
+	// failed/was skipped. In memory only: a finished recap's durable form
+	// is the store.Meeting summary Recap writes.
+	recapMu sync.Mutex
+	recaps  map[string]recapState
+	// bg tracks background work the daemon starts on its own (the recap
+	// model call), so tests can wait for it.
+	bg sync.WaitGroup
 }
 
 func New(cfg Config) *Daemon {
 	return &Daemon{cfg: cfg, meetings: meetings.New(cfg.Store), tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{},
-		sinks: map[string]*turnSink{}, modelSlot: make(chan struct{}, 1), partialLimiter: newPartialLimiter()}
+		sinks: map[string]*turnSink{}, modelSlot: make(chan struct{}, 1), partialLimiter: newPartialLimiter(),
+		recaps: map[string]recapState{}}
 }
 
 // turnSink is one open POST /v1/turns stream. Writes from the turn itself
@@ -240,6 +266,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/approvals/{id}", d.auth(d.handleGetApproval))
 	mux.Handle("POST /v1/approvals/{id}/decision", d.auth(d.handleDecideApproval))
 	mux.Handle("GET /v1/state", d.auth(d.handleState))
+	mux.Handle("GET /v1/today", d.auth(d.handleToday))
 	mux.Handle("GET /v1/decisions", d.auth(d.handleListDecisions))
 	mux.Handle("POST /v1/decisions/{id}/email", d.auth(d.handleEmailDecisionReport))
 	mux.Handle("POST /v1/tasks/{id}/cancel", d.auth(d.handleCancel))
@@ -247,6 +274,26 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))
 	mux.Handle("POST /v1/meetings/{id}/stop", d.auth(d.handleMeetingStop))
 	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
+	// Workspace UI (Slice V-ui, docs/slices/V.md §5).
+	mux.Handle("POST /v1/approvals/{id}/edit", d.auth(d.handleEditApproval))
+	mux.Handle("POST /v1/decisions/{id}/stage", d.auth(d.handleStageDecision))
+	mux.Handle("POST /v1/decisions/{id}/dismiss", d.auth(d.handleDismissDecision))
+	mux.Handle("GET /v1/threads", d.auth(d.handleListThreads))
+	mux.Handle("POST /v1/threads", d.auth(d.handleCreateThread))
+	mux.Handle("POST /v1/threads/anchor", d.auth(d.handleAnchorThread))
+	mux.Handle("GET /v1/threads/{id}", d.auth(d.handleGetThread))
+	mux.Handle("POST /v1/threads/{id}/messages", d.auth(d.handlePostThreadMessage))
+	mux.Handle("GET /v1/meetings", d.auth(d.handleListMeetings))
+	mux.Handle("GET /v1/meetings/{id}", d.auth(d.handleGetMeeting))
+	// The workspace UI's own static assets (internal/webui), behind the same
+	// client-token auth as every route. The security headers are set before
+	// auth runs, so every response under the prefix, a 401 included,
+	// carries webui.CSP.
+	uiAssets := d.auth(webui.Handler(UIPrefix).ServeHTTP)
+	mux.Handle("GET "+UIPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webui.SetSecurityHeaders(w.Header())
+		uiAssets.ServeHTTP(w, r)
+	}))
 	mux.Handle("GET /v1/router", d.auth(d.handleRouterHealth))
 	mux.Handle("GET /v1/route/report", d.auth(d.handleRouteReport))
 	mux.Handle("GET /v1/route/candidates", d.auth(d.handleRouteCandidates))
@@ -416,13 +463,29 @@ func (d *Daemon) handleMeetingSegment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleMeetingStop ends a session and, when this call is the one that
+// ended it, starts its after-meeting recap in the background
+// (startRecapOnStop, workspace_meetings.go; docs/slices/V.md §0.6). The
+// response adds "recap": the recap's state right after stopping
+// ("running", "skipped", or "none" for a session that was already
+// stopped); GET /v1/meetings/{id} reports how it finished.
 func (d *Daemon) handleMeetingStop(w http.ResponseWriter, r *http.Request) {
-	s, err := d.meetings.Stop(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+	before, err := d.meetings.Get(r.Context(), id)
 	if err != nil {
 		meetingError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": s.ID, "ended_at": s.EndedAt})
+	s, err := d.meetings.Stop(r.Context(), id)
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	recap := "none"
+	if before.EndedAt == nil {
+		recap = d.startRecapOnStop(r.Context(), s.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": s.ID, "ended_at": s.EndedAt, "recap": recap})
 }
 
 // handleMeetingCues serves docs/slices/M.md section 6's quiet proactive

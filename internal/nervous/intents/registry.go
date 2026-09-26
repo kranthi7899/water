@@ -597,8 +597,8 @@ func specName(spec FunctionSpec) string {
 // lint: a template's literal wording must never itself contain an
 // escalate_words entry or a clause_joiners phrase, since a template that
 // requires one of those words would always be pre-empted by the
-// eligibility check (a later task) before Tier 0 or Tier 1 could ever
-// answer it. It does not expand <rule> references (a rule's own content is
+// eligibility check (a later task) before Tier 0 could ever answer it. It
+// does not expand <rule> references (a rule's own content is
 // exempt from this check), so it cannot catch every case; the eligibility
 // check on the live utterance is the actual run-time enforcement.
 func checkTemplateVocabulary(intentID string, idx int, src string, shared Shared) error {
@@ -690,7 +690,7 @@ func (r *Registry) Shared() Shared { return r.shared }
 
 // Hash is a sha256 over every file this registry was built from (embedded
 // and learned), sorted by path: a stable fingerprint used to invalidate a
-// stale Tier 1 eval or a stale recorded promotion.
+// stale recorded promotion.
 func (r *Registry) Hash() string { return r.hash }
 
 // LearnedSkipped lists every learned overlay file LoadRegistry declined to

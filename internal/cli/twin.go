@@ -19,6 +19,7 @@ import (
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gdrive"
 	"water/internal/connectors/google/gmail"
+	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
 	"water/internal/decider"
@@ -177,6 +178,18 @@ func loadRoleMD(id string) string {
 // an empty value only matters if list_prs/list_issues is actually invoked
 // (github.Invoke then refuses with a clear "no repo configured" error), so
 // manifest-validation-only callers (loadTwinManifest) may pass "".
+//
+// gsheets ("company_finance") is registered for the real twin only, no
+// demo stand-in: it is read-only, named-lookup access to Renaissance_
+// Finance, the company's real financial model (cash, burn, runway, budget,
+// invoices, revenue, funding — see internal/connectors/google/gsheets'
+// own doc comment for the full list), read through the Sheets API's
+// values.get rather than Drive's files.export (which gdrive already uses
+// for whole-file reads), since a specific named tab/range needs the
+// Sheets API's own scope regardless of what Drive scope is granted. Rides
+// the same shared water.google/ceo credential as gcal/gmail/gdrive — an
+// owner connected before this scope existed needs one `water connect
+// google` re-run to pick it up (see docs/google-setup.md).
 func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName, githubRepo string) (*connectors.Registry, error) {
 	gm := gmail.New(mailAddress)
 	gm.SetSignatureName(signatureName)
@@ -189,7 +202,7 @@ func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName, gi
 			fake.NewHubSpot(fake.DefaultHubSpotDeals(), fake.DefaultHubSpotContacts()),
 		)
 	} else {
-		cs = append(cs, github.New(githubRepo), linear.New(), hubspot.New())
+		cs = append(cs, github.New(githubRepo), linear.New(), hubspot.New(), gsheets.New())
 	}
 	return connectors.NewRegistry(cs...)
 }

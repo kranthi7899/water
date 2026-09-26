@@ -1,4 +1,28 @@
-# FunctionGemma (Tier 1 sidecar)
+# FunctionGemma (Tier 1 sidecar) — retired
+
+> **Status: retired.** Tier 1 was removed from Water. Its own live eval
+> measured a 558ms warm p95 (missed its 400ms gate) and a 2.2% false-accept
+> rate (missed its 1% gate) — it never cleared the safety bar it was built to
+> clear. Its cost model didn't hold up either: `RoleSystem` stays
+> byte-identical and cached across warm-session turns while `StateSummary` is
+> only a small freshly-computed per-turn block, so the main path was never as
+> expensive per-turn as Tier 1's existence implied. No comparable
+> coding-agent harness (Claude Code, Codex CLI, Cursor, OpenHands, Aider)
+> routes intent through a cheap model ahead of the main model; Hermes Agent
+> tried this (`smart_model_routing`) and removed it a month later with no
+> public explanation. Tier 0 is kept — it's free (zero model calls, 0%
+> false-accept on its 298-case eval) and solves a real problem Tier 1 never
+> did (the warm session's single-turn-in-flight semaphore means a trivial
+> query would otherwise queue behind a long-running main-path turn). See
+> `docs/EVOLUTION_PLAN.md`'s dated entry for this slice for the full record.
+>
+> As of retirement, `water model pull`, `water route eval --tier1`, and the
+> `router.tier1.*` config keys no longer exist or are silently ignored (not
+> read) rather than acted on, and the sidecar's model/eval-record files under
+> `$WATER_HOME` are no longer created or read. The rest of this document is
+> kept as historical reference, describing Tier 1 as it existed before
+> removal — none of the commands, config keys or files it describes are live
+> anymore.
 
 Slice R's Tier 1 ("the sous chef's second engine") uses Google's **FunctionGemma**
 as a local, offline function-calling model for utterances Tier 0's deterministic
@@ -128,6 +152,17 @@ never answers a real turn until a recorded live evaluation (`water route eval
 `GET /v1/router` reports which of these is unmet (`eval_missing`,
 `eval_stale`, or `eval_failed`) whenever Tier 1 is configured on but not
 actually serving answers.
+
+> **Correction (found during the retirement pass, 2026-09-25):** this claim
+> was stale even before removal. `internal/gateway/router.go`'s
+> `handleRouterHealth` (the handler behind `GET /v1/router`) only ever
+> returned Tier 0's breaker state, inactive/shadow intents, learned-overlay
+> skips and `promotion_enabled` — it never reported `eval_missing`,
+> `eval_stale` or `eval_failed`. Those reason strings existed only in
+> `internal/nervous/sidecar/evalgate.go` and in a `water daemon` startup
+> failure message (`internal/cli/cmd_daemon.go`), not in the `GET /v1/router`
+> response body. This was never implemented in the gateway, not a regression
+> from retirement.
 
 ## What actually happens when you pull and eval it (2026-09-25)
 

@@ -388,13 +388,17 @@ func (d *Daemon) handleVoiceProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := d.cfg.Nervous.VoiceProfile()
+	tts := map[string]any{
+		"voice":    v.TTS.Voice,
+		"rate_wpm": v.TTS.RateWPM,
+	}
+	if v.TTS.KokoroVoice != "" {
+		tts["kokoro_voice"] = v.TTS.KokoroVoice
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":    v.Name,
 		"handoff": v.Handoff,
-		"tts": map[string]any{
-			"voice":    v.TTS.Voice,
-			"rate_wpm": v.TTS.RateWPM,
-		},
+		"tts":     tts,
 	})
 }
 

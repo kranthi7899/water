@@ -121,9 +121,9 @@ func renderIntentDraft(out IntentDraftResult) string {
 // promotion loop is refused with a helpful message before ever asking for
 // confirmation; shows the EXACT pending draft file `water intent draft`
 // wrote and the owner already reviewed (read straight off local
-// $WATER_HOME — the CLI runs on the same machine, the same convention
-// `water route eval --tier1` already uses for its own model/registry
-// reads), never a freshly re-drafted one (POST /v1/intents/draft makes a
+// $WATER_HOME — the CLI runs on the same machine as the daemon it talks to,
+// so a plain local file read is the right way to show exactly what was
+// reviewed), never a freshly re-drafted one (POST /v1/intents/draft makes a
 // new cold model call and could silently produce different content than
 // what was reviewed); asks an interactive y/N (mirroring `water approve`'s
 // prompt/read pattern — a bufio.Reader over os.Stdin, one line read,

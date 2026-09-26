@@ -1,0 +1,104 @@
+package gateway
+
+import (
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	"water/internal/webui"
+)
+
+// TestUIAssetsAreServedBehindAuthWithTheCSP serves every embedded UI file
+// through the daemon's real mux: each needs the client token, and every
+// response under the prefix (the 401s included) carries the strict CSP and
+// nosniff.
+func TestUIAssetsAreServedBehindAuthWithTheCSP(t *testing.T) {
+	h := newHarness(t)
+	files, err := webui.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{UIPrefix}
+	for _, f := range files {
+		paths = append(paths, UIPrefix+f)
+	}
+	check := func(p string, resp *http.Response) {
+		t.Helper()
+		if got := resp.Header.Get("Content-Security-Policy"); got != webui.CSP {
+			t.Errorf("%s: Content-Security-Policy = %q, want webui.CSP", p, got)
+		}
+		if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", p, got)
+		}
+	}
+	for _, p := range paths {
+		for _, tok := range []string{"", "bogus"} {
+			resp := do(t, h.srv.URL, "GET", p, "", tok)
+			check(p, resp)
+			if got := statusOf(resp); got != http.StatusUnauthorized {
+				t.Errorf("GET %s with token %q: status %d, want 401", p, tok, got)
+			}
+		}
+		resp := do(t, h.srv.URL, "GET", p, "", h.token)
+		check(p, resp)
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || len(b) == 0 {
+			t.Errorf("GET %s: status %d, %d bytes; want 200 with a body", p, resp.StatusCode, len(b))
+		}
+	}
+	// A miss under the prefix is a 404 that still carries the headers.
+	resp := do(t, h.srv.URL, "GET", UIPrefix+"missing.js", "", h.token)
+	check("missing.js", resp)
+	if got := statusOf(resp); got != http.StatusNotFound {
+		t.Errorf("missing asset: status %d, want 404", got)
+	}
+	// Only GET/HEAD: the UI prefix accepts no writes.
+	if got := statusOf(do(t, h.srv.URL, "POST", UIPrefix+"index.html", "{}", h.token)); got != http.StatusMethodNotAllowed {
+		t.Errorf("POST to the UI prefix: status %d, want 405", got)
+	}
+}
+
+// TestUIOnlyCallsAllowlistedRoutes pins every API path the shipped UI's
+// JavaScript names to the routes docs/slices/V.md §5a lists for the
+// water:// scheme handler's allowlist, and checks it never names a route
+// the UI must never reach.
+func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
+	b, err := webui.ReadFile("api.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, never := range []string{"/v1/tools", "/v1/quick", "/v1/twinlink", "/v1/turns", "/v1/intents", "/v1/state", "/edit", "/email"} {
+		if strings.Contains(src, never) {
+			t.Errorf("api.js names %q, which the UI must not call", never)
+		}
+	}
+	allowed := []string{
+		"'/v1/today'", "'/v1/decisions'", "'/v1/decisions/'", "'/v1/approvals?status='", "'/v1/approvals/'",
+		"'/v1/threads'", "'/v1/threads/anchor'", "'/v1/threads/'", "'/v1/tasks/'", "'/v1/meetings?limit='", "'/v1/meetings/'",
+	}
+	// Every quoted '/v1...' literal in api.js must be one of the above.
+	for _, part := range strings.Split(src, "'/v1")[1:] {
+		lit := "'/v1" + part[:strings.Index(part, "'")+1]
+		ok := false
+		for _, a := range allowed {
+			if lit == a {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf("api.js calls %s, which is not on the UI's allowlist", lit)
+		}
+	}
+	for _, f := range []string{"app.js", "dom.js"} {
+		b, err := webui.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "/v1/") || strings.Contains(string(b), "fetch(") {
+			t.Errorf("%s calls the API directly; every call goes through api.js", f)
+		}
+	}
+}

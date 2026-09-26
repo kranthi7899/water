@@ -53,6 +53,12 @@ type voiceFile struct {
 type ttsFile struct {
 	Voice   string `yaml:"voice"`
 	RateWPM int    `yaml:"rate_wpm"`
+	// KokoroVoice optionally names the Kokoro-82M voice (FluidAudio's
+	// KokoroAneManager, Slice V's V-voice sub-slice) to use when the client
+	// has selected the Kokoro TTS engine. Empty means "let the client pick
+	// its own default voice" — unlike Voice/RateWPM this has no OS-voice
+	// fallback semantics of its own, so it is never required.
+	KokoroVoice string `yaml:"kokoro_voice"`
 }
 
 // VoiceStyle is the parsed voice: section, handed to the facade and (via
@@ -65,8 +71,9 @@ type VoiceStyle struct {
 	BannedPhrases    []string
 	MaxSentenceChars int
 	TTS              struct {
-		Voice   string
-		RateWPM int
+		Voice       string
+		RateWPM     int
+		KokoroVoice string
 	}
 }
 
@@ -131,6 +138,7 @@ func voiceFromFile(v voiceFile) VoiceStyle {
 	}
 	out.TTS.Voice = v.TTS.Voice
 	out.TTS.RateWPM = v.TTS.RateWPM
+	out.TTS.KokoroVoice = v.TTS.KokoroVoice
 	return out
 }
 

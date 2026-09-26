@@ -1,15 +1,12 @@
 package cli
 
 import (
-	"errors"
-	"os"
 	"reflect"
 	"testing"
 	"time"
 
 	"water/internal/config"
 	"water/internal/nervous"
-	"water/internal/nervous/sidecar"
 )
 
 // TestBuildNervousConfigMatchesDefaultConfig is R-25's drift test
@@ -130,78 +127,5 @@ func TestBuildNervousConfigWiresNonDefaultValues(t *testing.T) {
 	}
 	if got.Promotion.DemoteMinSamples != 7 || got.Promotion.DemoteMissRatePct != 15 {
 		t.Errorf("Promotion = %+v, want DemoteMinSamples=7 DemoteMissRatePct=15", got.Promotion)
-	}
-}
-
-// TestTier1GateReadyRefusesMissingRecord is R-25's own required test: with
-// router.tier1.enabled=true but no eval-gate record on disk (the common
-// case — nobody has ever run `water route eval --tier1`), the real
-// sidecar.ReadEvalRecord/tier1GateReady chain this task wires into
-// runDaemon must refuse to start Tier 1, with reason "eval_missing" — the
-// same reason GET /v1/router documents for this case. No daemon, no real
-// sidecar subprocess: this exercises exactly the two functions
-// runDaemon calls before ever constructing a sidecar.Supervisor.
-func TestTier1GateReadyRefusesMissingRecord(t *testing.T) {
-	home := t.TempDir() // no router/tier1_eval.json written
-	rec, recErr := sidecar.ReadEvalRecord(home)
-	if recErr == nil {
-		t.Fatal("ReadEvalRecord over an empty WATER_HOME should error")
-	}
-	if !errors.Is(recErr, os.ErrNotExist) {
-		t.Fatalf("ReadEvalRecord error = %v, want it to wrap os.ErrNotExist", recErr)
-	}
-	ok, reason := tier1GateReady(rec, recErr, "some-registry-hash")
-	if ok {
-		t.Fatal("tier1GateReady should refuse when the record is missing")
-	}
-	if reason != "eval_missing" {
-		t.Errorf("reason = %q, want %q", reason, "eval_missing")
-	}
-}
-
-// TestTier1GateReadyRefusesStaleRecord: a record that exists but names a
-// different intent registry (e.g. the twin's intent files changed since the
-// eval ran) must also refuse to start Tier 1, distinctly from a missing
-// record.
-func TestTier1GateReadyRefusesStaleRecord(t *testing.T) {
-	home := t.TempDir()
-	rec := sidecar.EvalRecord{
-		ModelSHA256: sidecar.ModelSHA256, RegistryHash: "old-hash",
-		N: 400, FARate: 0, Wilson95Upper: 0, WarmP95Ms: 100,
-	}
-	if err := sidecar.WriteEvalRecord(home, rec); err != nil {
-		t.Fatal(err)
-	}
-	got, recErr := sidecar.ReadEvalRecord(home)
-	if recErr != nil {
-		t.Fatal(recErr)
-	}
-	ok, reason := tier1GateReady(got, recErr, "current-hash")
-	if ok {
-		t.Fatal("tier1GateReady should refuse a record for a different registry hash")
-	}
-	if reason != sidecar.ReasonEvalStale {
-		t.Errorf("reason = %q, want %q", reason, sidecar.ReasonEvalStale)
-	}
-}
-
-// TestTier1GateReadyAcceptsPassingRecord: a record that matches today's
-// model/registry and clears every threshold is accepted.
-func TestTier1GateReadyAcceptsPassingRecord(t *testing.T) {
-	home := t.TempDir()
-	rec := sidecar.EvalRecord{
-		ModelSHA256: sidecar.ModelSHA256, RegistryHash: "current-hash",
-		N: 400, FARate: 0, Wilson95Upper: 0.01, WarmP95Ms: 200,
-	}
-	if err := sidecar.WriteEvalRecord(home, rec); err != nil {
-		t.Fatal(err)
-	}
-	got, recErr := sidecar.ReadEvalRecord(home)
-	if recErr != nil {
-		t.Fatal(recErr)
-	}
-	ok, reason := tier1GateReady(got, recErr, "current-hash")
-	if !ok {
-		t.Fatalf("tier1GateReady should accept a passing record, got reason %q", reason)
 	}
 }

@@ -1,5 +1,9 @@
 # Slice R — Phase 4 verification
 
+> **Note (2026-09-25):** Tier 1 was later retired — see
+> `docs/EVOLUTION_PLAN.md` for the decision and rationale. This document is
+> left as-is below as a historical record of what was verified at the time.
+
 Per `docs/WORKFLOW.md`'s Phase 4: this is evidence from running the real thing, not just passing unit tests. Run against an isolated `WATER_HOME=/tmp/water-verify-r`, never `~/.water`. Google/GitHub connectors were reachable through the shared Keychain credential even in this isolated home (the credential lives outside `$WATER_HOME`, by design since Slice A3) — every live interaction below was kept strictly read-only, per this slice's own Phase 4 scope note ("write intents and voice approval are verified against the fake-connector daemon harness only, never a real account"). No event was created, no mail was sent, no write intent was exercised against a real account.
 
 Date: 2026-09-25. Binary built from `feat/ceo-twin` at commit `ea5a257` (post-merge, post-fix).

@@ -12,7 +12,6 @@ import (
 	"water/internal/backend"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/render"
-	"water/internal/nervous/t1"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -516,25 +515,26 @@ func TestHandoffAckBeforeMainOutput(t *testing.T) {
 	}
 }
 
-// TestTier0BreakerResolvesOnCleanEscalation is a regression test for the
-// narrower of the two breaker bugs: mainpath.go's answerMain calls
+// TestTier0BreakerResolvesOnCleanEscalation is a regression test for a
+// breaker bug: a clean Tier 0 escalation (no_match) must still resolve a
+// half-open trial one way or the other (breaker.go's trialInFlight only
+// clears inside RecordSuccess/RecordFailure), or it would strand the
+// breaker open forever. This scenario is now covered belt-and-braces by two
+// independent call sites: nervous.go's own RecordSuccess call on a clean
+// "no_match" escalation, AND mainpath.go's answerMain, which calls
 // tier0Breaker.RecordSuccess() as a safety net whenever a turn reaches the
-// main model, which happens to resolve most half-open trials even without
-// the nervous.go fix — but that safety net is skipped whenever Tier 1
-// answers instead (the turn returns through answerQuick, never answerMain).
-// This reproduces exactly that: Tier 0's half-open trial cleanly escalates
-// (no_match) and Tier 1 then finds a match, so only the nervous.go fix
-// (not the mainpath.go safety net) can resolve tier0Breaker's trial.
+// main model — and, with no Tier 1 to intercept a clean Tier 0 escalation,
+// every such escalation now reaches answerMain, so both call sites fire.
 func TestTier0BreakerResolvesOnCleanEscalation(t *testing.T) {
 	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
 	env, ctx, fk := nervousTestEnv(t)
-	client := &fakeT1Client{calls: []t1.Call{{Intent: "schedule.on_date", Args: map[string]string{"when": "tomorrow"}}}}
+	fk.Reply = func(req backend.Request) string { return "escalated" }
 
 	clock := newFakeClock(tier0FixedNow)
 	cfg := testBreakerConfig()
 	n, err := New(Config{
 		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
-		Tier0Enabled: true, Tier1Enabled: true, T1: client, MainEnabled: true,
+		Tier0Enabled: true, MainEnabled: true,
 		Clock: clock, AckAfter: DefaultAckAfter, Breaker: cfg,
 	})
 	if err != nil {
@@ -552,15 +552,11 @@ func TestTier0BreakerResolvesOnCleanEscalation(t *testing.T) {
 
 	// tier0ScheduleYAML's own templates require "calendar"/"schedule" in
 	// the utterance, so this cleanly misses Tier 0 (the half-open trial,
-	// no_match) and falls to Tier 1, which the fake client answers —
-	// routing through answerQuick, never answerMain.
+	// no_match) and falls through to the main path.
 	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's happening tomorrow", TaskID: "breaker-t0"}, func(runtime.Event) {})
 
-	if fk.Calls() != 0 {
-		t.Fatalf("backend calls = %d, want 0 (Tier 1 answered; main must never be reached)", fk.Calls())
-	}
-	if client.invokedCount() != 1 {
-		t.Fatalf("t1 client invoked %d times, want exactly 1", client.invokedCount())
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls = %d, want 1 (the clean escalation reached main)", fk.Calls())
 	}
 	st, reason, _ := n.Tier0Breaker()
 	if st != BreakerClosed {
@@ -568,57 +564,6 @@ func TestTier0BreakerResolvesOnCleanEscalation(t *testing.T) {
 	}
 	if !n.tier0Breaker.Allow() {
 		t.Fatal("breaker should allow a normal Tier 0 attempt again after resolving the half-open trial")
-	}
-}
-
-// TestTier1BreakerResolvesOnCleanEscalation is Tier 1's counterpart to
-// TestTier0BreakerResolvesOnCleanEscalation above. Tier 1 has no equivalent
-// of mainpath.go's tier0Breaker.RecordSuccess() safety net, so before this
-// fix a clean Tier 1 escalation (t1_no_call, the fakeT1Client default) left
-// tier1Breaker permanently half-open with no recovery path at all.
-func TestTier1BreakerResolvesOnCleanEscalation(t *testing.T) {
-	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
-	env, ctx, fk := nervousTestEnv(t)
-	fk.Reply = func(req backend.Request) string { return "escalated" }
-	client := &fakeT1Client{} // no calls, no err: a clean t1_no_call escalation
-
-	clock := newFakeClock(tier0FixedNow)
-	cfg := testBreakerConfig()
-	n, err := New(Config{
-		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
-		Tier0Enabled: true, Tier1Enabled: true, T1: client, MainEnabled: true,
-		Clock: clock, AckAfter: DefaultAckAfter, Breaker: cfg,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for i := 0; i < cfg.Failures; i++ {
-		n.tier1Breaker.Allow()
-		n.tier1Breaker.RecordFailure("boom")
-	}
-	if st, _, _ := n.tier1Breaker.State(); st != BreakerOpen {
-		t.Fatalf("state after %d failures = %s, want open", cfg.Failures, st)
-	}
-	clock.Advance(cfg.Cooldown)
-
-	// tier0ScheduleYAML's own templates don't match this utterance, so
-	// Tier 0 cleanly escalates with no_match, handing the half-open Tier 1
-	// trial to the fakeT1Client, which cleanly escalates too (no calls).
-	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "something unrelated entirely", TaskID: "breaker-t1"}, func(runtime.Event) {})
-
-	if fk.Calls() != 1 {
-		t.Fatalf("backend calls = %d, want 1 (the clean escalation reached main)", fk.Calls())
-	}
-	if client.invokedCount() != 1 {
-		t.Fatalf("t1 client invoked %d times, want exactly 1", client.invokedCount())
-	}
-	st, reason, _ := n.tier1Breaker.State()
-	if st != BreakerClosed {
-		t.Fatalf("breaker state after a clean-escalation half-open trial = %s (reason %q), want closed — trialInFlight must not strand the breaker", st, reason)
-	}
-	if !n.tier1Breaker.Allow() {
-		t.Fatal("breaker should allow a normal Tier 1 attempt again after resolving the half-open trial")
 	}
 }
 

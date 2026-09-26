@@ -60,8 +60,8 @@ type Speculation struct {
 }
 
 // SpecDeps is speculate's entire readable, runnable world. It deliberately
-// has no backend field and no Tier 1 client field, and no emitter — there
-// is no way for speculate (or anything it calls through these fields) to
+// has no backend field and no emitter — there is no way for speculate (or
+// anything it calls through these fields) to
 // make a model call or answer a turn, by the shape of this struct alone,
 // not by a runtime check (Design §1's "one action path enforced by
 // construction" applied here to speculation itself: TestSpeculationZeroModelCalls
@@ -80,8 +80,8 @@ type SpecDeps struct {
 	// live read intent, without ever running a handler.
 	DryMatch func(u tmpl.Utterance) (intent string, labels map[string]string, ok bool)
 	// RunRead re-resolves a dry match's labels through the same shared
-	// Validate path Tier 1's string arguments go through, then runs that
-	// intent's real reflex handler: store reads only, still no model
+	// Validate path every quick tier's arguments go through, then runs
+	// that intent's real reflex handler: store reads only, still no model
 	// access.
 	RunRead func(ctx context.Context, intent string, labels map[string]string) (render.Result, error)
 	// Prewarm tries to warm the backend's subprocess ahead of a real turn,

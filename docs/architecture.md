@@ -46,7 +46,7 @@ reached through `/usr/bin/security`, never in files or model context.
 | Auto mode (P2) never performs an outward action: only functions on `auto_allowlist`, and only at level R or D | `gate.authorize` (`c.Origin == P2` branch) | gate package tests; see `docs/slice-c-planning.md` for why this stays strict into Slice C |
 | Rate and usage windows persist in the store, so caps survive a daemon restart | `gate.take`/`takeStoreLocked` | gate + store package tests |
 | Metered model calls never run while the subscription CLI is available; metered keys never reach subprocesses | `backend.Select`, `backend.ScrubbedEnv` | backend package tests |
-| Tier 0/Tier 1 answer schedule/approvals/brief/mail questions from the store with zero model calls, except the one documented cached-brief exception; quick tools and speculation make zero model calls too | `internal/nervous/{tier0.go,tier1.go,speculate.go}` | `TestTier0Eval`, `TestSpeculationZeroModelCalls`, the sous-package import/selector denylist test |
+| Tier 0 answers schedule/approvals/brief/mail questions from the store with zero model calls, except the one documented cached-brief exception; quick tools and speculation make zero model calls too | `internal/nervous/{tier0.go,speculate.go}` | `TestTier0Eval`, `TestSpeculationZeroModelCalls`, the sous-package import/selector denylist test |
 | The sous packages (`reflex`, `propose`, `tmpl`, `slots`, `intents`, `render`, `speak`, `turn`) can reach the store only through a read-only connection, never the gate or a connector, and make no mutating calls | `store.OpenReadOnly`; import/selector AST tests | `internal/nervous/reflex/imports_test.go`, `internal/nervous/decide_test.go` |
 | A write-intent proposal only ever queues an envelope (level A) or delivers a drafted artifact directly (level D); execution happens only through the one hash-bound `decideAndExecute` → `Gate.Invoke` path, identical to a model-initiated tool call | `internal/nervous/actions.go`, `internal/gateway/actions.go` | `actions_test.go`, `voiceapprove_bind_test.go` |
 | A background sync tick with no stored credential skips quietly (one log line), never spams denials | `internal/sync` | sync package tests |
@@ -73,14 +73,15 @@ only caller of `Nervous.Handle`.
 4. **Tier 0** (deterministic templates) tries to match an intent from the
    registry with zero model calls. A match routes the turn to the quick
    owner.
-5. **Tier 1** (FunctionGemma, disabled by default) only runs when Tier 0
-   found no match, and only when its live-eval gate has passed.
-6. Whichever quick tier matches, the turn is routed to the **quick owner**
-   and answered from the store — a read intent renders a phrased answer; a
+5. Tier 1 (FunctionGemma, a small-model second tier tried after Tier 0 found
+   no match) was retired — see `docs/EVOLUTION_PLAN.md`'s dated entry for
+   this slice. Tier 0 is the only quick tier now.
+6. When Tier 0 matches, the turn is routed to the **quick owner** and
+   answered from the store — a read intent renders a phrased answer; a
    write intent builds a proposal and either queues an approval envelope
    (level A) or, for a level-D action, delivers the drafted artifact
    directly.
-7. If neither quick tier matches (or eligibility already ruled it out), the
+7. If Tier 0 doesn't match (or eligibility already ruled it out), the
    turn routes to the **main owner**: `runtime.ModelTurn` over the warm
    `claude` subprocess, with quick tools available as MCP tools and
    connector tools reaching the gate exactly as before. The main path's
@@ -102,10 +103,10 @@ registry, and where the approval boundary actually sits.
 ## The nervous system: the router (`internal/nervous`)
 
 Slice R replaced the old three-branch, hardcoded fast path with a real
-router: a fixed, audited table of deterministic and small-model tiers (the
-**sous chef**) in front of the full model (the **head chef**). The sous
-chef only ever proposes an answer from a fixed handler table or escalates —
-it never reasons, never ranks, and never calls a connector directly.
+router: a fixed, audited table of deterministic tiers (the **sous chef**) in
+front of the full model (the **head chef**). The sous chef only ever
+proposes an answer from a fixed handler table or escalates — it never
+reasons, never ranks, and never calls a connector directly.
 
 ```
                          nervous.Handle(turn)
@@ -118,16 +119,14 @@ it never reasons, never ranks, and never calls a connector directly.
           ┌──────────────────────────────────────────┐
           │                                            │
           ▼                                            │
-   ┌─────────────┐   no match    ┌─────────────┐       │
-   │   Tier 0     │──────────────▶│   Tier 1    │       │
-   │  templates   │  (t0 only)    │FunctionGemma │       │
-   │ (in-house Go)│               │ (off by      │       │
-   │ 0 model calls│               │  default,    │       │
-   └──────┬───────┘               │  eval-gated) │       │
-          │ match                 └──────┬───────┘       │
-          │                    match      │  no match /   │
-          │                               │  escalate      │
-          ▼                               ▼                ▼
+   ┌─────────────┐   no match                              │
+   │   Tier 0     │─────────────────────────────────────────┤
+   │  templates   │                                         │
+   │ (in-house Go)│                                         │
+   │ 0 model calls│                                         │
+   └──────┬───────┘                                         │
+          │ match                                           │
+          ▼                                                  ▼
    ┌────────────────────────────┐  ┌─────────────────────────────┐
    │        QUICK OWNER          │  │          MAIN OWNER          │
    │  read intent -> render      │  │  runtime.ModelTurn over the  │
@@ -152,7 +151,7 @@ it never reasons, never ranks, and never calls a connector directly.
              decideAndExecute ──────────────────▶ Gate.Invoke(EnvelopeID)
 ```
 
-**The gate/approval boundary, made explicit:** Tier 0, Tier 1 and quick
+**The gate/approval boundary, made explicit:** Tier 0 and quick
 tools never reach `internal/gate` directly — they only ever read the store
 through a read-only connection (`store.OpenReadOnly`) or, for a write
 intent, hand a typed payload to the gateway's `ProposeAction`. Only two
@@ -226,37 +225,17 @@ least 10 samples) is auto-demoted — disabled immediately, without a
 restart. The whole loop is off by default and every promotion is a single,
 individually-approved step; nothing here ever promotes a *write* intent.
 
-### FunctionGemma (Tier 1) — `router.tier1.enabled`, off by default
+### FunctionGemma (Tier 1) — retired
 
-A 270M-parameter function-calling model (`google/functiongemma-270m-it`)
-served by a Homebrew `llama-server` sidecar the daemon supervises as a
-local subprocess — not a Go module dependency, no cgo, never linked into
-the binary. It only ever proposes a call from the same audited intent
-table Tier 0 uses (grounded against the literal utterance, with the
-model's own confidence ignored), and only for intents marked
-`reflex_eligible`. The daemon will only start the sidecar and enable Tier 1
-when **all** of: the config flag is on, the pinned model file is present
-on disk, and a recorded live eval (`water route eval --tier1`) shows a
-false-accept rate ≤ 1%, a Wilson 95% upper bound ≤ 2%, at least 200 (in
-practice ≥ 400) cases, and a warm p95 latency ≤ 400ms — all matching the
-current model sha256 and the current registry hash. `GET /v1/router`
-reports which of those checks is failing when Tier 1 stays off.
-
-Run for real during Slice R's Phase 4 verification (`docs/slices/
-R-verification.md`): a live `water model pull functiongemma
---accept-gemma-terms` plus `water route eval --tier1` against the real
-Homebrew `llama-server` sidecar surfaced that `llama-server` never
-populates the OpenAI-style structured `tool_calls` field for this model —
-the parser only read that field, so every real answer was silently
-discarded and Tier 1 had never actually answered anything. Fixed (a raw
-`<start_function_call>...` text-format fallback parser, plus a
-request-level stop sequence that also cut latency 7-10x). The honest
-post-fix numbers still fail the gate — a real 2.2% false-accept rate
-(Wilson 95% upper 4.1%) and 558ms warm p95, both outside threshold — so
-Tier 1 correctly stays off, now for legitimate reasons. See
-`docs/known-gaps.md`'s Slice R section for the full story and what a
-follow-up pass would need to try (a Metal-accelerated build; this Mac's
-Homebrew bottle is CPU-only).
+Tier 1 (FunctionGemma, a local small-model function-calling sidecar tried
+after Tier 0 found no match) was retired, not built out further. Its own
+live eval measured a 558ms warm p95 and a 2.2% false-accept rate, missing
+both its 400ms and 1% safety gates; its cost rationale also didn't hold up
+against how cheap the main path's per-turn cost actually is, and no
+comparable coding-agent harness routes intent through a cheap model ahead
+of the main one. See `docs/functiongemma.md` for the full historical
+description of what it was, and `docs/EVOLUTION_PLAN.md`'s dated entry for
+this slice for the complete decision and rationale.
 
 ## Background plane
 
@@ -276,7 +255,7 @@ taint, and both skip quietly when no Google credential is stored.
 | `voice.Provider` | os (free, default), openai (opt-in metered) | `voice.Register` |
 | `twins.Manifest` loader | ceo (embedded `twins/ceo/twin.yaml`) | a new twin directory; Slice E generalizes this to more than one twin |
 | `decider.Decider` | `Null` (default; `decider.provider=none` is the only accepted value) | `internal/decider`; see `docs/known-gaps.md` for when a real adapter is warranted |
-| `nervous.Tier` | `tier0` (templates), `tier1` (FunctionGemma, gated off by default), `main` (the warm session) | a new file in `internal/nervous` implementing `Tier`, wired into `Handle`'s cascade |
+| `nervous.Tier` | `tier0` (templates), `main` (the warm session) | a new file in `internal/nervous` implementing `Tier`, wired into `Handle`'s cascade |
 
 ## Exit codes
 
@@ -297,6 +276,7 @@ judgment-pass, persona-audit, reasoning-layer prompts) that described them.
 `internal/runtime/fastpath.go` (the three-branch, hardcoded schedule/
 approvals/brief matcher described in earlier revisions of this file) is
 gone as of Slice R, replaced end to end by `internal/nervous`'s registry-
-driven Tier 0/Tier 1 cascade described above. `runtime.RunTurn` was renamed
+driven Tier 0 cascade described above (Tier 1 was later retired; see
+`docs/EVOLUTION_PLAN.md`). `runtime.RunTurn` was renamed
 `runtime.ModelTurn` and is now the main-path-only primitive `nervous`
 calls; it is never called directly by a channel handler.

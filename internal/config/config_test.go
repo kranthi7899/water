@@ -51,7 +51,8 @@ func TestUnknownKeyAndBadSchema(t *testing.T) {
 
 // TestRetiredKeysStillLoad is the council-era config.yaml compatibility case:
 // a file with the removed orchestration/sessions/tools/skills/ui/telemetry/
-// memory blocks and per-role voices must still load, silently dropping them.
+// memory blocks, per-role voices, and (Tier 1's retirement) router.tier1.*
+// must still load, silently dropping them.
 func TestRetiredKeysStillLoad(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("WATER_HOME", home)
@@ -63,7 +64,8 @@ func TestRetiredKeysStillLoad(t *testing.T) {
 		"skills:\n  selector: keyword\n" +
 		"ui:\n  theme: dark\n" +
 		"memory:\n  provider: markdown\n" +
-		"voice:\n  ceo_voice: marin\n  coo_voice: cedar\n  cto_voice: ash\n  design_voice: coral\n"
+		"voice:\n  ceo_voice: marin\n  coo_voice: cedar\n  cto_voice: ash\n  design_voice: coral\n" +
+		"router:\n  tier1:\n    enabled: true\n    server_bin: llama-server\n"
 	os.WriteFile(filepath.Join(home, "config.yaml"), []byte(old), 0o600)
 	r, err := Load(nil)
 	if err != nil {
@@ -299,18 +301,6 @@ func TestRouterConfigDefaults(t *testing.T) {
 	if r.Router.Tier0.TimeoutMS != 150 {
 		t.Errorf("router.tier0.timeout_ms default = %d, want 150", r.Router.Tier0.TimeoutMS)
 	}
-	if r.Router.Tier1.Enabled {
-		t.Error("router.tier1.enabled default should be false")
-	}
-	if r.Router.Tier1.TimeoutMS != 400 {
-		t.Errorf("router.tier1.timeout_ms default = %d, want 400", r.Router.Tier1.TimeoutMS)
-	}
-	if r.Router.Tier1.ServerBin != "llama-server" {
-		t.Errorf("router.tier1.server_bin default = %q, want llama-server", r.Router.Tier1.ServerBin)
-	}
-	if r.Router.Tier1.ModelPath != "" {
-		t.Errorf("router.tier1.model_path default = %q, want empty (means $WATER_HOME/models/functiongemma.gguf)", r.Router.Tier1.ModelPath)
-	}
 	if !r.Router.Main.Enabled {
 		t.Error("router.main.enabled default should be true")
 	}
@@ -378,14 +368,14 @@ func TestRouterIntBoolCoercion(t *testing.T) {
 	if _, err := Load(map[string]string{"router.tier0.timeout_ms": "soon"}); err == nil {
 		t.Fatal("router.tier0.timeout_ms=soon should fail to load")
 	}
-	if _, err := Load(map[string]string{"router.tier1.enabled": "sure"}); err == nil {
-		t.Fatal("router.tier1.enabled=sure should fail to load")
+	if _, err := Load(map[string]string{"router.speculation.enabled": "sure"}); err == nil {
+		t.Fatal("router.speculation.enabled=sure should fail to load")
 	}
-	r, err := Load(map[string]string{"router.tier0.timeout_ms": "75", "router.tier1.enabled": "true"})
+	r, err := Load(map[string]string{"router.tier0.timeout_ms": "75", "router.speculation.enabled": "false"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Router.Tier0.TimeoutMS != 75 || !r.Router.Tier1.Enabled {
+	if r.Router.Tier0.TimeoutMS != 75 || r.Router.Speculation.Enabled {
 		t.Fatalf("coercion lost values: %+v", r.Flat())
 	}
 }

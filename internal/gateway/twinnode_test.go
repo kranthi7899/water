@@ -22,6 +22,7 @@ import (
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gdrive"
 	"water/internal/connectors/google/gmail"
+	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
 	"water/internal/gate"
@@ -78,7 +79,7 @@ func newTwinNode(t *testing.T, id string) *twinNode {
 	// The same connector set the CLI builds for every twin; each manifest
 	// decides which of them its twin may actually use.
 	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
-		twinlink.NewSender(id, st), twinlink.NewInbox(st), github.New("owner/repo"), linear.New(), hubspot.New())
+		twinlink.NewSender(id, st), twinlink.NewInbox(st), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New())
 	if err != nil {
 		t.Fatal(err)
 	}

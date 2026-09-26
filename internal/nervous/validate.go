@@ -11,9 +11,8 @@ import (
 
 // Proposal is a candidate answer any quick tier can offer: which intent it
 // thinks matched, and the slot spans it captured. Tier 0 builds Captures
-// from a template match; Tier 1 (a later task) builds them from a parsed
-// function call's string arguments instead, so Validate is the one place
-// both tiers' output is checked the same way.
+// from a template match; Validate is the one place a tier's output is
+// checked.
 type Proposal struct {
 	Intent   string
 	Captures []tmpl.Capture
@@ -35,11 +34,6 @@ type Validated struct {
 // or the intent's own default. now anchors relative dates/times; ents
 // supplies the known people (and, later, projects) person/project slots
 // resolve against.
-//
-// Tier 1's grounding check (every argument value must appear verbatim in
-// the utterance) is not implemented here yet — no Tier 1 exists in this
-// codebase. That check belongs in the Tier 1 adapter, layered on top of
-// this same Validate call, when a later task builds it.
 func Validate(reg *intents.Registry, p Proposal, now time.Time, ents slots.Entities) (Validated, string, bool) {
 	it, ok := candidateByID(reg, p.Intent)
 	if !ok {

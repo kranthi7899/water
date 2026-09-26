@@ -1,8 +1,8 @@
 // Package eval measures how well a quick-tier implementation (Tier 0's
-// templates, or later Tier 1's FunctionGemma proposals) answers a held-out
-// set of utterances, against strict correctness and safety metrics — most
-// importantly the false-accept rate, which must be near zero: a wrong
-// reflex answer is worse than a slow correct one.
+// templates) answers a held-out set of utterances, against strict
+// correctness and safety metrics — most importantly the false-accept rate,
+// which must be near zero: a wrong reflex answer is worse than a slow
+// correct one.
 package eval
 
 import (
@@ -20,9 +20,6 @@ import (
 
 //go:embed testdata/ceo_eval.yaml
 var ceoEvalFS embed.FS
-
-//go:embed testdata/ceo_eval_t1.yaml
-var ceoEvalT1FS embed.FS
 
 // Case is one held-out eval example. Intent is "none" for a negative case
 // (an utterance that must never be answered by a quick tier). Class buckets
@@ -275,20 +272,6 @@ func LoadCEOEval() ([]Case, error) {
 	b, err := ceoEvalFS.ReadFile("testdata/ceo_eval.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("eval: read ceo_eval.yaml: %w", err)
-	}
-	return parseCaseFile(b)
-}
-
-// LoadT1Supplement loads the embedded Tier 1 supplement
-// (testdata/ceo_eval_t1.yaml): further held-out paraphrases that, combined
-// with LoadCEOEval's set, bring the live Tier 1 eval's n to at least 400
-// (docs/slices/R.md §10/Risks item 12). It is never answered by Tier 0
-// alone (see TestEvalSetMeetsMinimums and the live eval, task R-18) — it
-// exists specifically to widen the Tier 1 live eval's sample size.
-func LoadT1Supplement() ([]Case, error) {
-	b, err := ceoEvalT1FS.ReadFile("testdata/ceo_eval_t1.yaml")
-	if err != nil {
-		return nil, fmt.Errorf("eval: read ceo_eval_t1.yaml: %w", err)
 	}
 	return parseCaseFile(b)
 }

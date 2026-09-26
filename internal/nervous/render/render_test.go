@@ -197,6 +197,28 @@ func TestRejectsMissingVoiceErrorKey(t *testing.T) {
 	}
 }
 
+// TestVoiceKokoroVoiceRoundTrips proves an optional kokoro_voice set in
+// style.yaml (Slice V's V-voice sub-slice, V-7) survives parseStyle's
+// strict decode and voiceFromFile's mapping into VoiceStyle.TTS.
+func TestVoiceKokoroVoiceRoundTrips(t *testing.T) {
+	y := strings.Replace(validStyleYAML, `tts: {voice: "", rate_wpm: 185}`, `tts: {voice: "", rate_wpm: 185, kokoro_voice: "af_heart"}`, 1)
+	s := mustStyle(t, y)
+	if got := s.Voice().TTS.KokoroVoice; got != "af_heart" {
+		t.Fatalf("TTS.KokoroVoice = %q, want af_heart", got)
+	}
+}
+
+// TestVoiceWithoutKokoroVoiceStillValid proves kokoro_voice is truly
+// optional: a style.yaml that never mentions it (validStyleYAML itself)
+// still validates, and VoiceStyle.TTS.KokoroVoice comes back empty rather
+// than erroring.
+func TestVoiceWithoutKokoroVoiceStillValid(t *testing.T) {
+	s := mustStyle(t, validStyleYAML)
+	if got := s.Voice().TTS.KokoroVoice; got != "" {
+		t.Fatalf("TTS.KokoroVoice = %q, want empty when style.yaml omits kokoro_voice", got)
+	}
+}
+
 func TestDefaultStyleIsValid(t *testing.T) {
 	s := DefaultStyle()
 	if s == nil {

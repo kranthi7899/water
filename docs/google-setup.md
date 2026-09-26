@@ -45,9 +45,11 @@ water connect google --client-file ~/Downloads/client_secret.json
 This opens your browser (and prints the URL, in case it doesn't). You'll see:
 
 - **"Google hasn't verified this app"** — click **Advanced**, then **Go to water-personal (unsafe)**. This is Google's standard warning for any unverified OAuth app; it's safe here because you created the app yourself and it only touches your own account.
-- A consent screen listing Calendar, Gmail and Drive read access. Approve it, and **tick every checkbox** — water refuses to connect if any of the three scopes was left unchecked.
+- A consent screen listing Calendar, Gmail, Drive and Sheets read access. Approve it, and **tick every checkbox** — water refuses to connect if any scope was left unchecked.
 
 On success, water prints `connected: water.google/ceo` and stores the credential in the macOS Keychain. Nothing in that output or in any log is ever the token itself.
+
+**Already connected before the Sheets scope existed (the `company_finance` connector)?** A stored refresh token doesn't retroactively gain a newly-added scope — run `water connect google --client-file ...` again once to re-consent and pick up `spreadsheets.readonly`. Every other connector keeps working unchanged in the meantime; only `company_finance`'s functions need the new scope.
 
 ## 6. Check it
 
@@ -77,4 +79,4 @@ This revokes the refresh token at Google (so it stops working everywhere, not ju
 
 - **"reconnect: run `water connect google`"** — Google rejected the stored refresh token (`invalid_grant`). Expected about once a week, since the app stays in Testing mode (see step 3) and Testing-mode tokens expire after 7 days. It also happens if you revoke water's access from <https://myaccount.google.com/permissions>. Just run `water connect google --client-file ...` again.
 - **"client file is for a Web application client"** — you created the wrong OAuth client type in step 4. Delete it and create a **Desktop app** client instead.
-- **"access not granted for ...; connect again and tick every box"** — one of the three scopes wasn't approved. Reconnect and check every box on the consent screen.
+- **"access not granted for ...; connect again and tick every box"** — one of the requested scopes wasn't approved. Reconnect and check every box on the consent screen.

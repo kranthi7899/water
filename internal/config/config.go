@@ -33,6 +33,7 @@ type Config struct {
 	GitHub   GitHubConfig   `yaml:"github"`
 	Router   RouterConfig   `yaml:"router"`
 	Decider  DeciderConfig  `yaml:"decider"`
+	Notify   NotifyConfig   `yaml:"notify"`
 }
 
 // DeciderConfig selects the internal/decider.Decider implementation
@@ -51,7 +52,6 @@ type DeciderConfig struct {
 // early; the rest lands with this task (R-25).
 type RouterConfig struct {
 	Tier0        RouterTier0Config       `yaml:"tier0"`
-	Tier1        RouterTier1Config       `yaml:"tier1"`
 	Main         RouterMainConfig        `yaml:"main"`
 	Breaker      RouterBreakerConfig     `yaml:"breaker"`
 	Speculation  RouterSpeculationConfig `yaml:"speculation"`
@@ -81,26 +81,13 @@ type RouterTier0Config struct {
 	TimeoutMS int  `yaml:"timeout_ms"`
 }
 
-// RouterTier1Config configures Tier 1, the FunctionGemma sidecar
-// (router.tier1.*). Enabled alone is never enough to start the sidecar —
-// the daemon also requires a passing eval-gate record (docs/slices/R.md
-// §10); see internal/cli/cmd_daemon.go.
-type RouterTier1Config struct {
-	Enabled   bool   `yaml:"enabled"`
-	TimeoutMS int    `yaml:"timeout_ms"`
-	ServerBin string `yaml:"server_bin"`
-	// ModelPath is the GGUF file passed to llama-server. Empty means
-	// $WATER_HOME/models/functiongemma.gguf.
-	ModelPath string `yaml:"model_path"`
-}
-
 // RouterMainConfig configures the main path (router.main.*). Disabling it
 // leaves quick answers only; an unanswered turn errors.
 type RouterMainConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// RouterBreakerConfig configures Tier 0/Tier 1's circuit breakers
+// RouterBreakerConfig configures Tier 0's circuit breaker
 // (router.breaker.*, nervous.BreakerConfig). MissSample and MinMissSamples
 // are not in Design §17's table — they stay the code defaults
 // nervous.DefaultBreakerConfig documents, not a settable key.
@@ -192,6 +179,37 @@ type MeetingsConfig struct {
 	// from a live session's recent transcript. Off by default, following
 	// this package's existing plain-bool-flag convention.
 	ProactiveCues bool `yaml:"proactive_cues"`
+}
+
+// NotifyConfig configures internal/needsyou's shared "needs you" threshold
+// (Slice V-3, docs/slices/V.md §5): the point at which a decision or a
+// pending approval crosses from merely existing to something Today and
+// Notifications actually surface. Duration-shaped keys are seconds-as-int,
+// matching this package's existing convention for a duration-shaped key
+// (router.tier0.timeout_ms is milliseconds-as-int; router.breaker.
+// cooldown_seconds and router.voice_approve.window_seconds are
+// seconds-as-int) rather than a parseable duration string.
+type NotifyConfig struct {
+	// MinSeverity is the lowest decisions.Card.Severity that counts as
+	// "needs you" (notify.min_severity).
+	MinSeverity int `yaml:"min_severity"`
+	// ApprovalGraceSeconds is how long a pending approval waits before it
+	// counts as "needs you" too (notify.approval_grace_seconds): a fresh
+	// approval isn't yet stale enough to escalate.
+	ApprovalGraceSeconds int `yaml:"approval_grace_seconds"`
+	// IntervalSeconds is how often needsyou.Service.Tick recomputes the
+	// snapshot (notify.interval_seconds).
+	IntervalSeconds int `yaml:"interval_seconds"`
+}
+
+// ApprovalGrace is ApprovalGraceSeconds as a time.Duration.
+func (c NotifyConfig) ApprovalGrace() time.Duration {
+	return time.Duration(c.ApprovalGraceSeconds) * time.Second
+}
+
+// Interval is IntervalSeconds as a time.Duration.
+func (c NotifyConfig) Interval() time.Duration {
+	return time.Duration(c.IntervalSeconds) * time.Second
 }
 
 // AgentConfig configures how outward actions identify themselves as the
@@ -301,10 +319,6 @@ func defaults() map[string]string {
 		"github.repo":                           "",
 		"router.tier0.enabled":                  "true",
 		"router.tier0.timeout_ms":               "150",
-		"router.tier1.enabled":                  "false",
-		"router.tier1.timeout_ms":               "400",
-		"router.tier1.server_bin":               "llama-server",
-		"router.tier1.model_path":               "",
 		"router.main.enabled":                   "true",
 		"router.breaker.failures":               "5",
 		"router.breaker.cooldown_seconds":       "60",
@@ -323,18 +337,23 @@ func defaults() map[string]string {
 		"router.promotion.demote_miss_rate_pct": "20",
 		"router.promotion.demote_min_samples":   "10",
 		"decider.provider":                      "none",
+		"notify.min_severity":                   "2",
+		"notify.approval_grace_seconds":         "30",
+		"notify.interval_seconds":               "120",
 	}
 }
 
 // retiredPrefixes and retiredKeys name config sections and keys removed after
 // the council-to-single-twin rebuild (orchestration, per-role sessions/tools/
-// skills/ui/telemetry/memory knobs, and the COO/CTO/design voices). An old
-// config.yaml that still sets them must keep loading, so Load ignores them
-// instead of failing with "unknown key"; it still rejects anything else it
-// doesn't recognize. There is no schema bump: nothing about the resolved
-// shape of a *current* key changed, only which keys still exist.
+// skills/ui/telemetry/memory knobs, and the COO/CTO/design voices), plus
+// router.tier1.* (the FunctionGemma small-model router tier, retired along
+// with internal/nervous/sidecar and internal/nervous/t1). An old config.yaml
+// that still sets them must keep loading, so Load ignores them instead of
+// failing with "unknown key"; it still rejects anything else it doesn't
+// recognize. There is no schema bump: nothing about the resolved shape of a
+// *current* key changed, only which keys still exist.
 var retiredPrefixes = []string{
-	"orchestration.", "sessions.", "tools.", "skills.", "ui.", "telemetry.", "memory.",
+	"orchestration.", "sessions.", "tools.", "skills.", "ui.", "telemetry.", "memory.", "router.tier1.",
 }
 
 var retiredKeys = map[string]bool{
@@ -445,10 +464,6 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.GitHub.Repo = flat["github.repo"]
 	r.Router.Tier0.Enabled = abool("router.tier0.enabled")
 	r.Router.Tier0.TimeoutMS = atoi("router.tier0.timeout_ms")
-	r.Router.Tier1.Enabled = abool("router.tier1.enabled")
-	r.Router.Tier1.TimeoutMS = atoi("router.tier1.timeout_ms")
-	r.Router.Tier1.ServerBin = flat["router.tier1.server_bin"]
-	r.Router.Tier1.ModelPath = flat["router.tier1.model_path"]
 	r.Router.Main.Enabled = abool("router.main.enabled")
 	r.Router.Breaker.Failures = atoi("router.breaker.failures")
 	r.Router.Breaker.CooldownSeconds = atoi("router.breaker.cooldown_seconds")
@@ -473,6 +488,9 @@ func (r *Resolved) apply(flat map[string]string) error {
 	if r.Decider.Provider != "none" && err == nil {
 		err = fmt.Errorf("decider.provider: only \"none\" is supported")
 	}
+	r.Notify.MinSeverity = atoi("notify.min_severity")
+	r.Notify.ApprovalGraceSeconds = atoi("notify.approval_grace_seconds")
+	r.Notify.IntervalSeconds = atoi("notify.interval_seconds")
 	if v := r.Brief.ReadyAfter; v != "" && err == nil {
 		// Parsed the same way internal/sync's readyTime does; a bad value
 		// there only logs on every tick and never precomputes the brief.
@@ -490,7 +508,6 @@ var (
 	intKeys = map[string]bool{
 		"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true,
 		"router.tier0.timeout_ms":               true,
-		"router.tier1.timeout_ms":               true,
 		"router.breaker.failures":               true,
 		"router.breaker.cooldown_seconds":       true,
 		"router.breaker.max_miss_rate_pct":      true,
@@ -502,11 +519,13 @@ var (
 		"router.promotion.max_learned":          true,
 		"router.promotion.demote_miss_rate_pct": true,
 		"router.promotion.demote_min_samples":   true,
+		"notify.min_severity":                   true,
+		"notify.approval_grace_seconds":         true,
+		"notify.interval_seconds":               true,
 	}
 	boolKeys = map[string]bool{
 		"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true,
 		"router.tier0.enabled":         true,
-		"router.tier1.enabled":         true,
 		"router.main.enabled":          true,
 		"router.speculation.enabled":   true,
 		"router.quick_tools.enabled":   true,
@@ -538,10 +557,6 @@ func (r *Resolved) Flat() map[string]string {
 		"github.repo":                           r.GitHub.Repo,
 		"router.tier0.enabled":                  strconv.FormatBool(r.Router.Tier0.Enabled),
 		"router.tier0.timeout_ms":               strconv.Itoa(r.Router.Tier0.TimeoutMS),
-		"router.tier1.enabled":                  strconv.FormatBool(r.Router.Tier1.Enabled),
-		"router.tier1.timeout_ms":               strconv.Itoa(r.Router.Tier1.TimeoutMS),
-		"router.tier1.server_bin":               r.Router.Tier1.ServerBin,
-		"router.tier1.model_path":               r.Router.Tier1.ModelPath,
 		"router.main.enabled":                   strconv.FormatBool(r.Router.Main.Enabled),
 		"router.breaker.failures":               strconv.Itoa(r.Router.Breaker.Failures),
 		"router.breaker.cooldown_seconds":       strconv.Itoa(r.Router.Breaker.CooldownSeconds),
@@ -560,6 +575,9 @@ func (r *Resolved) Flat() map[string]string {
 		"router.promotion.demote_miss_rate_pct": strconv.Itoa(r.Router.Promotion.DemoteMissRatePct),
 		"router.promotion.demote_min_samples":   strconv.Itoa(r.Router.Promotion.DemoteMinSamples),
 		"decider.provider":                      r.Decider.Provider,
+		"notify.min_severity":                   strconv.Itoa(r.Notify.MinSeverity),
+		"notify.approval_grace_seconds":         strconv.Itoa(r.Notify.ApprovalGraceSeconds),
+		"notify.interval_seconds":               strconv.Itoa(r.Notify.IntervalSeconds),
 	}
 }
 

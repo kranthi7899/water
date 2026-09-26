@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Water</title>
+<link rel="stylesheet" href="app.css">
+<script src="dom.js" defer></script>
+<script src="api.js" defer></script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <nav class="sidebar" aria-label="Sections">
+    <div class="brand">Water</div>
+    <button type="button" class="nav" data-view="today"><span class="nav-label">Today</span><span class="count" data-count="today"></span></button>
+    <button type="button" class="nav" data-view="decisions"><span class="nav-label">Decisions</span><span class="count" data-count="decisions"></span></button>
+    <button type="button" class="nav" data-view="approvals"><span class="nav-label">Approvals</span><span class="count" data-count="approvals"></span></button>
+    <button type="button" class="nav" data-view="threads"><span class="nav-label">Threads</span></button>
+    <button type="button" class="nav" data-view="meetings"><span class="nav-label">Meetings</span></button>
+    <div class="sidebar-foot">
+      <button type="button" class="mic" id="mic" hidden aria-label="Talk to your twin">Talk</button>
+      <button type="button" class="ghost" id="refresh">Refresh</button>
+    </div>
+  </nav>
+  <main class="main" id="main" tabindex="-1" aria-live="polite"></main>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

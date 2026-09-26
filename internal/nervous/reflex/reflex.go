@@ -1,6 +1,5 @@
-// Package reflex holds Tier 0/Tier 1's read-only handlers: the audited,
-// fixed set of functions a quick answer or a quick.* tool call may ever
-// run. Every handler here reads the twin's local store only — never a
+// Package reflex holds Tier 0's read-only handlers: the audited, fixed set
+// of functions a quick answer or a quick.* tool call may ever run. Every handler here reads the twin's local store only — never a
 // connector, never the gate, never a subprocess, never a mutation. That
 // invariant is enforced structurally, not by convention: see
 // imports_test.go's import denylist and forbidden-selector check.

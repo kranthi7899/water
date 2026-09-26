@@ -84,8 +84,8 @@ func sortQuickFunctions(fs []tools.QuickFunction) {
 }
 
 // Run resolves args against id's declared FunctionSpec.Args (using the same
-// slots.ResolveString every Tier 1 proposal is validated with,
-// Design §11.3), runs the handler, and marshals its render.Result's
+// slots.ResolveString a quick-tool call's string arguments are resolved
+// with, Design §11.3), runs the handler, and marshals its render.Result's
 // structured fields — never rendered prose, which is a quick TIER's job,
 // not a tool result. An unresolved or ambiguous argument is returned as an
 // error naming the argument (and, when ambiguous, the candidates), so the

@@ -8,13 +8,6 @@ needs:
     fetch: gmail.list_messages
     kind: lookup
     args: {query: "from:{sender}"}
-  - name: budget_spreadsheet
-    fetch: gdrive.read_file
-    kind: lookup
-    args: {id: "CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet"}
-  - name: runway_and_burn
-    fetch: internal://budget_request.compute_runway
-    kind: computation
   - name: comparable_requests
     fetch: gdrive.search_files
     kind: research
@@ -35,22 +28,21 @@ The threshold in `default_rule` follows the board policy in
 `twins/ceo/role.md`'s "Budget structure" section; update both together if
 that policy changes.
 
-`budget_spreadsheet` names a fixed Drive file, not a per-item lookup: the
-runway/burn sheet doesn't change from one budget request to the next, so its
-id is a constant here, the same way `role.md`'s "Runway source" line names
-it. **The owner must replace the placeholder id above with the real Drive
-file id of their runway spreadsheet** (`water twin` has no command yet to
-verify this; a wrong or placeholder id makes `budget_spreadsheet` fail at
-the gate, which the card reports as a gap and blocks on, per C.md's
-readiness rule — it never fails silently or invents a number). The sheet is
-expected to be exported as CSV with a header row naming a cash column
-(`cash`, `cash_on_hand`, ...) and a monthly burn column (`burn`,
-`monthly_burn`, ...); `internal://budget_request.compute_runway` reads the
-last row with both columns parseable from the full export (not the short
-excerpt) and computes runway = cash / burn in code. A missing, unreadable,
-truncated (too large for the connector's content cap), zero-burn,
-negative-cash or non-numeric (`NaN`, `Inf`) sheet yields `missing_info`,
-not a crash or a guessed number.
+This demo twin deliberately has no `cash_position`/`budget_status` need,
+unlike the real `twins/ceo/decisions/budget_request.yaml`: those call
+`company_finance` (`internal/connectors/google/gsheets`), a real Google
+Sheets connector reading the company's actual financial model, and the demo
+twin is registered with fake, in-memory stand-ins for GitHub/Linear/HubSpot
+specifically so it never needs a real credential — there is no fake
+`company_finance`, so granting it here would mean either the demo twin
+fails to start (no connector to satisfy the manifest) or it reaches the
+owner's real financial sheet with the demo's own showcase data, neither of
+which is right. The runway figure this used to (nominally) compute via a
+Drive-exported-CSV read was already non-functional in this file too — its
+`budget_spreadsheet` need pointed at the same unfilled
+`CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet` placeholder the real
+twin's copy had — so dropping it here is a simplification, not a
+regression.
 
 `comparable_requests` is a keyword search over Drive for similar past asks,
 the same pattern `generic`'s own needs use; it is research, not part of the

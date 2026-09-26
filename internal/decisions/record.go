@@ -29,6 +29,8 @@ func Meta(r store.Record) *store.Meta {
 		return &v.Meta
 	case *store.Contact:
 		return &v.Meta
+	case *store.FinanceFigure:
+		return &v.Meta
 	}
 	return nil
 }
@@ -78,6 +80,8 @@ func describe(r store.Record) string {
 		return clip(fmt.Sprintf("Transaction %s %d (minor units) %s: %s", v.Counterparty, v.AmountMinor, v.Currency, v.Description), 240)
 	case *store.Contact:
 		return clip(fmt.Sprintf("Contact %s <%s> %s", v.Name, v.Email, v.Org), 240)
+	case *store.FinanceFigure:
+		return clip(fmt.Sprintf("%s (%s!%s): %s", v.Meta.Source, v.Tab, v.RangeA1, v.Values), 240)
 	}
 	return ""
 }

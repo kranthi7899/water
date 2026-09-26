@@ -1,13 +1,13 @@
 // Package nervous is the front door every channel (CLI, hotkey pop-up,
-// voice, meeting mode) calls: the sous chef's cascade (Tier 0, and later
-// Tier 1) tries to answer instantly and with no model call, and only then
-// hands off to the head chef (Claude, on the warm session). This file holds
-// the minimal shared types later tasks build on; the full Tier interface,
-// Outcome and the Nervous facade itself are R-12's job.
+// voice, meeting mode) calls: the sous chef's cascade (Tier 0) tries to
+// answer instantly and with no model call, and only then hands off to the
+// head chef (Claude, on the warm session). This file holds the minimal
+// shared types later tasks build on; the full Tier interface, Outcome and
+// the Nervous facade itself are R-12's job.
 package nervous
 
 // TierID names which tier answered or is being tried. Only "t0" exists in
-// this codebase today; "t1" and "main" are added by later tasks.
+// this codebase today; "main" is added by a later task.
 type TierID string
 
 const (

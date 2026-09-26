@@ -13,8 +13,8 @@ import (
 // only the first half.
 const sentenceMarks = ".?!;"
 
-// Eligible decides whether a turn may even be tried against Tier 0/Tier 1,
-// before any template match is attempted. u must already be normalized
+// Eligible decides whether a turn may even be tried against Tier 0, before
+// any template match is attempted. u must already be normalized
 // with the same skip-word set the caller will match templates against
 // (Design §6). ok=false means escalate straight to the main path; reason
 // is one of "empty", "too_long", "escalate_word:<entry>" or "multi_clause".

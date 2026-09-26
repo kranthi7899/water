@@ -130,7 +130,7 @@ func TestCredential(t *testing.T) {
 			t.Fatalf("credential rendered: %s", out)
 		}
 	}
-	if len(Scopes()) != 5 || Service != "water.google" || DefaultAccount != "ceo" {
+	if len(Scopes()) != 6 || Service != "water.google" || DefaultAccount != "ceo" {
 		t.Fatal("constants")
 	}
 }

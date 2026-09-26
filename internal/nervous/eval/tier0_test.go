@@ -2,18 +2,79 @@ package eval
 
 import (
 	"context"
+	"fmt"
+	"net/mail"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"water"
+	"water/internal/approvals"
 	"water/internal/nervous"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/propose"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/slots"
 	"water/internal/nervous/tmpl"
+	"water/internal/store"
 	"water/internal/twins"
 )
+
+// liveWordSet builds a lookup set from words, or nil if words is empty
+// (tmpl.Normalize treats a nil skip-word set as "skip nothing").
+func liveWordSet(words []string) map[string]bool {
+	if len(words) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(words))
+	for _, w := range words {
+		m[w] = true
+	}
+	return m
+}
+
+// fixtureEntities builds the slots.Entities a fixture's known senders
+// resolve to, for a person-typed slot's grounding.
+func fixtureEntities(fx Fixture) slots.Entities {
+	var people []slots.Person
+	for _, s := range fx.Senders {
+		addr, err := mail.ParseAddress(s)
+		if err != nil {
+			continue
+		}
+		people = append(people, slots.Person{Name: addr.Name, Email: addr.Address})
+	}
+	return slots.Entities{People: people}
+}
+
+type fixturePendingLister struct{}
+
+func (fixturePendingLister) Pending(ctx context.Context) ([]approvals.Envelope, error) {
+	return nil, nil
+}
+
+// fixtureStore opens a fresh, empty, temp-dir-backed store for eval's reflex
+// handlers to read from. Never the owner's real ~/.water store: it starts
+// empty (no events, no messages) on every run, which is sufficient because
+// Run's Tier interface only compares matched intent/slots against each
+// Case, never a handler's rendered content.
+func fixtureStore() (*store.Store, func(), error) {
+	dir, err := os.MkdirTemp("", "water-tier0-eval-*")
+	if err != nil {
+		return nil, nil, fmt.Errorf("eval: temp dir: %w", err)
+	}
+	st, err := store.Open(filepath.Join(dir, "eval.db"))
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, nil, fmt.Errorf("eval: open fixture store: %w", err)
+	}
+	cleanup := func() {
+		st.Close()
+		os.RemoveAll(dir)
+	}
+	return st, cleanup, nil
+}
 
 // tier0OnlyTier adapts the real Tier 0 cascade (eligibility, then
 // nervous.TryTier0 — no Tier 1, no main path) to the Tier interface Run

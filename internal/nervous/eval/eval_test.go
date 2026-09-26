@@ -2,26 +2,9 @@ package eval
 
 import (
 	"context"
-	"embed"
 	"math"
 	"testing"
 )
-
-//go:embed testdata/ceo_eval_t1.yaml
-var t1FS embed.FS
-
-func loadT1Supplement(t *testing.T) []Case {
-	t.Helper()
-	b, err := t1FS.ReadFile("testdata/ceo_eval_t1.yaml")
-	if err != nil {
-		t.Fatalf("read ceo_eval_t1.yaml: %v", err)
-	}
-	cases, err := parseCaseFile(b)
-	if err != nil {
-		t.Fatalf("parse ceo_eval_t1.yaml: %v", err)
-	}
-	return cases
-}
 
 // ---- harness mechanics, against a trivial fake tier ----
 
@@ -143,7 +126,6 @@ func TestEvalSetMeetsMinimums(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadCEOEval: %v", err)
 	}
-	t1 := loadT1Supplement(t)
 
 	if len(cases) < 276 {
 		t.Errorf("ceo_eval.yaml has %d cases, want >= 276", len(cases))
@@ -195,11 +177,6 @@ func TestEvalSetMeetsMinimums(t *testing.T) {
 		byClass["action_unsupported"] + byClass["ood"] + byClass["yesno_zero_pending"]
 	if negatives < 100 {
 		t.Errorf("total negatives = %d, want >= 100", negatives)
-	}
-
-	combinedN := len(cases) + len(t1)
-	if combinedN < 400 {
-		t.Errorf("combined ceo_eval.yaml + ceo_eval_t1.yaml has %d cases, want >= 400 for the live Tier 1 eval", combinedN)
 	}
 }
 

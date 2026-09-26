@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"time"
 
 	"water/internal/store"
@@ -63,3 +64,11 @@ func computeDealHealth(_ context.Context, in ComputeInput) (ComputeResult, error
 		External: true,
 	}, nil
 }
+
+// round1 and money were shared with budget_request.go's own compute
+// function before company_finance replaced its Drive-CSV parsing path
+// (see twins/ceo/decisions/budget_request.yaml's notes); this is now
+// their only caller.
+func round1(f float64) float64 { return math.Round(f*10) / 10 }
+
+func money(f float64) string { return strconv.FormatFloat(f, 'f', 0, 64) }

@@ -8,13 +8,13 @@ needs:
     fetch: gmail.list_messages
     kind: lookup
     args: {query: "from:{sender}"}
-  - name: budget_spreadsheet
-    fetch: gdrive.read_file
+  - name: cash_position
+    fetch: company_finance.cash_position
     kind: lookup
-    args: {id: "CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet"}
-  - name: runway_and_burn
-    fetch: internal://budget_request.compute_runway
-    kind: computation
+  - name: budget_status
+    fetch: company_finance.budget_status
+    kind: lookup
+    args: {application: "{keywords}"}
   - name: comparable_requests
     fetch: gdrive.search_files
     kind: research
@@ -37,22 +37,26 @@ The threshold in `default_rule` follows the board policy in
 `twins/ceo/role.md`'s "Budget structure" section; update both together if
 that policy changes.
 
-`budget_spreadsheet` names a fixed Drive file, not a per-item lookup: the
-runway/burn sheet doesn't change from one budget request to the next, so its
-id is a constant here, the same way `role.md`'s "Runway source" line names
-it. **The owner must replace the placeholder id above with the real Drive
-file id of their runway spreadsheet** (`water twin` has no command yet to
-verify this; a wrong or placeholder id makes `budget_spreadsheet` fail at
-the gate, which the card reports as a gap and blocks on, per C.md's
-readiness rule — it never fails silently or invents a number). The sheet is
-expected to be exported as CSV with a header row naming a cash column
-(`cash`, `cash_on_hand`, ...) and a monthly burn column (`burn`,
-`monthly_burn`, ...); `internal://budget_request.compute_runway` reads the
-last row with both columns parseable from the full export (not the short
-excerpt) and computes runway = cash / burn in code. A missing, unreadable,
-truncated (too large for the connector's content cap), zero-burn,
-negative-cash or non-numeric (`NaN`, `Inf`) sheet yields `missing_info`,
-not a crash or a guessed number.
+`cash_position` and `budget_status` replace what used to be a Drive-exported-
+CSV read plus a code-side parser (`internal://budget_request.compute_runway`,
+which pointed at a `CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet`
+placeholder that was never actually filled in): they now call
+`company_finance` (`internal/connectors/google/gsheets`) directly, a real,
+read-only connector over Renaissance_Finance, the company's real financial
+model, reading a specific tab and cell range live rather than parsing an
+exported CSV blob. `cash_position` takes no args (a fixed range, `Cash &
+runway!B19:B21`); `budget_status` takes `application`, filled from
+`{keywords}` (the same placeholder `comparable_requests` already uses for a
+"search-ish" purpose) since there is no dedicated per-decision "which
+product/application is this about" extraction yet — a real gap if the
+extracted keywords don't reliably name a product, worth revisiting once
+this has run against real budget requests. Both come back through the
+ordinary connector-evidence path (`Builder.resolve` → `Card.Evidence`), not
+a compute function, since `company_finance` already returns real, structured
+numbers rather than raw text needing to be parsed. A missing match (no
+`application` row found, or the sheet unreachable) still degrades through
+the normal readiness rule — `gate.Invoke` failing or `budget_status`
+reporting no match never fails the whole build or invents a number.
 
 `comparable_requests` is a keyword search over Drive for similar past asks,
 the same pattern `generic`'s own needs use; it is research, not part of the

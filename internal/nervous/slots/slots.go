@@ -1,5 +1,5 @@
 // Package slots resolves a captured, typed argument (a tmpl.Capture, or a
-// raw string for Tier 1 / quick-tool callers) into a typed Value: a date,
+// raw string for quick-tool callers) into a typed Value: a date,
 // time, count, person, and so on. Resolution never guesses: an expression
 // outside the recognized vocabulary is Unresolved, and a person name that
 // matches more than one entity is Ambiguous with the candidates listed, so
@@ -100,8 +100,8 @@ func Resolve(t Type, c tmpl.Capture, spec Spec, now time.Time, ents Entities) (V
 }
 
 // ResolveString resolves a plain string the way Resolve resolves a template
-// capture, for callers with no tmpl.Capture: Tier 1's parsed function-call
-// arguments, and quick-tool string arguments. A text slot must keep its
+// capture, for callers with no tmpl.Capture: an intent's own declared
+// default value, and quick-tool string arguments. A text slot must keep its
 // original casing and punctuation, so s is used verbatim as the capture's
 // Raw, while Tokens come from the same normalization every other type
 // matches against.

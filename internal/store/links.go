@@ -16,6 +16,26 @@ const (
 	LinkOwnsClient = "owns_client"  // person -> client
 )
 
+// Link kinds the workspace/UI slice (Slice V) writes, on the same links
+// table — no schema change, just new Kind values and from_type/to_type
+// strings.
+const (
+	LinkAbout       = "about"        // thread -> decision/approval/message/meeting: the thread's anchor
+	LinkInWorkspace = "in_workspace" // decision/meeting/job/thread/project -> workspace
+	LinkInvolves    = "involves"     // record -> person
+	LinkForProject  = "for_project"  // record -> project
+)
+
+// Node-type strings used as FromType/ToType across every table this
+// package touches so far. Not a Go type — nothing in SQL constrains
+// from_type/to_type, and Link's fields are plain strings like the rest of
+// this file — just a single place to check before spelling a new one, so
+// two callers never invent "workspace" and "work_space" for the same
+// thing:
+//
+//	"decision", "approval", "message", "meeting", "thread", "workspace",
+//	"job", "person", "team", "project", "client"
+
 // Link is one edge between two roster records. FromType/ToType name which
 // table FromID/ToID's source_id refers to ("person", "team", "project",
 // "client"). Fraction is only meaningful for LinkAllocated; zero otherwise.
@@ -41,6 +61,16 @@ func (s *Store) AddLink(ctx context.Context, l Link) error {
 	return err
 }
 
+// RemoveLink deletes the exact (kind, from_type, from_id, to_type, to_id)
+// edge l names. No error if it doesn't exist — idempotent, matching
+// AddLink's own idempotent-upsert posture.
+func (s *Store) RemoveLink(ctx context.Context, l Link) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM links WHERE kind = ? AND from_type = ? AND from_id = ? AND to_type = ? AND to_id = ?`,
+		l.Kind, l.FromType, l.FromID, l.ToType, l.ToID)
+	return err
+}
+
 func nullableFraction(l Link) any {
 	if l.Kind != LinkAllocated {
 		return nil
@@ -56,6 +86,14 @@ func (s *Store) LinksFrom(ctx context.Context, fromType, fromID, kind string) ([
 // LinksTo returns every edge of kind ending at (toType, toID).
 func (s *Store) LinksTo(ctx context.Context, toType, toID, kind string) ([]Link, error) {
 	return queryLinks(ctx, s, `to_type = ? AND to_id = ? AND kind = ?`, toType, toID, kind)
+}
+
+// LinksOf returns every link of any kind that touches (typ, id), on either
+// side of the edge (as From or as To). Each row is matched by a single OR
+// condition rather than two queries unioned together, so a self-referential
+// edge (typ/id on both sides) is still returned exactly once.
+func (s *Store) LinksOf(ctx context.Context, typ, id string) ([]Link, error) {
+	return queryLinks(ctx, s, `(from_type = ? AND from_id = ?) OR (to_type = ? AND to_id = ?)`, typ, id, typ, id)
 }
 
 func queryLinks(ctx context.Context, s *Store, cond string, args ...any) ([]Link, error) {

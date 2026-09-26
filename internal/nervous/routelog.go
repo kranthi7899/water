@@ -147,9 +147,9 @@ func (r *routeRecorder) finish(ctx context.Context) {
 		FirstPartialLeadMS: firstPartialLeadMS,
 		Speculation:        speculation,
 		// SpeculationModelCalls is always 0: SpecDeps (speculate.go) has no
-		// backend or Tier 1 field at all, so speculative work can never make
-		// a model call by construction — there is nothing to count here,
-		// ever (TestSpeculationZeroModelCalls asserts this in practice too).
+		// backend field at all, so speculative work can never make a model
+		// call by construction — there is nothing to count here, ever
+		// (TestSpeculationZeroModelCalls asserts this in practice too).
 		SpeculationModelCalls: 0,
 		AckMS:                 r.ackMS,
 		FirstSentenceMS:       r.firstSentenceMS,
@@ -259,7 +259,7 @@ func (n *Nervous) captureSpeculationFacts(id string, at time.Time) (partials int
 }
 
 func (r *routeRecorder) updateRing() {
-	if r.answeredBy != "t0" && r.answeredBy != "t1" {
+	if r.answeredBy != "t0" {
 		return
 	}
 	summary := r.intent

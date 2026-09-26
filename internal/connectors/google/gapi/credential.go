@@ -28,11 +28,20 @@ const (
 	ScopeGmailSend      = "https://www.googleapis.com/auth/gmail.send"
 	ScopeGmailCompose   = "https://www.googleapis.com/auth/gmail.compose"
 	ScopeDriveReadonly  = "https://www.googleapis.com/auth/drive.readonly"
+	// ScopeSheetsReadonly is separate from ScopeDriveReadonly: the Sheets API
+	// (spreadsheets.values.get, used to read a specific tab/range rather
+	// than exporting a whole file) is authorized against its own scope
+	// regardless of what Drive scope is granted. Added for the
+	// company_finance connector, which needs live per-tab reads Drive's
+	// files.export endpoint can't reach (it only exports one sheet/tab per
+	// file). An owner already connected before this scope existed must
+	// re-run `water connect google` once to grant it.
+	ScopeSheetsReadonly = "https://www.googleapis.com/auth/spreadsheets.readonly"
 )
 
 // Scopes returns the scopes water asks for.
 func Scopes() []string {
-	return []string{ScopeCalendarEvents, ScopeGmailReadonly, ScopeGmailSend, ScopeGmailCompose, ScopeDriveReadonly}
+	return []string{ScopeCalendarEvents, ScopeGmailReadonly, ScopeGmailSend, ScopeGmailCompose, ScopeDriveReadonly, ScopeSheetsReadonly}
 }
 
 var (

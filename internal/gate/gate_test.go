@@ -22,6 +22,7 @@ import (
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gdrive"
 	"water/internal/connectors/google/gmail"
+	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
 	"water/internal/gate"
@@ -176,7 +177,7 @@ func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
-		twinlink.NewSender("ceo", nil), twinlink.NewInbox(nil), github.New("owner/repo"), linear.New(), hubspot.New())
+		twinlink.NewSender("ceo", nil), twinlink.NewInbox(nil), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New())
 	if err != nil {
 		t.Fatal(err)
 	}

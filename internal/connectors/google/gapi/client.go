@@ -24,6 +24,7 @@ const (
 	CalendarBase = "https://www.googleapis.com/calendar/v3"
 	GmailBase    = "https://gmail.googleapis.com/gmail/v1"
 	DriveBase    = "https://www.googleapis.com/drive/v3"
+	SheetsBase   = "https://sheets.googleapis.com/v4/spreadsheets"
 )
 
 const (

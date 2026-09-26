@@ -1,5 +1,10 @@
 # Slice R: the nervous system (router)
 
+> **Note (2026-09-25):** Tier 1 was later retired — see
+> `docs/EVOLUTION_PLAN.md` for the decision and rationale. This document is
+> left as-is below as a historical record of what was built and verified at
+> the time.
+
 Status: **Slice R complete (2026-09-25), with one flagged item for the owner.** R-1 through R-11 and R-13 through R-28 are committed and ticked below. **R-12** ("Runtime split, main path, front door") has its work fully committed (`cd2e5c5`, `24cfe33`) and depended on successfully by every later task, but the "tick the box" commit every other task in this build has was never made for it — left `[ ]` on purpose rather than silently ticked; see R-12's own line, `docs/known-gaps.md` and `docs/EVOLUTION_PLAN.md`'s 2026-09-25 log entry for the same note. This build followed `docs/WORKFLOW.md`'s Explore → Plan → Approve → Implement → Verify → Review → Wrap-up loop, scoped to this slice only (not a standing rule for every future slice). See `docs/EVOLUTION_PLAN.md`'s 2026-09-25 log entry for the summary, and `docs/known-gaps.md`'s Slice R section for residual gaps.
 
 Context note: the owner's original prompt for this slice says "Sequence: finish A4 verification, then this slice, then B." That sequencing note is stale — per `docs/EVOLUTION_PLAN.md`, A4, B (interim), C-base, and M are all already done as of 2026-09-24. Slice R is being planned now, out of that original order, at the owner's explicit direction. A separate session is concurrently advancing Slice C's write-function increment and Slice E on the same `feat/ceo-twin` branch — see "Risks" below for the overlap this creates.

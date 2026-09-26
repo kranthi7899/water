@@ -75,6 +75,25 @@ connectors:
     functions:
       - {name: list_deals, level: R, rate: {max: 60, per: 1h}}
       - {name: list_contacts, level: R, rate: {max: 60, per: 1h}}
+  # company_finance (internal/connectors/google/gsheets) is a real,
+  # read-only connector over Renaissance_Finance, the company's actual
+  # financial model — a native Google Sheet, read through the Sheets API
+  # (values.get on a specific tab and A1 range, never the whole file), on
+  # the same shared water.google/ceo credential gcal/gmail/gdrive already
+  # use. Requires the spreadsheets.readonly scope (see gapi.Scopes()); an
+  # owner connected before this scope existed needs one `water connect
+  # google` re-run to pick it up (see docs/google-setup.md). No write
+  # function exists for this connector, here or in the connector's own
+  # Functions() — a "propose a budget change" feature, if ever built,
+  # would produce a decision packet for approval, never write to the sheet.
+  - name: company_finance
+    functions:
+      - {name: cash_position, level: R, rate: {max: 60, per: 1h}}
+      - {name: budget_status, level: R, rate: {max: 60, per: 1h}}
+      - {name: spend_breakdown, level: R, rate: {max: 60, per: 1h}}
+      - {name: outstanding_invoices, level: R, rate: {max: 60, per: 1h}}
+      - {name: revenue_by_application, level: R, rate: {max: 60, per: 1h}}
+      - {name: funding_history, level: R, rate: {max: 60, per: 1h}}
 
 # Only functions that read (never draft or act) may run unattended in the
 # background sync (internal/sync); get_message and the Drive functions stay

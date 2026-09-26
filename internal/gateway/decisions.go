@@ -26,7 +26,22 @@ func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ranked := decisions.Rank(cards)
+	// A card the CEO dismissed (POST /v1/decisions/{id}/dismiss) is left
+	// out, exactly as the "needs you" list already leaves it out
+	// (needsyou.Compute): cards are rebuilt on every request, so without
+	// this a dismissed card would simply come back.
+	dismissed, err := d.cfg.Store.DismissedCardIDs(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	open := cards[:0:0]
+	for _, c := range cards {
+		if c != nil && !dismissed[c.ID] {
+			open = append(open, c)
+		}
+	}
+	ranked := decisions.Rank(open)
 	if ranked == nil {
 		// No cards is always `[]` on the wire, never `null`: a typed client
 		// decoding an array (Swift's JSONDecoder) rejects null.
