@@ -13,8 +13,10 @@ enum HotKeyConfig {
     static let voice = HotKey(keyCode: 9, modifiers: [.control, .option], label: "⌃⌥V")
     /// Starts or stops capturing a meeting (manual only, never automatic).
     static let meeting = HotKey(keyCode: 46, modifiers: [.control, .option], label: "⌃⌥M")
+    /// Opens (or hides) the workspace window (Slice V-ui).
+    static let workspace = HotKey(keyCode: 13, modifiers: [.control, .option], label: "⌃⌥W")
 
-    static let all = [textBar, voice, meeting]
+    static let all = [textBar, voice, meeting, workspace]
 }
 
 struct HotKey: Equatable {

@@ -22,6 +22,23 @@ import Testing
         #expect(profile.handoff.isEmpty)
     }
 
+    /// Slice V's V-voice sub-slice (V-7): an optional Kokoro voice name,
+    /// present in the server's JSON when style.yaml's voice.tts.kokoro_voice
+    /// is set.
+    @Test func decodesKokoroVoiceWhenPresent() throws {
+        let raw = #"{"name":"Water","handoff":[],"tts":{"voice":"Samantha","rate_wpm":185,"kokoro_voice":"af_heart"}}"#
+        let profile = try JSONDecoder().decode(VoiceProfile.self, from: Data(raw.utf8))
+        #expect(profile.tts.kokoroVoice == "af_heart")
+    }
+
+    /// The server omits the key entirely (internal/gateway/router.go's
+    /// handleVoiceProfile) when style.yaml has no kokoro_voice — this must
+    /// decode to `nil`, not an empty string or a decode failure.
+    @Test func decodesNilKokoroVoiceWhenAbsent() throws {
+        let profile = try JSONDecoder().decode(VoiceProfile.self, from: Data(Self.fixture.utf8))
+        #expect(profile.tts.kokoroVoice == nil)
+    }
+
     @Test func fetchOverCannedServer() throws {
         let body = Self.fixture
         let server = try CannedServer(pieces: ["HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n\r\n" + body])

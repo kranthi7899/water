@@ -15,15 +15,23 @@ public struct VoiceProfile: Decodable, Equatable {
         /// Approximate words per minute — the same number `say -r` takes
         /// directly. Non-positive means "leave the resolved rate alone."
         public var rateWPM: Int
+        /// Optional Kokoro-82M voice name (FluidAudio's KokoroAneManager,
+        /// Slice V's V-voice sub-slice), used only when the client has
+        /// selected the Kokoro TTS engine. `nil` when the server omitted
+        /// the key (no `kokoro_voice` set in style.yaml) — meaning "let the
+        /// client pick its own default Kokoro voice."
+        public var kokoroVoice: String?
 
         enum CodingKeys: String, CodingKey {
             case voice
             case rateWPM = "rate_wpm"
+            case kokoroVoice = "kokoro_voice"
         }
 
-        public init(voice: String, rateWPM: Int) {
+        public init(voice: String, rateWPM: Int, kokoroVoice: String? = nil) {
             self.voice = voice
             self.rateWPM = rateWPM
+            self.kokoroVoice = kokoroVoice
         }
     }
 

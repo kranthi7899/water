@@ -3,24 +3,31 @@ import Foundation
 import Speech
 import WaterClientCore
 
-/// Push-to-talk plus spoken replies. The state machine itself is
-/// WaterClientCore's VoiceSession (tested there); this wires it to the real
-/// permission prompts, microphone, recognizer and main-queue timer, and owns
-/// the speech synthesizer. Recognition is on-device only
+/// Push-to-talk. The state machine itself is WaterClientCore's VoiceSession
+/// (tested there); this wires it to the real permission prompts, microphone,
+/// recognizer and main-queue timer. Recognition is on-device only
 /// (`requiresOnDeviceRecognition`): if this Mac can't recognize on-device,
 /// voice refuses to run rather than send audio to Apple's servers.
+///
+/// Spoken replies live outside this type now: AppDelegate drives a
+/// `SentenceSpeechQueue` directly (WaterClientCore) over an
+/// `AppleSpeechOutput` (this file's old AVSpeechSynthesizer logic, moved
+/// behind `SpeechOutput` — see AppleSpeechOutput.swift). `onNeedsSilence`
+/// is this controller's only remaining link to that: it fires wherever this
+/// type used to call `stopSpeaking()` itself, so AppDelegate can silence a
+/// reply the instant a new hold/toggle starts, before permission and mic
+/// start-up (which are asynchronous) get anywhere.
 final class VoiceController {
     typealias State = VoiceSession.State
 
     private let session: VoiceSession
-    private let synth = AVSpeechSynthesizer()
-    /// Set by `applyVoiceProfile`, from `GET /v1/voice/profile` (R-27).
-    /// Nil leaves `speak(_:)` on `AVSpeechUtterance`'s own defaults, exactly
-    /// as before this profile existed.
-    private var ttsVoice: AVSpeechSynthesisVoice?
-    private var ttsRate: Float?
 
     var state: State { session.state }
+
+    /// Fires synchronously, on the caller's thread (always main here),
+    /// whenever a fresh capture is about to start from idle — the same
+    /// moments this type used to call its own `stopSpeaking()`.
+    var onNeedsSilence: (() -> Void)?
 
     var onListening: (() -> Void)? {
         get { session.onListening } set { session.onListening = newValue }
@@ -37,22 +44,26 @@ final class VoiceController {
         get { session.onFailure } set { session.onFailure = newValue }
     }
 
-    init(holdLabel: String) {
+    /// `capture` defaults to Apple's on-device recognizer
+    /// (`OnDeviceSpeechCapture`); `EngineSelector` (Sources/Water) passes
+    /// `ParakeetCapture()` instead when FluidAudio is the chosen engine.
+    /// `VoiceSession` itself is unaware which one it's driving.
+    init(holdLabel: String, capture: SpeechCapture = OnDeviceSpeechCapture()) {
         session = VoiceSession(permissions: SystemVoicePermissions(),
-                               capture: OnDeviceSpeechCapture(),
+                               capture: capture,
                                scheduler: MainQueueScheduler())
         session.releasedEarlyMessage = "Hold \(holdLabel) while you talk, and release it to send."
     }
 
     /// Menu click: start listening, or stop and send.
     func toggle() {
-        if session.state == .idle { stopSpeaking() }
+        if session.state == .idle { onNeedsSilence?() }
         session.toggle()
     }
 
     /// Hotkey down. A new capture interrupts any reply being spoken.
     func startHold() {
-        if session.state == .idle { stopSpeaking() }
+        if session.state == .idle { onNeedsSilence?() }
         session.startHold()
     }
 
@@ -60,43 +71,6 @@ final class VoiceController {
     func endHold() { session.endHold() }
 
     func cancel() { session.cancel() }
-
-    /// Speaks one reply sentence. AVSpeechSynthesizer queues utterances, so
-    /// sentences play back-to-back in arrival order while more stream in.
-    func speak(_ sentence: String) {
-        let s = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return }
-        let utterance = AVSpeechUtterance(string: s)
-        if let ttsVoice { utterance.voice = ttsVoice }
-        if let ttsRate { utterance.rate = ttsRate }
-        synth.speak(utterance)
-    }
-
-    /// Applies `GET /v1/voice/profile` (R-27, fetched once at launch): an
-    /// empty `tts.voice`, an unmatched voice name, or a non-positive
-    /// `tts.rate_wpm` leaves the corresponding setting untouched, so
-    /// `speak(_:)` falls back to `AVSpeechUtterance`'s own defaults exactly
-    /// as it did before this profile existed. `tts.voice` is matched
-    /// case-insensitively against `AVSpeechSynthesisVoice.speechVoices()`'s
-    /// `.name` — the same voice-name space `say -v`/`internal/voice.OS`
-    /// already uses, since the daemon serves one TTS profile to every
-    /// client. Never throws; meant to be called best-effort.
-    func applyVoiceProfile(_ profile: VoiceProfile) {
-        if !profile.tts.voice.isEmpty,
-           let match = AVSpeechSynthesisVoice.speechVoices().first(where: {
-               $0.name.compare(profile.tts.voice, options: .caseInsensitive) == .orderedSame
-           }) {
-            ttsVoice = match
-        }
-        if profile.tts.rateWPM > 0 {
-            ttsRate = Float(TTSRateMapping.rate(forWPM: profile.tts.rateWPM))
-        }
-    }
-
-    /// Stops the current utterance and drops every queued one.
-    func stopSpeaking() {
-        synth.stopSpeaking(at: .immediate)
-    }
 }
 
 private final class SystemVoicePermissions: VoicePermissionGate {

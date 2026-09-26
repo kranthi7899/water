@@ -1,9 +1,13 @@
 import AppKit
 
 // A plain NSApplication (not a SwiftUI App) so a menu-bar-only, LSUIElement
-// app behaves predictably. `--selftest` runs headless instead (see SelfTest).
+// app behaves predictably. `--selftest` and `--voice-bench` both run
+// headless instead (see SelfTest, VoiceBench).
 if CommandLine.arguments.contains("--selftest") {
     exit(SelfTest.run(arguments: CommandLine.arguments))
+}
+if CommandLine.arguments.contains("--voice-bench") {
+    exit(VoiceBench.run(arguments: CommandLine.arguments))
 }
 
 let app = NSApplication.shared

@@ -28,7 +28,8 @@ INSTALL=0
 [ "${1:-}" = "--install" ] && INSTALL=1
 
 swift build -c release
-BIN="$(swift build -c release --show-bin-path)/Water"
+BIN_DIR="$(swift build -c release --show-bin-path)"
+BIN="$BIN_DIR/Water"
 
 OUT=build
 APP="$OUT/Water.app"
@@ -37,6 +38,39 @@ VERSION="0.1.0"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Water"
+
+# SwiftPM resource bundles (currently just FluidAudio's own
+# FluidAudio_FluidAudio.bundle, its LuxTts G2P lexicon data) land next to
+# the built binary in $BIN_DIR; copy any into Contents/Resources, the one
+# location that both (a) keeps `codesign --verify --strict` below passing
+# and (b) is where a well-behaved SwiftPM resource accessor looks first via
+# Bundle.module's Bundle(for:)-based candidates.
+#
+# KNOWN GAP (found while adding the FluidAudio dependency, task V-1): the
+# accessor SwiftPM actually generated for this package's tools-version
+# (resource_bundle_accessor.swift under .build/.../FluidAudio.build) does
+# NOT use that candidate chain — it only tries
+# Bundle.main.bundleURL.appendingPathComponent(...), which for an app
+# bundle is Water.app's own root (confirmed empirically: Bundle.main.bundleURL
+# is the top-level .app, not Contents/ or Contents/MacOS/), then falls back
+# to a hardcoded absolute .build path from THIS machine. Placing anything at
+# that top level (even a symlink into Contents/Resources) makes `codesign
+# --verify --strict` fail with "unsealed contents present in the bundle
+# root" (verified both ways) — so there is no placement that satisfies both
+# constraints at once. Copying into Contents/Resources here is the standard,
+# codesign-safe choice, not a fix for that mismatch: FluidAudio's own
+# Bundle.module lookup will still miss it in a real .app and fall through to
+# a path that only exists on a dev machine's .build directory.
+# Consequence today: none yet — grep confirms only
+# Sources/FluidAudio/TTS/LuxTts/G2p/LuxTtsG2p.swift touches Bundle.module;
+# KokoroAneManager (Kokoro TTS) and the Parakeet ASR path this project
+# actually plans to use do not. This must be revisited (a custom accessor
+# override, or confirming LuxTts is never reachable) before any code path
+# invokes LuxTts. See docs/known-gaps.md.
+for bundle in "$BIN_DIR"/*.bundle; do
+    [ -d "$bundle" ] || continue
+    cp -R "$bundle" "$APP/Contents/Resources/"
+done
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

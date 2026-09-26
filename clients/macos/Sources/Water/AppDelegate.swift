@@ -7,21 +7,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessibilityItem: NSMenuItem!
     private let panel = AskPanelController()
     private let runner = TurnRunner()
-    private let voice = VoiceController(holdLabel: HotKeyConfig.voice.label)
+    /// Which engine (Apple Speech, or FluidAudio's Parakeet+Kokoro pair)
+    /// this run actually uses — decided once in `applicationDidFinishLaunching`
+    /// by `EngineSelector.resolveBlocking()` (`EngineSelection.choose`,
+    /// WaterClientCore, is the pure decision it's built on), before any of
+    /// the three properties below are constructed.
+    private var voice: VoiceController!
+    /// The real speech synthesizer, behind `SpeechOutput` (WaterClientCore)
+    /// so `speechQueue` doesn't need to know which engine it is —
+    /// `AppleSpeechOutput` or (FluidAudio selected) `KokoroSpeaker`.
+    private var speechOutput: SpeechOutput!
+    /// Feeds reply sentences to `speechOutput` in order, overlapping
+    /// synthesis with playback and handling barge-in — see
+    /// WaterClientCore/SpeechOutput.swift.
+    private var speechQueue: SentenceSpeechQueue!
     /// Which turn may speak: bumped by every new turn and by every barge-in,
     /// so a sentence event from a replaced or silenced turn is never queued.
     private var speakingTurn = 0
     private var meeting: MeetingController!
     private var meetingItem: NSMenuItem!
     private var hotkeys: HotKeyMonitor!
+    /// The workspace window (Slice V-ui): the daemon's web UI in a
+    /// WKWebView, reached only through the `water://` scheme handler.
+    private var workspace: WorkspaceWindowController!
     /// Live only while push-to-talk is listening (R-27): streams
     /// SFSpeechRecognizer's partial results to the daemon, and hands its
     /// turn id to the final `send(_:channel:turnID:)` call so the daemon can
     /// reuse whatever speculative work it already did.
     private var partialStreamer: PartialStreamer?
+    /// The in-flight voice turn's latency trace (V-8, docs/slices/V.md §4):
+    /// created at key-up, marked at each checkpoint as it happens, printed
+    /// and cleared on that turn's `done`/`error`. Nil outside a voice turn,
+    /// and for a toggle-started (rather than held) capture, which has no
+    /// key-up moment to start it from.
+    private var voiceTrace: VoiceTurnTrace?
+    /// Which `speakingTurn` `voiceTrace` belongs to, so a stray event from a
+    /// different turn (or from `channel != .voice`) never marks it.
+    private var voiceTraceTurn: Int?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         setUpStatusItem()
+        setUpEngine()
 
         panel.onSubmit = { [weak self] text in self?.send(text, channel: .textBar) }
         panel.onClose = { [weak self] in
@@ -34,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         setUpVoice()
         setUpMeeting()
+        setUpWorkspace()
         fetchVoiceProfile()
 
         hotkeys = HotKeyMonitor { [weak self] key in
@@ -41,12 +68,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch key {
             case HotKeyConfig.textBar: self.toggleTextBar()
             case HotKeyConfig.meeting: self.meeting.toggle()
-            default: self.voice.startHold() // key went down: start recording
+            case HotKeyConfig.workspace: self.workspace.toggle()
+            case HotKeyConfig.voice: self.voice.startHold() // key went down: start recording
+            default: break
             }
         }
         // Voice is push-to-talk by holding, so "stop" is the key going back
         // up, not a second press — a separate signal from the keyDown above.
-        hotkeys.onVoiceKeyUp = { [weak self] in self?.voice.endHold() }
+        hotkeys.onVoiceKeyUp = { [weak self] in
+            guard let self else { return }
+            // Key-up is this trace's start (V-8) — a fresh trace per hold,
+            // discarding any older one that never reached done/error (e.g.
+            // a second hold started before the first turn's daemon reply
+            // finished): diagnostic instrumentation, not correctness, so
+            // losing that stale trace's log line is an acceptable trade for
+            // never mixing two holds' checkpoints together.
+            self.voiceTrace = VoiceTurnTrace()
+            self.voiceTrace?.mark(.keyUp)
+            self.voice.endHold()
+        }
         hotkeys.onTrustChange = { [weak self] _ in self?.refreshAccessibilityItem() }
         hotkeys.start()
         refreshAccessibilityItem()
@@ -90,6 +130,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         meetingItem = NSMenuItem(title: "", action: #selector(meetingFromMenu), keyEquivalent: "")
         meetingItem.target = self
         menu.addItem(meetingItem)
+        let ws = NSMenuItem(title: "Open Workspace  (\(HotKeyConfig.workspace.label))", action: #selector(workspaceFromMenu), keyEquivalent: "")
+        ws.target = self
+        menu.addItem(ws)
         menu.addItem(.separator())
         accessibilityItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")
         accessibilityItem.target = self
@@ -115,6 +158,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func meetingFromMenu() { meeting.toggle() }
 
+    @objc private func workspaceFromMenu() { workspace.show() }
+
     // MARK: text bar
 
     private func toggleTextBar() {
@@ -126,12 +171,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// through here.
     private func interruptSpeech() {
         speakingTurn += 1
-        voice.stopSpeaking()
+        speechQueue.stop()
     }
 
     private func send(_ text: String, channel: Channel, turnID: String? = nil) {
         interruptSpeech() // runner.run cancels the old stream; this silences it
         let turn = speakingTurn
+        // V-8: this is the only voice turn `voiceTrace` (started at
+        // key-up) ever attaches to — a text-bar/CLI turn, or a
+        // toggle-started voice turn with no key-up trace, just leaves it
+        // untouched (nil, or still whichever turn it belongs to).
+        if channel == .voice, voiceTrace != nil {
+            voiceTrace?.mark(.requestSent)
+            voiceTraceTurn = turn
+        }
         panel.beginReply()
         panel.setStatus(channel == .voice ? "Thinking… (voice)" : "Thinking…")
         // During meeting capture every question is about the meeting: the
@@ -141,12 +194,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             switch e.kind {
             case .ack:
-                break
+                if channel == .voice, turn == self.voiceTraceTurn { self.voiceTrace?.mark(.ack) }
             case .delta:
                 self.clearStatus()
                 self.panel.appendReply(e.text ?? "")
             case .sentence:
-                if channel == .voice, turn == self.speakingTurn { self.voice.speak(e.text ?? "") }
+                if channel == .voice, turn == self.speakingTurn {
+                    if turn == self.voiceTraceTurn { self.voiceTrace?.mark(.firstSentence) }
+                    self.speechQueue.enqueue(e.text ?? "")
+                }
             case .approvalRequired:
                 self.panel.appendApproval(id: e.approvalID, action: e.approvalAction, risk: e.risk)
             case .handoff:
@@ -160,9 +216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .done:
                 // Terminal: nothing follows done or error on a turn stream.
                 self.clearStatus()
+                self.finishVoiceTrace(turn: turn, mark: .done)
             case .error:
                 self.clearStatus()
                 self.panel.appendError(e.error ?? "the daemon reported an error")
+                // No `.done` mark here: the log line just ends at whatever
+                // checkpoint this turn actually reached before it errored.
+                self.finishVoiceTrace(turn: turn, mark: nil)
             case .unknown:
                 break
             }
@@ -177,9 +237,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
     }
 
+    /// Ends this turn's voice trace, if it has one (V-8): marks `mark` (when
+    /// given), prints the one structured log line, and clears it so a later
+    /// stray event can't reopen it. A no-op for a turn `voiceTrace` was
+    /// never attached to (any non-voice channel, or a toggle-started voice
+    /// turn — see `voiceTrace`'s doc comment).
+    private func finishVoiceTrace(turn: Int, mark: VoiceTurnTrace.Checkpoint?) {
+        guard turn == voiceTraceTurn, voiceTrace != nil else { return }
+        if let mark { voiceTrace?.mark(mark) }
+        if let trace = voiceTrace { print(trace.logLine(turnID: "\(turn)")) }
+        voiceTrace = nil
+        voiceTraceTurn = nil
+    }
+
     // MARK: voice
 
+    /// Builds `voice`/`speechOutput`/`speechQueue` from whichever engine
+    /// `EngineSelector` resolves this run to — `.fluidAudio` (Apple Silicon,
+    /// models already downloaded or just accepted-and-downloaded) wires in
+    /// `ParakeetCapture`/`KokoroSpeaker`; `.appleSpeech` (Intel/Rosetta,
+    /// models not ready, or the user declined) keeps today's
+    /// `OnDeviceSpeechCapture`/`AppleSpeechOutput`. Runs before every other
+    /// piece of setup that touches these three properties.
+    private func setUpEngine() {
+        switch EngineSelector.resolveBlocking() {
+        case .fluidAudio:
+            speechOutput = KokoroSpeaker(manager: EngineSelector.kokoroManager)
+            voice = VoiceController(holdLabel: HotKeyConfig.voice.label, capture: ParakeetCapture())
+        case .appleSpeech:
+            speechOutput = AppleSpeechOutput()
+            voice = VoiceController(holdLabel: HotKeyConfig.voice.label)
+        }
+        speechQueue = SentenceSpeechQueue(output: speechOutput)
+        // V-8: "first audio" is hand-off to whichever engine setUpEngine
+        // just chose — see VoiceTrace.swift's doc comment on
+        // Checkpoint.firstAudio for why hand-off, not the engine's own
+        // internal playback-start signal.
+        speechQueue.onWillPlay = { [weak self] in self?.voiceTrace?.mark(.firstAudio) }
+    }
+
     private func setUpVoice() {
+        // A hold/toggle starting from idle silences any reply in progress
+        // right away — before the (asynchronous) permission check and mic
+        // start-up get anywhere. `onListening` below also calls
+        // `interruptSpeech()` once the mic actually opens; this is the
+        // earlier, synchronous cut.
+        voice.onNeedsSilence = { [weak self] in self?.interruptSpeech() }
         voice.onListening = { [weak self] in
             guard let self else { return }
             self.runner.cancel()
@@ -200,6 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         voice.onTranscript = { [weak self] text in
             guard let self else { return }
+            self.voiceTrace?.mark(.sttFinal)
             self.panel.setInput(text)
             let turnID = self.partialStreamer?.turnID
             self.partialStreamer = nil
@@ -227,7 +331,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tokens = runner.tokens
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let token = try? tokens.token(), let profile = try? client.fetchVoiceProfile(token: token) else { return }
-            DispatchQueue.main.async { self?.voice.applyVoiceProfile(profile) }
+            DispatchQueue.main.async {
+                // `applyVoiceProfile` isn't part of `SpeechOutput` (the
+                // protocol stays free of VoiceProfile, matching its
+                // testable-with-a-fake design — see SpeechOutput.swift):
+                // each real conformer applies the fetched profile its own
+                // way, so this switches on whichever one `setUpEngine`
+                // actually constructed.
+                switch self?.speechOutput {
+                case let apple as AppleSpeechOutput: apple.applyVoiceProfile(profile)
+                case let kokoro as KokoroSpeaker: kokoro.applyVoiceProfile(profile)
+                default: break
+                }
+            }
         }
     }
 
@@ -250,6 +366,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.panel.appendError(message)
         }
         refreshMeetingIndicator()
+    }
+
+    // MARK: workspace
+
+    private func setUpWorkspace() {
+        // Its own client: page requests (a streaming thread reply among
+        // them) must not share a CancelToken or timeout with the text bar.
+        let client = UnixSocketClient(socketPath: runner.client.socketPath)
+        workspace = WorkspaceWindowController(client: client, tokens: runner.tokens)
+        // The page's mic button: the same push-to-talk toggle as the menu's
+        // "Talk to Water". A click can't be held, so it toggles (click to
+        // start listening, click again to send) rather than hold-to-talk;
+        // the transcript goes out as an ordinary voice turn and its reply
+        // shows in the text bar and is spoken, exactly as from the hotkey.
+        workspace.onMic = { [weak self] in self?.voice.toggle() }
     }
 
     /// The listening indicator: while a session is live the menu-bar icon
@@ -299,7 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Turn on Water's global hotkeys"
         alert.informativeText = """
-        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice) and \(HotKeyConfig.meeting.label) (meeting capture), macOS needs you to allow it once:
+        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice), \(HotKeyConfig.meeting.label) (meeting capture) and \(HotKeyConfig.workspace.label) (workspace), macOS needs you to allow it once:
 
         1. Open System Settings > Privacy & Security > Accessibility.
         2. Turn on the switch next to "Water". If Water isn't listed, click +, choose Water.app, and turn it on.
