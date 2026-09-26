@@ -500,6 +500,21 @@ daemon predates both, and no agent reported touching `~/.water`.
 - Not verified live: needs a daemon rebuild and restart, plus
   `build.sh --install`.
 
+## The needs-you ticker spends the CEO's gate rate caps (found live, 2026-09-25)
+
+`needsyou.Service.Tick` runs `decisions.Trigger.Run` every tick. That
+rebuilds every candidate card and fetches its evidence through the gate at
+origin P1: a `gmail.list_messages` and a `gdrive.search_files` per card. At
+the original 120 s interval, with 3 candidate cards, that was about 90 calls
+an hour per function. It exhausted `gdrive.search_files` (60/h) and, together
+with background mail polling, `gmail.list_messages` (120/h), so the CEO's own
+questions were denied "rate cap reached". **Mitigated** by raising the
+default `notify.interval_seconds` to 900 (about 12 calls/h per function),
+pinned by `TestNotifyIntervalDefaultDoesNotStarveRateCaps`. **The proper fix
+is still owed:** the ticker should reuse recently built cards (a short TTL
+cache) instead of re-fetching every tick, and background work should never be
+able to spend the budget interactive (P0) questions need.
+
 ## An "isolated" `WATER_HOME` is not isolated from real accounts (found in V-verify, 2026-09-25)
 
 On macOS `runDaemon` always uses the login Keychain, and `gcal`/`gmail` are

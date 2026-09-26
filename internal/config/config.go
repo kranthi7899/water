@@ -339,7 +339,7 @@ func defaults() map[string]string {
 		"decider.provider":                      "none",
 		"notify.min_severity":                   "2",
 		"notify.approval_grace_seconds":         "30",
-		"notify.interval_seconds":               "120",
+		"notify.interval_seconds":               "900", // 15 min: each tick re-fetches card evidence through the gate; see TestNotifyIntervalDefaultDoesNotStarveRateCaps
 	}
 }
 

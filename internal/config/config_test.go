@@ -379,3 +379,19 @@ func TestRouterIntBoolCoercion(t *testing.T) {
 		t.Fatalf("coercion lost values: %+v", r.Flat())
 	}
 }
+
+// The needs-you ticker rebuilds every candidate decision card each tick, and
+// each rebuild fetches evidence through the gate (gmail/gdrive at P1). At
+// 120s that spent ~90 calls/h per function and exhausted the hourly rate caps
+// the CEO's own questions share, so the default must stay at 15 minutes until
+// the ticker reuses recently built cards.
+func TestNotifyIntervalDefaultDoesNotStarveRateCaps(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	r, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Notify.IntervalSeconds < 900 {
+		t.Fatalf("notify.interval_seconds default = %d, want >= 900", r.Notify.IntervalSeconds)
+	}
+}
