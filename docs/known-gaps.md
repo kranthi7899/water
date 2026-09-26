@@ -104,7 +104,7 @@ a second, Shadow()-only pass that runs only when the Candidates() pass
 found nothing, producing `"intent_inactive:<id>"` instead of `"no_match"`
 when exactly one Shadow() intent's templates match.
 
-## Slice R: `runTier0Match`/`TryTier1`'s handler-run previously mislabeled the answered intent
+## Slice R: `runTier0Match`/`TryTier1` (tier1.go, since removed)'s handler-run previously mislabeled the answered intent
 
 Found and fixed while building R-23 (not left as a gap): every reflex
 handler in `internal/nervous/reflex/handlers.go` hardcodes its own
@@ -116,7 +116,7 @@ silently misattributed the answer to the embedded intent instead — wrong
 `route_log.intent`/`intent_origin` (breaking the auto-demotion hook, which
 keys off intent id and origin) and wrong style-rendered response text (the
 embedded intent's phrasing instead of the learned one's). Fixed by having
-`runTier0Match` (`tier0.go`) and `TryTier1` (`tier1.go`) overwrite
+`runTier0Match` (`tier0.go`) and `TryTier1` (`tier1.go`, since removed) overwrite
 `result.Intent` with the registry's own matched intent id right after the
 handler returns, restoring the invariant `internal/nervous/actions.go`'s
 write-intent path already upheld correctly. Regression test:
@@ -141,6 +141,8 @@ handler should pin the fixture's event time to a fixed, mid-day instant
 fixtures do) rather than an offset from `time.Now()`.
 
 ## Slice R: FunctionGemma/Tier 1 fails its own eval gate — for real reasons now
+
+**Resolved by retirement — Tier 1 was removed, see docs/EVOLUTION_PLAN.md.**
 
 Measured live during Slice R's Phase 4 verification
 (`docs/slices/R-verification.md`), across two live-eval runs. The first run
@@ -244,26 +246,15 @@ investigated in this pass, worth a follow-up before ever setting
   as an alert yet — they'd need to be read off `route_log`/eval data by
   hand until a later slice wires a check.
 
-- **FunctionGemma / Tier 1 ships disabled by default and stays that way**
-  until a live eval passes its thresholds (FA ≤ 1%, Wilson 95% upper bound
-  ≤ 2%, n ≥ 200, warm p95 ≤ 400ms, matching model+registry hash — Design
-  §10). The eval mechanism itself (`water route eval --tier1`,
-  `internal/nervous/eval/live.go`) was built and unit-tested in R-18, but
-  was never run against the real `functiongemma-270m-it` model and
-  `llama-server` sidecar during this build — the implementation sandbox had
-  no network access to pull the ~280MB GGUF and no `llama-server` installed.
-  `TestTier1Live` verifiably skips cleanly without the env var or the model
-  file; it has not been exercised end to end. The GGUF pin (repo, revision,
-  sha256) is recorded in `docs/functiongemma.md` and `internal/nervous/
-  sidecar/model.go`, verified live against the Hugging Face API in R-17.
+- **FunctionGemma / Tier 1 — retired.** See `docs/functiongemma.md` and
+  `docs/EVOLUTION_PLAN.md`'s dated entry for this slice for the decision and
+  full rationale.
 
-- **`router.tier0.timeout_ms`, `router.tier1.timeout_ms` and
-  `router.quick_tools.enabled` are inert config.** All three round-trip
-  correctly through `water config set/get` and default correctly (R-25),
-  but have no live consumer: `nervous.Config` has no per-tier context-
-  deadline field (Tier 0 does no I/O to bound; Tier 1's request timeout is
-  the package constant `t1.requestTimeout`, not derived from any config
-  value), and `router.quick_tools.enabled`'s only real gate point,
+- **`router.tier0.timeout_ms` and `router.quick_tools.enabled` are inert
+  config.** Both round-trip correctly through `water config set/get` and
+  default correctly (R-25), but have no live consumer: `nervous.Config` has
+  no per-tier context-deadline field (Tier 0 does no I/O to bound), and
+  `router.quick_tools.enabled`'s only real gate point,
   `gateway.Daemon.TwinToolPolicy`'s `Quick` field, doesn't read it either —
   quick tools are always exposed unconditionally once
   `Nervous.QuickFunctions()` is non-empty. See the comment above
@@ -346,6 +337,180 @@ build has as its second commit; it was never made. Per this task's own
 instructions this is recorded here rather than silently checked off — see
 `docs/EVOLUTION_PLAN.md`'s Slice R log entry for the same note, and the
 owner should confirm R-12's work independently before ticking its box.
+
+## Slice V (V-1): FluidAudio's LuxTts resource bundle can't reach a signed Water.app
+
+Added while adding the FluidAudio dependency (`docs/slices/V.md`, §1).
+`clients/macos/Package.swift` now depends on FluidAudio 0.17.4, whose
+`FluidAudio` target ships a resource bundle (`FluidAudio_FluidAudio.bundle`,
+~1MB — a LuxTts G2P lexicon) built via SwiftPM's `.process(...)` resources.
+
+The resource-bundle accessor SwiftPM generated for this package
+(`resource_bundle_accessor.swift`, regenerated on every build under
+`.build/.../FluidAudio.build/`) looks the bundle up only via
+`Bundle.main.bundleURL.appendingPathComponent(...)`, then falls back to a
+hardcoded absolute `.build` path from whichever machine built it. For an
+app bundle, `Bundle.main.bundleURL` is the *top level* of `Water.app`
+(confirmed empirically), not `Contents/` or `Contents/Resources/` — but
+`codesign --verify --strict` (which `build.sh` requires to pass, and
+already did before this change) rejects any content placed at that top
+level, real file or symlink alike ("unsealed contents present in the
+bundle root" — tried both, both failed identically). There is no placement
+that satisfies both constraints at once.
+
+`build.sh` copies the bundle into `Contents/Resources` (the standard,
+codesign-safe location) rather than leaving it out or faking a fix, but
+this does not make FluidAudio's own lookup find it in a real, distributed
+`Water.app` — only on the machine that built it, via the fallback path.
+
+**Not a blocker for the planned voice work**: grep confirms only
+`Sources/FluidAudio/TTS/LuxTts/G2p/LuxTtsG2p.swift` touches `Bundle.module`;
+`KokoroAneManager` (Kokoro TTS) and the Parakeet ASR path this project
+actually plans to use do not reference it. Must be revisited (a custom
+resource accessor, or a confirmed guarantee that LuxTts is never reachable
+from Water's code) before any code path invokes LuxTts.
+
+## Slice V (V-4): Kokoro model-download progress is phase-only, not byte-level
+
+`KokoroSpeaker` (`clients/macos/Sources/Water/KokoroSpeaker.swift`) calls
+`KokoroAneManager.initialize(preloadVoices:)` to download (first use only)
+and load the 7 mlmodelcs + vocab + default voice pack. That method takes no
+progress-handler parameter — it calls `store.loadIfNeeded()` and
+`KokoroAneResourceDownloader` internally with no callback surfaced. Only
+the lower-level `ModelHub.loadModels`/`.download` and
+`KokoroAneResourceDownloader` functions take a `progressHandler`
+(`Shared/Download/DownloadTypes.swift`'s `ProgressHandler` typealias).
+
+Deliberately not reached around: hanging V-6's future download-progress UI
+off those lower-level calls instead of `initialize()` would tie this
+project to FluidAudio's internal APIs, which change often (5 releases in 3
+days during this slice's planning pass, one a public-API rename) — a
+maintenance liability for a UI nicety. V-6 (engine selection + the
+one-time download-consent dialog, not yet built) is expected to show only
+three discrete phase labels (downloading / compiling / ready) instead of a
+byte-level progress bar, for this same reason.
+
+**Revisit if FluidAudio ever adds a public progress-handler parameter to
+`KokoroAneManager.initialize`** — at that point the phase-only UI can
+become a real byte-level one with no internals dependency.
+
+## Slice V (V-6): No settings UI to opt back into FluidAudio after declining
+
+`EngineSelector` (`clients/macos/Sources/Water/EngineSelector.swift`) asks
+once, ever, per install: declining the one-time consent dialog sets a
+permanent `UserDefaults` flag (`fluidAudioDeclined`) and Water falls back
+to Apple Speech for good — no re-prompt, matching the project's existing
+"explain once" ethos (`AppDelegate.explainAccessibilityOnce`, which has the
+same one-way limitation for the Accessibility permission notice). There is
+no settings UI in this slice that would let someone who declined turn
+FluidAudio back on later, short of clearing the flag by hand (`defaults
+delete <bundle id> fluidAudioDeclined`) or reinstalling.
+
+**Revisit when Water gets a settings window** — expose a toggle there that
+clears `fluidAudioDeclined`, and, for symmetry, a "forget downloaded
+models" action clearing `fluidAudioModelsReady` alongside whatever FluidAudio
+itself offers for removing cached model files.
+
+## Slice V (V-6): `isBnnsCrashProneOS` cannot be consulted from engine selection
+
+`KokoroAneManager.isBnnsCrashProneOS`/`osAdvisory` (FluidAudio 0.17.4) are
+plain `static func`s with no `public` modifier, so they are inaccessible
+from `Water`/`WaterClientCore` — Swift's `internal` access level is
+module-scoped, and the compiler rejects a call from either module.
+`EngineSelector.choose`/`resolve` therefore has no way to defensively avoid
+FluidAudio on an OS build known to be BNNS-crash-prone (macOS 26.4–26.5,
+iOS 26.4+); `KokoroAneManager.initialize()` already detects this internally
+and logs its own warning on an affected build, so nothing is silently
+missed, but engine selection cannot act on it (e.g. falling back to Apple
+Speech automatically on a flagged OS version). This dev machine (15.6.1) is
+unaffected, so the gap has not been exercised. A one-line note recording
+this is left on `EngineSelector.isAppleSilicon`'s doc comment.
+
+**Revisit if a future FluidAudio release makes either function `public`** —
+at that point `EngineSelector` can add a real OS-version check to its
+selection logic instead of only leaving a comment.
+
+## Slice V (V-voice): dependency-spike gap (V-1) still applies unchanged
+
+The V-1 resource-bundle gap recorded above (FluidAudio's `LuxTts` G2P bundle
+can't reach a signed `Water.app`) was re-checked after V-3 through V-8: the
+voice pipeline built in this sub-slice (`AppleSpeechOutput`, `KokoroSpeaker`,
+`ParakeetCapture`) only ever touches `KokoroAneManager` (Kokoro TTS) and
+`SlidingWindowAsrManager` (Parakeet ASR) — grep still confirms only
+`LuxTtsG2p.swift` references `Bundle.module`, and nothing built in V-voice
+calls into `LuxTts`. The entry above is unchanged and still accurate; not
+duplicated here.
+
+## Slice F: never-store residual gaps (provisional detector)
+
+The validator checks each field on its own, so content split across two
+fields (half a card in the statement, half in a reason) passes. Encoded
+content (base64/hex of a card or email body) is caught only if it trips the
+entropy rule. Lower-case named transcripts (`dana: … / sam: …`) pass. A
+number glued to an a–f-only prefix (`cc4111…`) passes. Refs can still carry
+up to 256 bytes of space-free text. Ungluing letters from digits raised false
+positives: a short letter-prefixed id with a 9-digit run (`PO123456789`)
+flags as an SSN. All thresholds are provisional until checked against real
+records.
+
+## Slice F: the real `~/.water/water.db` is missing one trigger
+
+The live database already had migration 14 applied before the review added
+`memory_records_no_replace` to `0014_memory_records.sql`. The runner tracks
+version numbers only, so the edit never reaches that database. Its
+`memory_records` table has 0 rows. **Resolved 2026-09-25:** with the owner's
+approval, the trigger's `CREATE TRIGGER` statement was run by hand against
+the live database. All three triggers are now present. Still unexplained: which
+newer binary applied migrations 13/14 to the real database. The running
+daemon predates both, and no agent reported touching `~/.water`.
+
+## Slice V-ui: open gaps
+
+- Any thread turn that replays a twin reply taints the session (review fix).
+  After that, S-level writes need an envelope for the rest of the session.
+  A per-message taint column would be precise, but it needs a migration.
+- Approval-anchored threads are always untrusted, because nothing on an
+  envelope records whether its payload came from external content.
+- A card can be staged again after its envelope executed, which queues a
+  second envelope. It still needs its own yes, but it could mean a duplicate
+  send. `already_staged` returns the existing envelope even when a different
+  function was requested. After an approval edit, the card's `CardState`
+  still points at the voided envelope.
+- There is no way to un-dismiss a card.
+- The UI can't tell a card is already staged until it stages it again, and it
+  has no approval-edit UI (the endpoint exists but isn't allowlisted).
+  `GET /v1/voice/profile` isn't allowlisted either.
+- The page's `{type:"mic"}` message isn't tied to a user gesture or window
+  focus, and approving from the page has no native confirmation. Both rely
+  entirely on XSS-free rendering.
+- The page can cancel any task through `/v1/tasks/{id}/cancel`, including
+  other clients' turns.
+- Thread posts accept any channel, including `voice`. The UI only sends
+  `text-bar`.
+- Nothing checks the Swift allowlist against `api.js` automatically. A new
+  UI route means updating `api.js`, the Go test and
+  `WorkspaceAllowlist.routes` by hand.
+- The mic toggles rather than holds, and its reply goes to the text bar, not
+  the open thread.
+- Recap has no project guess, because no classifier is wired into the
+  daemon. The running/failed recap state is in memory only.
+- A message-anchored thread has no entry point in the UI yet.
+- No 401 fallback to the CLI token in the scheme handler (only matters with
+  an old daemon).
+- Not verified live: needs a daemon rebuild and restart, plus
+  `build.sh --install`.
+
+## Found in the V-ui live check (2026-09-25)
+
+- `water daemon` prints the CLI token in plain text to stdout at startup
+  (`cli-token=…`). A daemon started with its output redirected to a file
+  leaves the token in that file with default permissions. This contradicts
+  A1's "tokens never appear in logs" invariant. It predates this session.
+  The two local log files were `chmod 600`'d as a stopgap. Fix: print a
+  fingerprint or the token's source, not the token.
+- The Tier-0 calendar template repeats the day on an empty calendar
+  ("Today, Fri 25 Sep:\nNothing on your calendar Today, Fri 25 Sep.").
+  Cosmetic.
 
 ## Carried over from A-series slices (still true)
 
