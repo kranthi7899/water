@@ -28,7 +28,7 @@ import WaterClientCore
 /// return to idle — never a crash, never a silent retry loop. Falling back
 /// to Apple Speech *permanently* for the install on such a failure is V-6's
 /// job, not this conformer's.
-final class ParakeetCapture: SpeechCapture {
+final class ParakeetCapture: SpeechCapture, LevelReportingCapture {
     /// Single-flight guard around `manager.loadModels()`. `SlidingWindowAsrManager`
     /// is itself an actor, so two concurrent callers would simply serialize
     /// rather than race, but without this, a second `start()` issued before
@@ -45,7 +45,10 @@ final class ParakeetCapture: SpeechCapture {
                 try await task.value
                 return
             }
-            let started = Task { try await manager.loadModels() }
+            // Water's own models folder (V-hud's §1 leftovers). The files
+            // are already there: EngineSelector only picks FluidAudio once
+            // they are, and its download flow calls `load()` first.
+            let started = Task { try await manager.loadModels(to: SpeechModels.parakeetDirectory) }
             task = started
             do {
                 try await started.value
@@ -68,12 +71,29 @@ final class ParakeetCapture: SpeechCapture {
     /// stale — never a later capture's result.
     private var onResult: ((SpeechResult) -> Void)?
 
+    var onLevel: ((Float) -> Void)? {
+        get { mic.onLevel } set { mic.onLevel = newValue }
+    }
+
     init(manager: SlidingWindowAsrManager = SlidingWindowAsrManager()) {
         self.manager = manager
         // A hold is short: if the input device changes mid-hold, end it with
         // a clear error rather than splice two audio formats into one
         // session — matches `OnDeviceSpeechCapture`.
         mic.onInterrupted = { [weak self] message in self?.onResult?(.error(message)) }
+    }
+
+    /// Loads the models now (at most once; see `InitGate`). The download
+    /// flow awaits it inside its progress window.
+    func load() async throws {
+        try await initGate.ensureLoaded(manager)
+    }
+
+    /// `load()` in the background, so the first hold after launch doesn't
+    /// wait for it. A failure is ignored here; `start()` retries and
+    /// reports it.
+    func prewarm() {
+        Task { try? await self.load() }
     }
 
     func start(onResult: @escaping (SpeechResult) -> Void) throws {

@@ -90,9 +90,9 @@ func (*GitHub) Credential() (string, string) { return "", "" }
 
 func (*GitHub) Functions() []connectors.Function {
 	return []connectors.Function{
-		{Name: "list_prs", Description: "List pull requests on the demo repo.", Level: twins.R, Risk: connectors.RiskLow, External: true,
+		{Name: "list_prs", Description: "List pull requests on the demo repo.", Activity: "Checking pull requests on GitHub", Level: twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{"state": str("filter: open, closed or merged")}}},
-		{Name: "list_issues", Description: "List issues on the demo repo.", Level: twins.R, Risk: connectors.RiskLow, External: true,
+		{Name: "list_issues", Description: "List issues on the demo repo.", Activity: "Checking issues on GitHub", Level: twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{"state": str("filter: open or closed"), "assignee": str("filter by assignee login")}}},
 	}
 }

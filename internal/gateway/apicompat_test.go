@@ -374,3 +374,97 @@ func TestApprovalsWireShape(t *testing.T) {
 		t.Fatalf("decision envelope = %v", res["envelope"])
 	}
 }
+
+// TestMainPathToolCallStreamsOneStepPair (V-events acceptance): a
+// main-path turn whose model calls one tool streams exactly one
+// tool_start/tool_end pair, in order, before done; the call's status is
+// the tool result's own.
+func TestMainPathToolCallStreamsOneStepPair(t *testing.T) {
+	h := newHarness(t)
+	h.fake.Reply = func(req backend.Request) string {
+		body, _ := json.Marshal(map[string]any{"function": "fake_mail.list_messages", "args": map[string]any{}})
+		r, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/v1/tools/invoke", bytes.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+req.Tools.TwinToken)
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Error(err)
+			return "failed"
+		}
+		resp.Body.Close()
+		return "You have one message from Dana."
+	}
+	events := readEvents(t, h.post(t, "/v1/turns", `{"channel":"text-bar","prompt":"anything from dana?"}`, h.token))
+	var order []runtime.EventKind
+	for _, e := range events {
+		switch e.Kind {
+		case runtime.EventToolStart, runtime.EventToolEnd, runtime.EventDone:
+			order = append(order, e.Kind)
+		}
+	}
+	want := []runtime.EventKind{runtime.EventToolStart, runtime.EventToolEnd, runtime.EventDone}
+	if len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] {
+		t.Fatalf("event order = %v, want %v (all events %+v)", order, want, events)
+	}
+	checkPair(t, events, "fake_mail.list_messages", "Searching your email", runtime.StepOK)
+}
+
+// TestTier0TurnStreamsNoSteps (V-events acceptance): a Tier-0 answer calls
+// no tool and no model, so its stream has no tool_start/tool_end.
+func TestTier0TurnStreamsNoSteps(t *testing.T) {
+	h := newRoutingHarness(t)
+	events := readEvents(t, h.post(t, "/v1/turns", `{"channel":"voice","prompt":"status"}`, h.token))
+	if h.fake.Calls() != 0 {
+		t.Fatalf("provider calls = %d, want a Tier-0 answer", h.fake.Calls())
+	}
+	if steps := stepEvents(events); len(steps) != 0 {
+		t.Fatalf("Tier-0 turn streamed steps: %+v", steps)
+	}
+}
+
+// TestTurnSendsStyleBlockAndChannelHint (D5 acceptance): the system prompt
+// a main-path turn sends carries style.yaml's prompt block, and the turn's
+// own message carries its channel hint with that channel's max_chars.
+func TestTurnSendsStyleBlockAndChannelHint(t *testing.T) {
+	h := newHarness(t)
+	h.d.cfg.StyleBlock = "Lead with the answer. No filler."
+	h.d.cfg.MaxChars = map[runtime.Channel]int{runtime.ChannelVoice: 280, runtime.ChannelTextBar: 600, runtime.ChannelCLI: 2000}
+	h.fake.Reply = func(backend.Request) string { return "Fine." }
+	readEvents(t, h.post(t, "/v1/turns", `{"channel":"voice","prompt":"how is my day"}`, h.token))
+	reqs := h.fake.Requests()
+	if len(reqs) != 1 {
+		t.Fatalf("requests = %d, want 1", len(reqs))
+	}
+	if !strings.Contains(reqs[0].System, h.d.cfg.StyleBlock) || reqs[0].System != h.d.SystemPrompt() {
+		t.Fatalf("system prompt = %q, want SystemPrompt() with the style block", reqs[0].System)
+	}
+	if !strings.Contains(reqs[0].Prompt, "## Channel: voice (reply in at most about 280 characters") {
+		t.Fatalf("turn prompt lacks the voice hint:\n%s", reqs[0].Prompt)
+	}
+}
+
+// TestOldClientsStillParseNewEvents: the new kinds and fields decode into
+// the pre-V-events event shape (a client that knows only kind/text/
+// approval_id) without error. (The Go CLI's switches and the web UI's
+// already fall through on an unknown kind.)
+func TestOldClientsStillParseNewEvents(t *testing.T) {
+	type oldEvent struct {
+		Kind       string `json:"kind"`
+		Text       string `json:"text,omitempty"`
+		ApprovalID string `json:"approval_id,omitempty"`
+		Error      string `json:"error,omitempty"`
+	}
+	for _, e := range []runtime.Event{
+		{Kind: runtime.EventToolStart, StepID: "stp_1", Tool: "gcal.list_events", Label: "Checking your calendar"},
+		{Kind: runtime.EventToolEnd, StepID: "stp_1", Tool: "gcal.list_events", Label: "Checking your calendar", Status: runtime.StepQueued},
+		runtime.ApprovalRequiredEvent(approvals.Envelope{ID: "env_1", Action: "gcal.create_event", Risk: "medium", PayloadHash: "h"}),
+	} {
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var old oldEvent
+		if err := json.Unmarshal(b, &old); err != nil || old.Kind != string(e.Kind) {
+			t.Fatalf("old client decode of %s = %+v, %v", b, old, err)
+		}
+	}
+}

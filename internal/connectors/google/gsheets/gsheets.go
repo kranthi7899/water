@@ -77,12 +77,14 @@ func (*Sheets) Functions() []connectors.Function {
 		{
 			Name:        "cash_position",
 			Description: "Current cash, monthly burn and runway, from the Cash & runway tab.",
+			Activity:    "Checking cash and runway",
 			Level:       twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{},
 		},
 		{
 			Name:        "budget_status",
 			Description: "Budget vs. actual for one application/product, from the Budget tab.",
+			Activity:    "Reading the budget sheet",
 			Level:       twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{
 				Properties: map[string]connectors.Property{"application": {Type: "string", Description: "application/product name, e.g. \"crawler\""}},
@@ -92,6 +94,7 @@ func (*Sheets) Functions() []connectors.Function {
 		{
 			Name:        "spend_breakdown",
 			Description: "R&D/admin/marketing spend, revenue and profit for one application/product, from the Spend by Application tab.",
+			Activity:    "Reading the spend breakdown",
 			Level:       twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{
 				Properties: map[string]connectors.Property{"application": {Type: "string", Description: "application/product name, e.g. \"crawler\""}},
@@ -101,18 +104,21 @@ func (*Sheets) Functions() []connectors.Function {
 		{
 			Name:        "outstanding_invoices",
 			Description: "Open invoices, from the Invoices tab.",
+			Activity:    "Checking open invoices",
 			Level:       twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{},
 		},
 		{
 			Name:        "revenue_by_application",
 			Description: "Monthly revenue per application/product, from the Revenue tab's \"by application\" block.",
+			Activity:    "Reading revenue by product",
 			Level:       twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{},
 		},
 		{
 			Name:        "funding_history",
 			Description: "Funding rounds, investors and amounts, from the Funding & Cap Table tab.",
+			Activity:    "Reading the funding history",
 			Level:       twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{},
 		},

@@ -152,6 +152,7 @@ func (*Linear) Functions() []connectors.Function {
 		{
 			Name:        "list_issues",
 			Description: "List Linear tickets, optionally filtered.",
+			Activity:    "Checking tickets in Linear",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			// A ticket's title, assignee and project come from the team, not

@@ -50,6 +50,46 @@ func (s *Store) GetCardState(ctx context.Context, cardID string) (CardState, err
 	return cs, nil
 }
 
+// RepointCardState moves every staged card that points at approval
+// fromApprovalID to toApprovalID, and reports how many it moved. An approval
+// edit (approvals.Queue.Edit) voids the old envelope and proposes a new one;
+// without this the card would keep pointing at the voided envelope and look
+// unstaged, inviting a second staging. Dismissed cards are left alone (their
+// approval_id is history), and an id no card points at moves nothing.
+func (s *Store) RepointCardState(ctx context.Context, fromApprovalID, toApprovalID string) (int64, error) {
+	if fromApprovalID == "" || toApprovalID == "" {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE card_states SET approval_id = ? WHERE status = 'staged' AND approval_id = ?`,
+		toApprovalID, fromApprovalID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// StagedCardStates returns every card in status "staged", keyed by card id,
+// so GET /v1/decisions can say which open cards already wait on an
+// envelope without a per-card lookup.
+func (s *Store) StagedCardStates(ctx context.Context) (map[string]CardState, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT card_id, status, reason, approval_id, decided_at FROM card_states WHERE status = 'staged'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]CardState{}
+	for rows.Next() {
+		var cs CardState
+		var decided int64
+		if err := rows.Scan(&cs.CardID, &cs.Status, &cs.Reason, &cs.ApprovalID, &decided); err != nil {
+			return nil, err
+		}
+		cs.DecidedAt = time.Unix(0, decided).UTC()
+		out[cs.CardID] = cs
+	}
+	return out, rows.Err()
+}
+
 // DismissedCardIDs returns every card id currently in status "dismissed",
 // for the needsyou/decisions-list filtering (Slice V-3) to check directly
 // without a per-card lookup.

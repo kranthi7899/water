@@ -122,3 +122,14 @@ longer human-readable or diffable as plain files. `internal/memory` never
 edits or deletes a record. A correction invalidates the old record and
 links the new one to it, and invalidated records are kept for now (no
 compaction or archive).
+
+## Amendment (2026-09-25, Slice V revised brief)
+
+Context is fetched on demand through tool calls, not accumulated ahead of time.
+
+There is no standing context-accumulation layer, no per-tool change feed,
+and no "what's new" injected before each decision. The agent gets context
+by calling the right tool at the right moment, which is what Slice R's
+reflex and quick-tools cascade and the connector registry already provide.
+This is separate from principle 4's background plane, which precomputes
+state (brief, open decisions, packets) and stays.

@@ -500,6 +500,61 @@ daemon predates both, and no agent reported touching `~/.water`.
 - Not verified live: needs a daemon rebuild and restart, plus
   `build.sh --install`.
 
+## An "isolated" `WATER_HOME` is not isolated from real accounts (found in V-verify, 2026-09-25)
+
+On macOS `runDaemon` always uses the login Keychain, and `gcal`/`gmail` are
+always the real connectors, even with `--demo`. So a test daemon in a temp
+`WATER_HOME` still holds the owner's real Google credential, and approving a
+write there would send real invites or mail. V-verify worked around this
+with a harness daemon that uses an empty in-memory vault and recording fakes.
+Fix before any future live write test: add a supported override (for
+example a test-vault or fake-Google flag) that is never the default, or
+reuse the harness pattern. Until then, never approve a write envelope on
+any daemon started from this binary unless a real send is intended.
+
+## Slice V revised brief: open gaps (2026-09-25)
+
+- **On-device checks still owed by the owner** (checklist in
+  `docs/slices/V-verification-revised.md`):
+  - the HUD popping on screen for a tool turn and not for a Tier-0 answer;
+  - the blob following the mic, pulsing while thinking, and moving with
+    Kokoro;
+  - the non-activating HUD's first-click behaviour (could a click aimed at
+    another app land on Approve?);
+  - the native banner, tap, and second-tap reuse;
+  - the held page mic landing in the open thread;
+  - Kokoro first-audio latency.
+- **One-time model re-download.** Models now live under
+  `~/Library/Application Support/Water/Models/`. Kokoro currently sits in
+  `~/.cache/fluidaudio/Models/`, so the next launch asks to download again
+  (about 1.5 GB). The old copy isn't deleted.
+- **The voice bench measures the spoken "One moment." filler** as first
+  sentence and first audio on escalated turns. The real time to the first
+  answer sentence is about 1.0–3.1 s (from `route_log`).
+- **§7.5's "identical `tools_used`" holds only for Tier 0.** Main-path tool
+  choice varies from run to run, even on the same channel.
+- **`ModelHub.offlineMode` is not set.** A non-default `kokoro_voice` pack
+  could download lazily.
+- **`reflex.quickDescription` keys on the wrong ids** (pre-existing), so
+  every quick tool's model-facing description is the generic default.
+  Fixing it restarts the warm session once.
+- **No person links are written for the real roster** until `people.yaml`
+  has email identities. Links are also a snapshot taken when a thread is
+  anchored, and organizers aren't linked.
+- **Page mic while voice is busy.** Native ignores the press, but the page
+  can still show "Listening…" and never refresh.
+- **A stale HUD card can keep its spinner** if a decision returns pending and
+  the re-read fails. A step whose `tool_end` never arrives keeps its spinner
+  until dismissed.
+- **Leftover notification probe entries.** "Water Notify Probe" and "Water
+  Probe Two", created by V-notify's permission probe, remain in System
+  Settings > Notifications. Harmless.
+- **Smaller items:**
+  - A thread the mic creates is titled "Voice conversation".
+  - Edits are field-based.
+  - The "sent" label wasn't seen live.
+  - Execution errors after an approval show in the text bar, not on the HUD.
+
 ## Found in the V-ui live check (2026-09-25)
 
 - `water daemon` prints the CLI token in plain text to stdout at startup

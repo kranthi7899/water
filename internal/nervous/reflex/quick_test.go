@@ -222,3 +222,20 @@ func TestQuickParallel(t *testing.T) {
 	close(stop)
 	writerWG.Wait()
 }
+
+// TestQuickActivityLabels (V-events): every exposed quick tool has a
+// hand-written step label (none falls back to the generic one), and an id
+// the service does not expose gets none.
+func TestQuickActivityLabels(t *testing.T) {
+	deps, _ := testDeps(t)
+	q := newTestQuickService(deps)
+	for _, f := range q.Functions() {
+		label, ok := q.Activity(f.ID)
+		if !ok || label == "" || label == "Looking something up" {
+			t.Errorf("%s: Activity = %q, %v; want a hand-written label", f.ID, label, ok)
+		}
+	}
+	if label, ok := q.Activity("quick.does_not_exist"); ok || label != "" {
+		t.Errorf("unknown id: Activity = %q, %v; want none", label, ok)
+	}
+}

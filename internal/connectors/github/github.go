@@ -146,6 +146,7 @@ func (*GitHub) Functions() []connectors.Function {
 		{
 			Name:        "list_prs",
 			Description: "List pull requests on the configured repo (github.repo).",
+			Activity:    "Checking pull requests on GitHub",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			// A PR's title, author and review state come from GitHub
@@ -160,6 +161,7 @@ func (*GitHub) Functions() []connectors.Function {
 		{
 			Name:        "list_issues",
 			Description: "List issues on the configured repo (github.repo).",
+			Activity:    "Checking issues on GitHub",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			External:    true,

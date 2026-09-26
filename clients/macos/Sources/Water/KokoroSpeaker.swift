@@ -20,7 +20,7 @@ import WaterClientCore
 /// hands back `nil`, which `SentenceSpeechQueue` already treats as "skip
 /// this sentence" — never a crash, never a silent retry loop — so this
 /// conformer is safe to use standalone even before V-6 exists.
-final class KokoroSpeaker: NSObject, SpeechOutput {
+final class KokoroSpeaker: NSObject, SpeechOutput, SpeechLevelSource {
     /// Actor-isolated so two sentences preparing at once (`SentenceSpeechQueue`
     /// keeps one sentence of lookahead synthesizing while the current one
     /// plays, i.e. two concurrent `prepare` calls) can't race on "is a load
@@ -78,7 +78,12 @@ final class KokoroSpeaker: NSObject, SpeechOutput {
     private var player: AVAudioPlayer?
     private var pendingDone: (() -> Void)?
 
-    init(voice: String? = nil, manager: KokoroAneManager = KokoroAneManager()) {
+    /// Main thread, ~30Hz while a sentence plays: its loudness, 0...1, from
+    /// `AVAudioPlayer`'s own meter (`averagePower`, V-hud's blob).
+    var onLevel: ((Float) -> Void)?
+    private var meterTimer: Timer?
+
+    init(voice: String? = nil, manager: KokoroAneManager = SpeechModels.makeKokoroManager()) {
         self.voice = voice
         self.manager = manager
     }
@@ -122,6 +127,7 @@ final class KokoroSpeaker: NSObject, SpeechOutput {
         do {
             let newPlayer = try AVAudioPlayer(data: data)
             newPlayer.delegate = self
+            newPlayer.isMeteringEnabled = onLevel != nil
             pendingDone = done
             player = newPlayer
             guard newPlayer.play() else {
@@ -130,6 +136,7 @@ final class KokoroSpeaker: NSObject, SpeechOutput {
                 done()
                 return
             }
+            startMetering()
         } catch {
             // Decode failure on Kokoro's own WAV output — shouldn't happen,
             // but never crash: drop this sentence and let the queue move
@@ -143,9 +150,29 @@ final class KokoroSpeaker: NSObject, SpeechOutput {
     /// Stops whatever is playing right now. Safe to call with nothing in
     /// flight (matches the protocol's contract).
     func stopCurrent() {
+        stopMetering()
         player?.stop()
         player = nil
         pendingDone = nil
+    }
+
+    /// A display-rate timer reading the playing sentence's meter. Runs only
+    /// while a player exists; stopped on finish, error and `stopCurrent`.
+    private func startMetering() {
+        stopMetering()
+        guard onLevel != nil else { return }
+        let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            guard let self, let player = self.player, player.isPlaying else { return }
+            player.updateMeters()
+            self.onLevel?(AudioLevel.level(decibels: player.averagePower(forChannel: 0)))
+        }
+        RunLoop.main.add(t, forMode: .common)
+        meterTimer = t
+    }
+
+    private func stopMetering() {
+        meterTimer?.invalidate()
+        meterTimer = nil
     }
 
     /// Applies `GET /v1/voice/profile` (R-27, fetched once at launch —
@@ -165,6 +192,7 @@ final class KokoroSpeaker: NSObject, SpeechOutput {
 
 extension KokoroSpeaker: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        stopMetering()
         let done = pendingDone
         pendingDone = nil
         self.player = nil
@@ -172,9 +200,18 @@ extension KokoroSpeaker: AVAudioPlayerDelegate {
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        stopMetering()
         let done = pendingDone
         pendingDone = nil
         self.player = nil
         done?()
     }
+}
+
+/// A speech engine whose output level can drive the Activity HUD's blob
+/// (V-hud). Kept out of `SpeechOutput` (WaterClientCore), which stays
+/// about ordering and barge-in only.
+protocol SpeechLevelSource: AnyObject {
+    /// Main thread; 0...1.
+    var onLevel: ((Float) -> Void)? { get set }
 }

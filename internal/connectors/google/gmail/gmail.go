@@ -84,6 +84,7 @@ func (*Gmail) Functions() []connectors.Function {
 		{
 			Name:        "list_messages",
 			Description: "List Gmail messages matching a search query, newest first.",
+			Activity:    "Searching your email",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			External:    true,
@@ -98,6 +99,7 @@ func (*Gmail) Functions() []connectors.Function {
 		{
 			Name:        "get_message",
 			Description: "Get one Gmail message's full body.",
+			Activity:    "Reading an email",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			External:    true,
@@ -109,6 +111,7 @@ func (*Gmail) Functions() []connectors.Function {
 		{
 			Name:        "draft_message",
 			Description: "Create a Gmail draft from the agent alias. Nothing is sent.",
+			Activity:    "Drafting an email",
 			Level:       twins.D,
 			Risk:        connectors.RiskLow,
 			External:    false,
@@ -117,6 +120,7 @@ func (*Gmail) Functions() []connectors.Function {
 		{
 			Name:        "send_message",
 			Description: "Send a Gmail message from the agent alias. This has an external effect and cannot be undone.",
+			Activity:    "Preparing an email to send",
 			Level:       twins.A,
 			Risk:        connectors.RiskHigh,
 			External:    false,
@@ -125,6 +129,7 @@ func (*Gmail) Functions() []connectors.Function {
 		{
 			Name:        "draft_for_review",
 			Description: "Create a Gmail draft in the CEO's own account, from the CEO's own address, for the CEO to review and send personally. Never uses the agent alias. Nothing is sent.",
+			Activity:    "Drafting an email for you to review",
 			Level:       twins.D,
 			Risk:        connectors.RiskLow,
 			External:    false,

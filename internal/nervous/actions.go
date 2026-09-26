@@ -268,7 +268,9 @@ func (n *Nervous) answerVoiceApprove(ctx context.Context, id string, t Turn, res
 		// approval_required so a client shows its tap affordance, and leave
 		// the binding exactly as it was (nothing about the envelope's own
 		// risk tier will change before it is decided some other way).
-		emitQuick(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: envel.ID})
+		// envel was just re-read from the queue, so the event is complete
+		// (read-back and hash included) with no second lookup.
+		emitQuick(runtime.ApprovalRequiredEvent(envel))
 		deliver("tap_required", n.voiceErrorPhrase("tap_required"))
 		return
 	}

@@ -121,6 +121,7 @@ func (*Calendar) Functions() []connectors.Function {
 		{
 			Name:        "list_events",
 			Description: "List calendar events in a time range.",
+			Activity:    "Checking your calendar",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			// Titles, locations, descriptions and attendees come from
@@ -142,6 +143,7 @@ func (*Calendar) Functions() []connectors.Function {
 		{
 			Name:        "create_event",
 			Description: "Create a calendar event and invite attendees.",
+			Activity:    "Preparing a calendar invite",
 			Level:       twins.A,
 			Risk:        connectors.RiskMedium,
 			// The twin originates this event's content on the CEO's behalf;
@@ -161,6 +163,7 @@ func (*Calendar) Functions() []connectors.Function {
 		{
 			Name:        "move_event",
 			Description: "Change an existing event's start and end time.",
+			Activity:    "Preparing to move a meeting",
 			Level:       twins.A,
 			Risk:        connectors.RiskMedium,
 			External:    false,

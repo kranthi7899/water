@@ -563,6 +563,36 @@ func TestStageDecisionQueuesAPendingEnvelopeAndNeverExecutes(t *testing.T) {
 	}
 }
 
+// Once a staged envelope is approved (execution in flight) or executed,
+// staging the card again must not queue a second envelope: that would be a
+// duplicate send waiting for one more yes. Denied/expired may be re-staged.
+func TestStageDecisionRefusesWhileApprovedOrAfterExecuted(t *testing.T) {
+	srv, tok, q, _ := newStageTestDaemon(t, decisionType("[gmail.send_message]"), "inbound")
+	id := getDecisions(t, srv, tok)[0].ID
+	path := "/v1/decisions/" + id + "/stage"
+	payload := `{"payload":{"to":["dana@example.com"],"subject":"Re: Speaking invite","body":"Yes, happy to."}}`
+
+	var staged decisionStageResponse
+	decodeInto(t, do(t, srv.URL, "POST", path, payload, tok), http.StatusOK, &staged)
+	ctx := context.Background()
+	env, err := q.Decide(ctx, staged.ApprovalID, approvals.Yes)
+	if err != nil || env.Status != approvals.Approved {
+		t.Fatalf("decide = %+v, %v", env, err)
+	}
+	if got := statusOf(do(t, srv.URL, "POST", path, payload, tok)); got != http.StatusConflict {
+		t.Fatalf("restage while approved: status %d, want 409", got)
+	}
+	if _, err := q.Claim(ctx, env.ID, env.Action, env.PayloadHash); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if got := statusOf(do(t, srv.URL, "POST", path, payload, tok)); got != http.StatusConflict {
+		t.Fatalf("restage after executed: status %d, want 409", got)
+	}
+	if pending, _ := q.Pending(ctx); len(pending) != 0 {
+		t.Fatalf("pending = %d, want 0 (no second envelope queued)", len(pending))
+	}
+}
+
 func TestStageDecisionWithoutAStageableActionIs422(t *testing.T) {
 	cases := map[string]struct {
 		types  fstest.MapFS

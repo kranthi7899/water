@@ -199,6 +199,32 @@ func quickDescription(id string) string {
 	}
 }
 
+// Activity is the fixed, CEO-facing line a client shows while quick tool id
+// runs (a tool_start/tool_end step, docs/slices/V.md §7.4 V-events), and
+// whether id is one this service exposes. It never includes the call's
+// arguments. An exposed tool with no hand-written line gets a generic one.
+func (q *QuickService) Activity(id string) (string, bool) {
+	if _, ok := q.table[id]; !ok {
+		return "", false
+	}
+	switch id {
+	case "quick.calendar":
+		return "Checking your calendar", true
+	case "quick.next_event":
+		return "Checking your next meeting", true
+	case "quick.latest_mail":
+		return "Checking your latest email", true
+	case "quick.mail_from":
+		return "Looking up an email", true
+	case "quick.cached_brief":
+		return "Reading this morning's brief", true
+	case "quick.pending_approvals":
+		return "Checking what's waiting on you", true
+	default:
+		return "Looking something up", true
+	}
+}
+
 func quickSchema(spec intents.FunctionSpec) []byte {
 	props := make(map[string]any, len(spec.Args))
 	for name, typ := range spec.Args {

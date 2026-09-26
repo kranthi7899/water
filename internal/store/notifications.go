@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"time"
 )
 
@@ -70,6 +71,18 @@ func (s *Store) ListUndeliveredNotifications(ctx context.Context) ([]Notificatio
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// GetNotification returns one notification by id, delivered or not, or
+// ErrNotFound.
+func (s *Store) GetNotification(ctx context.Context, id string) (Notification, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, record_type, record_id, title, body, created_at, delivered_at
+		FROM notifications WHERE id = ?`, id)
+	n, err := scanNotification(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Notification{}, ErrNotFound
+	}
+	return n, err
 }
 
 func scanNotification(sc interface{ Scan(...any) error }) (Notification, error) {

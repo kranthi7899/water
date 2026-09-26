@@ -138,6 +138,8 @@ type approvalEditResponse struct {
 // CEO must answer the new envelope through POST
 // /v1/approvals/{new id}/decision like any other. The action itself can't
 // be changed, and the new payload must fit the action's connector schema.
+// A decision card staged into the old envelope is re-pointed at the new one
+// (store.RepointCardState).
 //
 // 409 on a stale payload_hash or an envelope that is no longer editable
 // (already decided, executed or expired); 404 on an unknown id; 400 on a
@@ -190,6 +192,13 @@ func (d *Daemon) handleEditApproval(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// A decision card staged into the old envelope now waits on the new one
+	// (V-ui2): without this it would point at a voided envelope, read as
+	// no longer staged, and invite a second staging.
+	if _, err := d.cfg.Store.RepointCardState(ctx, id, next.ID); err != nil {
+		http.Error(w, "edited "+id+" into "+next.ID+", but re-pointing its decision card failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	voided, err := d.cfg.Approvals.Get(ctx, id)

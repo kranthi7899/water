@@ -1,6 +1,8 @@
 import AVFoundation
 import Foundation
+import QuartzCore
 import Speech
+import WaterClientCore
 
 /// The microphone as a stream of in-memory PCM buffers (an AVAudioEngine
 /// input tap). Shared by push-to-talk and meeting capture; buffers are handed
@@ -26,6 +28,12 @@ final class MicTap {
     var onInterrupted: ((String) -> Void)?
     /// Main thread: capture restarted on a new input device.
     var onRestarted: (() -> Void)?
+    /// Main thread, about 30 times a second while capturing: the input's
+    /// loudness, 0...1 (RMS of each tap buffer's first channel, on a dB
+    /// scale — `AudioLevel`). Set it before `start()`; with it nil nothing
+    /// is measured. Push-to-talk's two captures (OnDeviceSpeechCapture and
+    /// ParakeetCapture) both feed the Activity HUD's blob from it.
+    var onLevel: ((Float) -> Void)?
 
     var isRunning: Bool { engine?.isRunning ?? false }
 
@@ -38,7 +46,16 @@ final class MicTap {
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw CaptureError("No microphone input is available.")
         }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in onBuffer(buffer) }
+        // Metering happens on the audio thread, throttled there, so only
+        // ~30 hops a second reach main. `meter` is touched only by this
+        // tap's own (serial) audio thread.
+        let meter = onLevel == nil ? nil : TapMeter()
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+            onBuffer(buffer)
+            if let meter, let level = meter.level(buffer) {
+                DispatchQueue.main.async { self?.onLevel?(level) }
+            }
+        }
         engine.prepare()
         do {
             try engine.start()
@@ -82,6 +99,18 @@ final class MicTap {
             stop()
             onInterrupted?("\(changed) and the microphone couldn't restart: \(error.localizedDescription)")
         }
+    }
+}
+
+/// One tap's metering state: the throttle and the RMS of each buffer.
+private final class TapMeter {
+    private var throttle = LevelThrottle()
+
+    /// The buffer's level, or nil when throttled or not float PCM.
+    func level(_ buffer: AVAudioPCMBuffer) -> Float? {
+        guard throttle.allow(now: CACurrentMediaTime()),
+              let data = buffer.floatChannelData, buffer.frameLength > 0 else { return nil }
+        return AudioLevel.level(rms: AudioLevel.rms(data[0], count: Int(buffer.frameLength)))
     }
 }
 

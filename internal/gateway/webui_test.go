@@ -3,6 +3,7 @@ package gateway
 import (
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -70,9 +71,28 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(b)
-	for _, never := range []string{"/v1/tools", "/v1/quick", "/v1/twinlink", "/v1/turns", "/v1/intents", "/v1/state", "/edit", "/email"} {
+	// /v1/notifications is native-only (V-notify): the page must never list
+	// or mark notifications.
+	// /v1/turns stays native-only too (V-ui2): the page's held mic asks the
+	// native side to run the voice turn, it never posts one itself.
+	for _, never := range []string{"/v1/tools", "/v1/quick", "/v1/twinlink", "/v1/turns", "turns", "thread_id", "/v1/intents", "/v1/state", "/v1/notifications", "notifications", "/email"} {
 		if strings.Contains(src, never) {
 			t.Errorf("api.js names %q, which the UI must not call", never)
+		}
+	}
+	// Approval edit (V-ui2) is reachable, but only on an approval: every
+	// '/edit' suffix in api.js must be exactly this one expression, and it
+	// must be there (added by hand here, in api.js and in
+	// WorkspaceAllowlist.routes).
+	const editRoute = `'/v1/approvals/' + enc(id) + '/edit'`
+	if n, m := strings.Count(src, "'/edit'"), strings.Count(src, editRoute); n != 1 || m != 1 {
+		t.Errorf("api.js has %d '/edit' suffixes and %d %s; want exactly the one approval edit route", n, m, editRoute)
+	}
+	// Every other quoted path suffix api.js appends to an id is one of these.
+	suffixes := map[string]bool{"'/stage'": true, "'/dismiss'": true, "'/decision'": true, "'/edit'": true, "'/messages'": true, "'/cancel'": true}
+	for _, m := range regexp.MustCompile(`\+ '(/[^']*)'`).FindAllStringSubmatch(src, -1) {
+		if lit := "'" + m[1] + "'"; !suffixes[lit] {
+			t.Errorf("api.js appends %s to a path, which is not on the UI's allowlist", lit)
 		}
 	}
 	allowed := []string{

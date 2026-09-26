@@ -132,9 +132,9 @@ func (*HubSpot) Credential() (string, string) { return Service, Account }
 
 func (*HubSpot) Functions() []connectors.Function {
 	return []connectors.Function{
-		{Name: "list_deals", Description: "List CRM deals, optionally filtered by keyword.", Level: twins.R, Risk: connectors.RiskLow, External: true,
+		{Name: "list_deals", Description: "List CRM deals, optionally filtered by keyword.", Activity: "Checking deals in HubSpot", Level: twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{"query": {Type: "string", Description: "keyword filter over deal name/company"}}}},
-		{Name: "list_contacts", Description: "List CRM contacts, optionally filtered by keyword.", Level: twins.R, Risk: connectors.RiskLow, External: true,
+		{Name: "list_contacts", Description: "List CRM contacts, optionally filtered by keyword.", Activity: "Looking up contacts in HubSpot", Level: twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{"query": {Type: "string", Description: "keyword filter over name/company"}}}},
 	}
 }

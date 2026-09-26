@@ -58,6 +58,30 @@ const (
 	EventQueued EventKind = "queued"
 	EventDone   EventKind = "done"
 	EventError  EventKind = "error"
+	// EventToolStart and EventToolEnd bracket one tool call the model made
+	// while this turn's model call was running (docs/slices/V.md §7.4
+	// V-events): tool_start when the daemon receives the call, tool_end with
+	// its Status once the call's response is written. Both carry the same
+	// StepID, the function id (Tool) and a code-built Label, never the
+	// model's arguments. They are informational and side-effect free:
+	// clients that do not know them ignore them.
+	EventToolStart EventKind = "tool_start"
+	EventToolEnd   EventKind = "tool_end"
+)
+
+// StepStatus is a tool_end event's outcome.
+type StepStatus string
+
+const (
+	// StepOK: the call ran and returned its output.
+	StepOK StepStatus = "ok"
+	// StepQueued: the call was proposed as an approval envelope; nothing ran.
+	StepQueued StepStatus = "queued"
+	// StepDenied: the call was refused, or failed before anything ran.
+	StepDenied StepStatus = "denied"
+	// StepError: the call ran and something after it failed
+	// (executed_with_error), or the handler ended some other way.
+	StepError StepStatus = "error"
 )
 
 // queuedAfter is how long BeginModel may block before RunTurn tells the
@@ -82,6 +106,21 @@ type Event struct {
 	PayloadHash string    `json:"payload_hash,omitempty"`
 	ReadBack    string    `json:"read_back,omitempty"`
 	Error       string    `json:"error,omitempty"`
+	// StepID, Tool, Label and Status belong to tool_start/tool_end only.
+	StepID string     `json:"step_id,omitempty"`
+	Tool   string     `json:"tool,omitempty"`
+	Label  string     `json:"label,omitempty"`
+	Status StepStatus `json:"status,omitempty"`
+}
+
+// ApprovalRequiredEvent is the one approval_required shape every path
+// emits (the model-queued tool call, a Tier-0 write intent, a spoken yes on
+// a tap-required envelope): the id, the action (repeated in Text for older
+// clients), risk and payload hash (what POST /v1/approvals/{id}/decision
+// needs), and the code-built read-back (approvals.ReadBack).
+func ApprovalRequiredEvent(env approvals.Envelope) Event {
+	return Event{Kind: EventApprovalRequired, ApprovalID: env.ID, Text: env.Action,
+		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash, ReadBack: approvals.ReadBack(env)}
 }
 
 // Env is everything one turn needs. The daemon builds one Env per twin and
@@ -135,6 +174,10 @@ type Env struct {
 	// startup (internal/nervous/render.Style.PromptBlock()), so it stays
 	// byte-identical across turns like the rest of the system prompt.
 	StyleBlock string
+	// MaxChars is style.yaml's max_chars per channel. TurnPrompt states the
+	// turn's own channel budget in the channel hint; nothing truncates a
+	// model reply to it (docs/slices/V.md D5). Nil leaves the number out.
+	MaxChars map[Channel]int
 }
 
 func (e Env) now() time.Time {
@@ -182,13 +225,10 @@ func ModelTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) (backe
 	}
 	req := backend.Request{
 		System:  RoleSystem(env),
-		Prompt:  TurnPrompt(env, summary, turn.Prompt),
+		Prompt:  TurnPrompt(env, turn.Channel, summary, turn.Prompt),
 		Model:   env.Manifest.ModelFor(twins.TierFast),
 		Timeout: env.timeout(),
 		Tools:   env.Tools,
-	}
-	if turn.Channel == ChannelVoice {
-		req.Prompt += "\n\n(Reply briefly, in short spoken sentences.)"
 	}
 
 	var splitter SentenceSplitter
@@ -309,9 +349,40 @@ func RoleSystem(env Env) string {
 
 // TurnPrompt is one turn's user message: the current state (see
 // StateSummary, whose taint the caller applies to the session before the
-// turn runs) followed by the CEO's request.
-func TurnPrompt(env Env, summary, prompt string) string {
-	return "## Current state (as of " + env.now().Local().Format("15:04") + ")\n" + summary + "\n\n## CEO\n" + prompt
+// turn runs), a one-line channel hint (ChannelHint), then the CEO's
+// request. The hint lives here, in the per-turn message, not in the system
+// prompt, so the system prompt stays byte-identical across channels and the
+// warm session keeps its process.
+func TurnPrompt(env Env, ch Channel, summary, prompt string) string {
+	var b strings.Builder
+	b.WriteString("## Current state (as of " + env.now().Local().Format("15:04") + ")\n" + summary + "\n\n")
+	if h := ChannelHint(ch, env.MaxChars[ch]); h != "" {
+		b.WriteString(h + "\n\n")
+	}
+	b.WriteString("## CEO\n" + prompt)
+	return b.String()
+}
+
+// ChannelHint is the channel line TurnPrompt adds: which channel the reply
+// goes to and style.yaml's character budget for it (maxChars <= 0 leaves
+// the number out). Only voice asks for short spoken sentences with no
+// lists or markdown. An empty channel gets no hint.
+func ChannelHint(ch Channel, maxChars int) string {
+	if ch == "" {
+		return ""
+	}
+	var parts []string
+	if maxChars > 0 {
+		parts = append(parts, fmt.Sprintf("reply in at most about %d characters", maxChars))
+	}
+	if ch == ChannelVoice {
+		parts = append(parts, "short spoken sentences, no lists or markdown")
+	}
+	h := "## Channel: " + string(ch)
+	if len(parts) > 0 {
+		h += " (" + strings.Join(parts, "; ") + ")"
+	}
+	return h
 }
 
 // StateSummary renders today's events and the pending-approval count, the

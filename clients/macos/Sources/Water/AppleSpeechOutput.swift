@@ -21,7 +21,7 @@ import WaterClientCore
 /// time, so a single `pendingDone` (rather than a per-utterance table) is
 /// enough to route `AVSpeechSynthesizerDelegate`'s callback back to the
 /// right completion.
-final class AppleSpeechOutput: NSObject, SpeechOutput {
+final class AppleSpeechOutput: NSObject, SpeechOutput, SpeechLevelSource {
     // `nonisolated(unsafe)`: every touch of `synth` in this file is on the
     // main thread (SpeechOutput's whole contract is main-thread-only, see
     // the protocol doc comment), same as the plain AVSpeechSynthesizer this
@@ -35,6 +35,12 @@ final class AppleSpeechOutput: NSObject, SpeechOutput {
     /// before this profile existed.
     private var ttsVoice: AVSpeechSynthesisVoice?
     private var ttsRate: Float?
+    /// Main thread, once per spoken word: a value from a fixed, gentle
+    /// wave (`AudioLevel.wordPulse`). AVSpeechSynthesizer has no audio
+    /// meter, so this shows *that* it's speaking, not how loud — a known
+    /// limitation (V-hud), unlike KokoroSpeaker's real meter.
+    var onLevel: ((Float) -> Void)?
+    private var wordIndex = 0
 
     override init() {
         super.init()
@@ -53,6 +59,7 @@ final class AppleSpeechOutput: NSObject, SpeechOutput {
         if let ttsVoice { utterance.voice = ttsVoice }
         if let ttsRate { utterance.rate = ttsRate }
         pendingDone = done
+        wordIndex = 0
         synth.speak(utterance)
     }
 
@@ -85,6 +92,16 @@ final class AppleSpeechOutput: NSObject, SpeechOutput {
 }
 
 extension AppleSpeechOutput: AVSpeechSynthesizerDelegate {
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange,
+                           utterance: AVSpeechUtterance) {
+        guard let onLevel else { return }
+        let v = AudioLevel.wordPulse(wordIndex)
+        wordIndex += 1
+        // The delegate's queue isn't documented as main; SpeechOutput's
+        // contract is main-thread-only, so hop if needed.
+        if Thread.isMainThread { onLevel(v) } else { DispatchQueue.main.async { onLevel(v) } }
+    }
+
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         let done = pendingDone
         pendingDone = nil

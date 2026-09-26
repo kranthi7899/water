@@ -176,6 +176,17 @@ Nothing else in the brief failed to parse beyond the coordinator's listed recons
 
 ### 7.3 Owner decisions needed
 
+> **Decided by the owner, 2026-09-25:**
+> - **D1:** A, tool events on the turn stream. No jobs schema. Promoted job_notes are dropped from V and belong to J's task-event trail.
+> - **D2:** A, Drafts lists pending outward-message envelopes.
+> - **D3:** as recommended: stage, then read-back, then confirm; edit via approval edit; reject via dismiss.
+> - **D4:** A, the code default stays off; enabled in the owner's own config, with internal_domains set.
+> - **D5:** yes, fix StyleBlock at both sites and add the channel hint. No hard truncation.
+> - **D6:** deterministic links only.
+> - **D7:** the blob shows only during an interaction or while an approval is pinned.
+>
+> The design defaults in the paragraph after D7 are accepted as written. V-0 is done (CONTEXT.md amendment).
+
 **D1. The HUD's live steps: new tool events on the turn stream, or a jobs schema now.**
 - *Option A (recommended): turn-stream events.* Add `tool_start`/`tool_end` to `runtime.Event`, emitted from `handleToolInvoke`/`handleQuickInvoke` through `d.sinks[d.activeTask]`, the same routing `notifyApprovalRequired` already uses. There is no migration, no new state and no new endpoint, and old clients ignore unknown kinds. Trade-off: steps exist only while the turn's stream is open. Close the text bar mid-turn and they're gone, so there is no history of "what ran". Neither is there today.
 - *Option B: `jobs`/`job_steps`/`job_notes` tables now.* The HUD could reattach after a reconnect and show history. But a durable job with steps *is* J's task record (`task_records`/`task_events`, J §6). Building it here means either a second, competing durable-work table that J must later migrate or delete, or pre-empting J's open naming question (J Q5). It also needs a subscription endpoint, and that is the SSE stream §7.1.2 says doesn't exist. That's several times the work.
@@ -245,6 +256,14 @@ Acceptance:
 - the system prompt sent to `claude` contains `prompt_block`.
 Invariants: no new route, and the tool-invoke semantics are unchanged (events are side-effect-free writes to an already-open stream).
 
+**As built (V-events, 2026-09-25, not yet committed):**
+- `runtime.Event` gained `step_id`, `tool`, `label` and `status` (all omitempty, so every existing event is byte-identical), kinds `tool_start`/`tool_end`, and `StepStatus` (`ok|queued|denied|error`). `runtime.ApprovalRequiredEvent(env)` is now the one constructor for a complete `approval_required` (the model-queued path uses it too).
+- `gateway`: `beginStep` captures `d.sinks[d.activeTask]` once, so a pair never splits across streams, and emits `tool_start`. `handleToolInvoke` and `handleQuickInvoke` both call it after auth and body decode (a rejected request emits nothing) and `defer step.end(status)`, with `status` set before each response and defaulting to `error`. The label comes from `connectors.Function.Label(id)` (Activity, then Description, then the id). An id the registry doesn't know gets no `tool` and the label "Using a tool", since that id is model text. Quick tools get labels from `reflex.QuickService.Activity`, and `quick.go` still imports neither gate nor connectors.
+- `Activity` lines were added to every read function of gcal, gmail, gdrive, company_finance, github, linear and hubspot, to their write functions, and to the demo fakes.
+- Tier-0 `approval_required` (`nervous.answerQuick`, which now takes ctx) looks the envelope up (`approvalRequired`), falling back to the bare id. The tap-required path uses the envelope it has just re-read.
+- D5: `gateway.Config.StyleBlock` and `MaxChars` are filled in `runDaemon` from `deps.style` and set in `baseEnv`. The new `Daemon.SystemPrompt()` is `RoleSystem(baseEnv)`. `daemonPrewarmer.request()` uses it once wired and falls back to `RoleSystem({roleMD, styleBlock})` before that. `TurnPrompt(env, ch, summary, prompt)` adds `## Channel: <ch> (reply in at most about N characters[; short spoken sentences, no lists or markdown])` before `## CEO`. This replaces the old voice-only "(Reply briefly…)" suffix. No truncation.
+- Swift `TurnEvent` decodes `.queued`, `.toolStart`, `.toolEnd`, `readBack`, `stepID`, `tool`, `label` and `status` (a raw string). `AppDelegate`'s exhaustive switch ignores the new kinds until V-hud. The web UI needed no change: its thread-stream switch already falls through.
+
 #### V-notify: native notifications (§3)
 Scope:
 - Go (new file `gateway/notifications.go`): `GET /v1/notifications?undelivered=1&limit=` (→ `ListUndeliveredNotifications`) and `POST /v1/notifications/{id}/delivered` (→ `MarkNotificationDelivered`), behind `d.auth`. These routes are for **native only**: *not* added to `api.js` or `WorkspaceAllowlist.routes`, since the page never needs them. The Go allowlist-pin test gets a negative assertion that the page can't reach them.
@@ -259,6 +278,12 @@ Acceptance:
 - a second tap reuses the same thread.
 Risk:
 - `UNUserNotificationCenter` with `build.sh`'s self-signed identity and `LSUIElement` is unverified here. Default: verify first. If it's refused, fall back to `NSUserNotification` (deprecated, still works) and log a known gap.
+
+**As built (V-notify, 2026-09-25, not yet committed):**
+- Go `gateway/notifications.go`: `GET /v1/notifications?undelivered=1&limit=` (oldest first; limit default 20, max 100; `undelivered` may be omitted, and any other value is a 400) and `POST /v1/notifications/{id}/delivered` (idempotent: a repeat answers 200 with the first `delivered_at`; 404 for an unknown id through the new `store.GetNotification`). Both are behind `d.auth`. `TestUIOnlyCallsAllowlistedRoutes` now also fails if `api.js` names `/v1/notifications` or `notifications`; `WorkspaceAllowlistTests.notificationRoutesAreNeverReachableFromThePage` pins the Swift side.
+- Swift core `Notifications.swift`: `NotificationPlanner` dedupes by notification id and by record, shows at most 3 record banners plus one "And N more need(s) you" banner for the remainder, and tracks in-flight, posted and marked ids, so a failed mark re-marks rather than re-shows. `NotificationAnchor` accepts only `decision|approval` and ids that pass `WorkspaceAllowlist.isID`. It is the whole of a banner's `userInfo`, and it is re-validated on tap. `NotificationActions.tapTarget` opens the thread only for a 200 whose thread matches the exact anchor and has a plain id. Anything else (a 404, an error, an odd body) opens the record's Decisions or Approvals view at its id. No anchor opens Today.
+- Swift app `Notifier.swift`: a 30s poll on its own `UnixSocketClient` and serial queue. Permission is asked at the first banner to show, at most once per run. Each notification is marked delivered after `add` succeeds; the summary marks everything it covers. A tap runs `POST /v1/threads/anchor`, then `WorkspaceWindowController.open(view:id:)` (show, then `window.water.open` through `callAsyncJavaScript` arguments). `open` now takes an optional id; nil opens the view's list.
+- Risk check: a throwaway probe app with `LSUIElement`, signed with the same "Water Local Code Signing" identity and run from a normal path under home, was registered by Notification Center, and `requestAuthorization` waited on the permission prompt. The same probe run from `/tmp` got `UNErrorDomain Code=1 "Notifications are not allowed for this application"` at once, and so did later runs on a bundle id whose first prompt went unanswered. So there is no `NSUserNotification` fallback. A banner actually shown after "Allow" still needs checking on the device (V-verify).
 
 #### V-hud: the Activity HUD and blob (Swift)
 Scope:
@@ -289,6 +314,24 @@ Acceptance:
 - the blob visibly reacts to voice while held, pulses while thinking and moves while Kokoro speaks;
 - an approval stays pinned until it's resolved.
 
+**As built (V-hud, 2026-09-25, not yet committed; Swift only):**
+- `WaterClientCore/Activity.swift`: `ActivityModel` is the one state machine. The phases are `idle | listening | thinking | responding | needsYou`, and `needsYou` means at rest with an open card. It holds `steps`, `approvals` (`ApprovalCard`, plus `submitting` and `note`), the level, `dismissAt` and a turn id. Its inputs are the §7.4 list plus `cancelled`, `turnEnded` (the stream ended without a terminal event), `approvalSubmitting`/`Failed`/`Refreshed` and `approvalReread`.
+  - A hold is barge-in: it retires the open turn, so that turn's late events are stale.
+  - A hold that never produces a turn stops "thinking" after 15s.
+  - Amplitude fades when it stops updating. The thinking pulse is a function of time only.
+- `WaterClientCore/AudioLevel.swift` has the RMS, dB→0…1 (−50 dB floor), the fixed word wave and `LevelThrottle` (30Hz). `ApprovalActions.swift` covers the two existing routes. Decide refuses an empty `payload_hash`, and the reply is `yes`/`no`. `EngineSelection.launchPlan` is pure, as are `VoiceBenchOptions` and `WorkspaceAllowlist.isOpenTarget`.
+- Signals:
+  - `MicTap.onLevel` computes RMS on the audio thread, throttled there, then hops to main. It is used by both captures through `VoiceController.onLevel`.
+  - `SentenceSpeechQueue.onIdle` fires on busy→drained, including barge-in, but never in the gap between sentences.
+  - `KokoroSpeaker` meters `averagePower` with a 30Hz timer.
+  - `AppleSpeechOutput` gives each `willSpeakRangeOfSpeechString` word the next value of a fixed wave. That's a limitation: it shows speaking, not loudness.
+- `ActivityView` is one `NSView`: a compact `CAShapeLayer` blob, or expanded with step rows and cards. Every string is set as a plain `NSTextField.stringValue`. Approve is enabled only when the card has both a read-back and a hash. `ActivityHUD` is a borderless `.nonactivatingPanel` with `.canJoinAllSpaces` and `.fullScreenAuxiliary`, placed right of the AskPanel (or below it when there's no room). It has its own socket client and a serial queue for decisions, and it re-reads every open card after `done`/`error`/stream end and after every click. Edit calls `WorkspaceWindowController.open(view:id:)`, which runs `window.water.open` through `callAsyncJavaScript` **arguments** and waits for the page's `didFinish`.
+- §1 leftovers:
+  - `SpeechModels` puts both managers in `~/Library/Application Support/Water/Models/`, and presence is checked on disk. Models from an old location trigger the consent dialog again as a re-download, and the old copy is left in place.
+  - Parakeet's download and load, and Kokoro's download and initialize, all run inside the one progress window, with FluidAudio's real `progressHandler` fractions.
+  - Intel gets a one-time notice.
+  - `--voice-bench --tts kokoro` pumps the main run loop, refuses to download, and reports the warm-up separately from the turns.
+
 #### V-ui2: web UI deltas
 Scope:
 - **Drafts** view (D2-A) in `app.js`, reusing the approval detail.
@@ -315,6 +358,28 @@ Acceptance:
 - a held-mic question lands in the open thread as a `voice` message and is spoken;
 - Drafts lists a pending `gmail.send_message` envelope and approving it there resolves it.
 
+**As built (V-ui2, 2026-09-25, not yet committed):**
+- Go:
+  - `store.RepointCardState(from, to)` moves only `staged` cards on the old envelope. `handleEditApproval` calls it after `Queue.Edit`; a failure is a 500, the same posture as staging.
+  - `store.StagedCardStates` feeds `GET /v1/decisions`. Each card is now `{…card's Go-name fields, unchanged…, card_state?}`, where `card_state` is `{status: "staged", approval_id, approval_status, staged_at}`. It is absent on unstaged cards. `approval_status` is read after `ExpireStale`.
+  - `POST /v1/turns` takes an optional `thread_id`. It must match `^thr_[0-9a-f]{1,64}$` (else 400) and name a thread (else 404). It can't be combined with `meeting_id` (400), and a clear-only turn or an over-16 KiB prompt is a 400. The thread turn runs through `streamThreadTurn`, the helper now shared with `handlePostThreadMessage`: history as context, the CEO message stored first, the reply stored on done, and `X-Water-Thread-Id` set.
+- Page:
+  - `api.js` gains `editApproval` (`'/v1/approvals/' + enc(id) + '/edit'`) and an optional `kind` on `approvals`. `TestUIOnlyCallsAllowlistedRoutes` now requires exactly that one edit expression. It pins every appended path suffix, and it still forbids `/v1/turns`, `turns` and `thread_id`.
+  - `app.js` gains a Drafts view: pending `gmail.send_message` and `twinlink.send_message` envelopes, two `?kind=` calls merged oldest first, using the approval detail.
+  - Every pending approval gets an Edit form: it voids the envelope, stages a new one, and navigates to it.
+  - Decision cards follow D3. Prepare, then Stage (click 1), shows the read-back inline with "Yes, send it" (click 2), plus Edit. A card already staged on load shows "Staged, awaiting your yes" and the read-back, never Prepare. It asks "Approve…" then "Yes". Dismiss is now labelled Reject.
+  - The bottom bar sits under `main`. Enter or Send posts to the open thread, or creates a free-standing thread (titled from the text), opens it, and posts there. The in-thread composer is gone.
+  - The mic in the bar is hold-to-talk. Pointer or Space/Enter down posts `{type:"mic-down", thread}` (with no thread open it first creates "Voice conversation"). Release, cancel, lost capture or blur posts `{type:"mic-up"}`.
+  - Today is one column (`.stack`; `.grid-2` removed).
+  - The sidebar lists the 6 most recent threads.
+  - Executed outward messages read "sent".
+- Swift:
+  - `WorkspaceAllowlist.routes` gains `POST /v1/approvals/{id}/edit`, and `pageViews` gains `drafts`.
+  - `WorkspaceMessage` is now exactly `.micDown(thread:)` (dict of 2 keys, `isThreadID`) or `.micUp` (dict of 1 key). The old `{type:"mic"}` toggle is gone.
+  - `WorkspaceVoiceTarget` (pure) holds the page's thread for exactly one transcript. The voice hotkey, a menu Talk or a failed capture clears it.
+  - `UnixSocketClient.turnRequest` (pure) adds `thread_id` only when it is well formed, and then drops `meeting_id`.
+  - `AppDelegate` starts and ends the hold from the page, sends the transcript with `threadID`, and speaks and drives the HUD as usual. It calls `WorkspaceWindowController.refresh()` (`window.water.refresh()`) on done and on stream end.
+
 #### V-links: deterministic links (D6)
 Scope:
 - `internal/meetings` start: attendees → `involves`;
@@ -323,6 +388,13 @@ Scope:
 All writes go through `AddLink`, which is idempotent, and write nothing when the roster can't resolve an identity. **Never a guess.**
 Tests: each writer adds the expected edge, writes nothing for an unresolved identity, and re-running adds no duplicate.
 Acceptance: after one fixture meeting and one fixture decision, `LinksOf` returns the expected person edges. There is no new migration.
+
+**As built (V-links, 2026-09-25, not yet committed):**
+- New package `internal/recordlinks` holds the one resolution rule: an address (a bare `a@b.c` or a `Name <a@b.c>` header, parsed with `net/mail`; anything else is dropped) resolves through `roster.PersonByIdentity(ctx, st, "email", addr)`, then its lowercase form. No display-name or other-key matching. `CopyLinks` copies only the source's outgoing `involves`/`for_project` edges. Every write is `store.AddLink`.
+- `meetings.Manager.Start` resolves the event's attendees (`store.EventBySourceID`) before inserting the session, then writes `meeting -> involves -> person`. An unknown event id or unresolved attendee writes nothing. `Manager.LinkAttendees(id)` re-runs the same writer (idempotent; usable as a backfill).
+- `needsyou.Service.Tick` links every decision item that crossed the threshold, from the card's `SourceItemIDs` messages' `From`. `Item` keeps the ids in an unexported field, so Today's JSON is unchanged. Link failures are collected and returned after all notifications are recorded.
+- `handleStageDecision` (after every refusal, before `Propose`), `handleDismissDecision` (before `SetCardState`) and `resolveAnchor`'s decision case write the decision link. A store failure there is a 500 and stages/dismisses nothing.
+- A newly created anchored thread copies its anchor's edges in `handleAnchorThread`, right after the `about` link, since `resolveAnchor` runs before the thread exists.
 
 #### V-verify: Phase 4 evidence (`docs/slices/V-verification.md`)
 See §7.5.

@@ -87,6 +87,32 @@ public final class SentenceSpeechQueue {
     /// Nil by default — no behavior or cost when unset.
     public var onWillPlay: (() -> Void)?
 
+    /// Fired on the main thread when the queue goes from busy (anything
+    /// pending, synthesizing or playing) to fully drained: the last
+    /// sentence finished, every remaining one failed to synthesize, or a
+    /// barge-in `stop()` cut something off. Never between two sentences of
+    /// one reply, even when the next one is still synthesizing. The Activity
+    /// HUD (V-hud) uses it to stop showing speech. Nil by default.
+    public var onIdle: (() -> Void)?
+
+    /// True from the first enqueue until `onIdle` fires.
+    private var wasBusy = false
+
+    private var isBusy: Bool {
+        preparingCurrent || isPlaying || preparingNext || nextToken != nil || playNextAsSoonAsReady || !pending.isEmpty
+    }
+
+    /// Records the busy/idle transition after every state change, firing
+    /// `onIdle` on busy -> drained.
+    private func noteState() {
+        if isBusy {
+            wasBusy = true
+        } else if wasBusy {
+            wasBusy = false
+            onIdle?()
+        }
+    }
+
     public init(output: SpeechOutput) {
         self.output = output
     }
@@ -98,6 +124,7 @@ public final class SentenceSpeechQueue {
         guard !s.isEmpty else { return }
         pending.append(s)
         pump()
+        noteState()
     }
 
     /// Barge-in: stops whatever is playing right now and drops everything
@@ -113,6 +140,7 @@ public final class SentenceSpeechQueue {
         nextToken = nil
         playNextAsSoonAsReady = false
         output.stopCurrent()
+        noteState()
     }
 
     // MARK: -
@@ -145,6 +173,7 @@ public final class SentenceSpeechQueue {
                 self.startCurrent(self.pending.removeFirst())
             }
             // else: nothing to play and nothing pending — stays idle.
+            self.noteState()
         }
     }
 
@@ -171,6 +200,7 @@ public final class SentenceSpeechQueue {
             } else {
                 self.playNextAsSoonAsReady = false
             }
+            self.noteState()
         }
     }
 
@@ -191,6 +221,7 @@ public final class SentenceSpeechQueue {
         output.play(token) { [weak self] in
             guard let self, self.generation == gen else { return }
             self.currentDidFinish()
+            self.noteState()
         }
     }
 }

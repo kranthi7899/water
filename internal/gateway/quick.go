@@ -3,6 +3,8 @@ package gateway
 import (
 	"encoding/json"
 	"net/http"
+
+	"water/internal/runtime"
 )
 
 // handleQuickInvoke serves the sous chef's quick.* tools to the main
@@ -36,17 +38,33 @@ func (d *Daemon) handleQuickInvoke(w http.ResponseWriter, r *http.Request) {
 	if body.Args == nil {
 		body.Args = map[string]any{}
 	}
+	// The call is a step on the active turn's stream (V-events), labelled
+	// from the quick tools' own table, never from the arguments; an id that
+	// table doesn't expose gets no tool name and the generic label. Every
+	// return path below ends it through the defer.
+	tool, label := "", genericStepLabel
+	if d.cfg.Nervous != nil {
+		if l, ok := d.cfg.Nervous.Quick().Activity(body.Function); ok {
+			tool, label = body.Function, l
+		}
+	}
+	step := d.beginStep(tool, label)
+	status := runtime.StepError
+	defer func() { step.end(status) }()
 	if d.cfg.Nervous == nil {
+		status = runtime.StepDenied
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": "no quick tools are configured for this twin"})
 		return
 	}
 
 	res, err := d.cfg.Nervous.Quick().Run(r.Context(), body.Function, body.Args)
 	if err != nil {
+		status = runtime.StepDenied
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 		return
 	}
 	d.escalateTaint(res.Tainted)
 	d.cfg.Nervous.RecordToolUse(body.Function)
+	status = runtime.StepOK
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
 }

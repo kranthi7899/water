@@ -34,4 +34,33 @@ public enum EngineSelection {
     public static func choose(isAppleSilicon: Bool, modelsReady: Bool) -> SpeechEngine {
         isAppleSilicon && modelsReady ? .fluidAudio : .appleSpeech
     }
+
+    /// What to do at launch (V-hud's §1 leftovers). Pure: every input is a
+    /// fact `EngineSelector` read from the Mac or UserDefaults.
+    /// - modelsOnDisk: every Parakeet and Kokoro file is present in Water's
+    ///   own models folder (checked on disk, not remembered).
+    /// - declined: the user chose Apple Speech in the consent dialog.
+    /// - previouslyReady: models were downloaded once before, possibly to
+    ///   FluidAudio's own default folder, which Water no longer reads.
+    /// - intelNoticeShown: the one-time Intel notice was already shown.
+    public static func launchPlan(isAppleSilicon: Bool, modelsOnDisk: Bool, declined: Bool,
+                                  previouslyReady: Bool, intelNoticeShown: Bool) -> LaunchPlan {
+        guard isAppleSilicon else { return .useAppleSpeech(showIntelNotice: !intelNoticeShown) }
+        if modelsOnDisk { return .useFluidAudio }
+        if declined { return .useAppleSpeech(showIntelNotice: false) }
+        return .askConsent(redownload: previouslyReady)
+    }
+}
+
+/// See `EngineSelection.launchPlan`.
+public enum LaunchPlan: Equatable {
+    /// Apple Silicon and every model file is in place.
+    case useFluidAudio
+    /// Ask before downloading. `redownload` means a previous download went
+    /// to a folder Water no longer uses, so the dialog says why it's
+    /// asking again.
+    case askConsent(redownload: Bool)
+    /// Apple's speech. `showIntelNotice` is true once, ever, on a Mac that
+    /// can't run FluidAudio at all.
+    case useAppleSpeech(showIntelNotice: Bool)
 }

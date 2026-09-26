@@ -49,6 +49,7 @@ func (*Drive) Functions() []connectors.Function {
 		{
 			Name:        "search_files",
 			Description: "Search Drive files by keyword, or a raw Drive query (e.g. \"mimeType = 'application/vnd.google-apps.document'\").",
+			Activity:    "Searching your Drive",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			External:    true,
@@ -62,6 +63,7 @@ func (*Drive) Functions() []connectors.Function {
 		{
 			Name:        "read_file",
 			Description: "Read a Drive file's content (Docs/Sheets/Slides are exported, plain text and markdown are fetched directly) or its metadata.",
+			Activity:    "Reading a document",
 			Level:       twins.R,
 			Risk:        connectors.RiskLow,
 			External:    true,

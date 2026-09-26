@@ -63,7 +63,7 @@ func (*Calendar) Credential() (string, string) { return "", "" }
 
 func (*Calendar) Functions() []connectors.Function {
 	return []connectors.Function{
-		{Name: "list_events", Description: "List calendar events.", Level: twins.R, Risk: connectors.RiskLow},
+		{Name: "list_events", Description: "List calendar events.", Activity: "Checking your calendar", Level: twins.R, Risk: connectors.RiskLow},
 		{Name: "create_event", Description: "Create an event and invite attendees.", Level: twins.A, Risk: connectors.RiskMedium,
 			Schema: connectors.Schema{
 				Properties: map[string]connectors.Property{"title": str("title"), "start": str("RFC 3339 start"), "end": str("RFC 3339 end"), "attendees": stringList},
@@ -146,7 +146,7 @@ func (*Mail) Credential() (string, string) { return MailService, MailAccount }
 
 func (*Mail) Functions() []connectors.Function {
 	return []connectors.Function{
-		{Name: "list_messages", Description: "List inbox messages.", Level: twins.R, Risk: connectors.RiskLow, External: true},
+		{Name: "list_messages", Description: "List inbox messages.", Activity: "Searching your email", Level: twins.R, Risk: connectors.RiskLow, External: true},
 		{Name: "draft_reply", Description: "Draft a reply to a message. Nothing is sent.", Level: twins.D, Risk: connectors.RiskLow,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{"message_id": str("message to reply to"), "body": str("reply text")}, Required: []string{"message_id", "body"}}},
 		{Name: "send_email", Description: "Send an email.", Level: twins.A, Risk: connectors.RiskHigh,
@@ -248,7 +248,7 @@ func (*Docs) Credential() (string, string) { return "", "" }
 
 func (*Docs) Functions() []connectors.Function {
 	return []connectors.Function{
-		{Name: "read_doc", Description: "Read a document.", Level: twins.R, Risk: connectors.RiskLow, External: true,
+		{Name: "read_doc", Description: "Read a document.", Activity: "Reading a document", Level: twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{"id": str("document id")}, Required: []string{"id"}}},
 	}
 }

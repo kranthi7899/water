@@ -43,12 +43,21 @@ final class VoiceController {
     var onFailure: ((String) -> Void)? {
         get { session.onFailure } set { session.onFailure = newValue }
     }
+    /// Main thread, ~30Hz while the mic is open: its level, 0...1. Both
+    /// captures feed it from their `MicTap` (V-hud's blob).
+    var onLevel: ((Float) -> Void)? {
+        get { (capture as? LevelReportingCapture)?.onLevel }
+        set { (capture as? LevelReportingCapture)?.onLevel = newValue }
+    }
+
+    private let capture: SpeechCapture
 
     /// `capture` defaults to Apple's on-device recognizer
     /// (`OnDeviceSpeechCapture`); `EngineSelector` (Sources/Water) passes
     /// `ParakeetCapture()` instead when FluidAudio is the chosen engine.
     /// `VoiceSession` itself is unaware which one it's driving.
     init(holdLabel: String, capture: SpeechCapture = OnDeviceSpeechCapture()) {
+        self.capture = capture
         session = VoiceSession(permissions: SystemVoicePermissions(),
                                capture: capture,
                                scheduler: MainQueueScheduler())
@@ -85,9 +94,18 @@ private final class MainQueueScheduler: VoiceScheduler {
     }
 }
 
+/// A capture whose mic level can be observed (both of push-to-talk's).
+protocol LevelReportingCapture: AnyObject {
+    var onLevel: ((Float) -> Void)? { get set }
+}
+
 /// The mic feeding one on-device SFSpeech request at a time.
-private final class OnDeviceSpeechCapture: SpeechCapture {
+private final class OnDeviceSpeechCapture: SpeechCapture, LevelReportingCapture {
     private let mic = MicTap()
+
+    var onLevel: ((Float) -> Void)? {
+        get { mic.onLevel } set { mic.onLevel = newValue }
+    }
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
     private var onResult: ((SpeechResult) -> Void)?

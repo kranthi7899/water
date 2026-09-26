@@ -55,7 +55,7 @@ func (*Linear) Credential() (string, string) { return "", "" }
 
 func (*Linear) Functions() []connectors.Function {
 	return []connectors.Function{
-		{Name: "list_issues", Description: "List Linear tickets, optionally filtered.", Level: twins.R, Risk: connectors.RiskLow, External: true,
+		{Name: "list_issues", Description: "List Linear tickets, optionally filtered.", Activity: "Checking tickets in Linear", Level: twins.R, Risk: connectors.RiskLow, External: true,
 			Schema: connectors.Schema{Properties: map[string]connectors.Property{
 				"query":   str("keyword filter over title and project"),
 				"status":  str("filter by status"),

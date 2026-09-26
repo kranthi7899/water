@@ -80,9 +80,12 @@
     decisions: () => request('GET', '/v1/decisions'),
     stageDecision: (id, fn, payload) => request('POST', '/v1/decisions/' + enc(id) + '/stage', { function: fn, payload }),
     dismissDecision: (id, reason) => request('POST', '/v1/decisions/' + enc(id) + '/dismiss', { reason }),
-    approvals: (status, limit) => request('GET', '/v1/approvals?status=' + enc(status) + '&limit=' + enc(limit || 100)),
+    approvals: (status, limit, kind) => request('GET', '/v1/approvals?status=' + enc(status) + '&limit=' + enc(limit || 100) + (kind ? '&kind=' + enc(kind) : '')),
     approval: (id) => request('GET', '/v1/approvals/' + enc(id)),
     decideApproval: (id, payloadHash, reply) => request('POST', '/v1/approvals/' + enc(id) + '/decision', { payload_hash: payloadHash, reply }),
+    // Edit voids the envelope and answers {voided, envelope}: the new,
+    // pending one needs its own yes. Nothing runs by editing.
+    editApproval: (id, payloadHash, payload) => request('POST', '/v1/approvals/' + enc(id) + '/edit', { payload_hash: payloadHash, payload }),
     threads: () => request('GET', '/v1/threads'),
     createThread: (title) => request('POST', '/v1/threads', { title }),
     anchorThread: (type, id) => request('POST', '/v1/threads/anchor', { anchor_type: type, anchor_id: id }),

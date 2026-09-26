@@ -104,6 +104,14 @@ type Config struct {
 	// that doesn't exercise it) makes GET /v1/today report an empty
 	// needs_you list rather than erroring.
 	NeedsYou *needsyou.Service
+	// StyleBlock is the twin's style.yaml prompt block
+	// (render.Style.PromptBlock()), appended to every main-path system
+	// prompt through baseEnv. internal/cli's daemonPrewarmer must warm with
+	// the same string (see SystemPrompt). Empty sends the role alone.
+	StyleBlock string
+	// MaxChars is style.yaml's max_chars per channel, for TurnPrompt's
+	// channel hint. Nil leaves the number out of the hint.
+	MaxChars map[runtime.Channel]int
 }
 
 // turnAuth is what a tool-proxy token grants: an origin and a taint. In
@@ -247,8 +255,62 @@ func (d *Daemon) notifyApprovalRequired(env approvals.Envelope) {
 		// ignores anything that isn't the voice channel.
 		d.cfg.Nervous.RecordReadback(s.channel, env.ID, env.PayloadHash, time.Now())
 	}
-	s.emit(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: env.ID, Text: env.Action,
-		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash, ReadBack: approvals.ReadBack(env)})
+	s.emit(runtime.ApprovalRequiredEvent(env))
+}
+
+// genericStepLabel is a step's label when its function id resolves to
+// nothing this daemon knows: the id came from the model, so it is never
+// shown as the label (and Tool is left empty).
+const genericStepLabel = "Using a tool"
+
+// toolStep is one model tool call shown live on a turn stream as a
+// tool_start/tool_end pair (docs/slices/V.md §7.4 V-events). Both events go
+// to the sink that was active when the call arrived, so a pair never splits
+// across streams. A nil sink (no active turn) emits nothing.
+type toolStep struct {
+	sink *turnSink
+	ev   runtime.Event
+}
+
+// beginStep announces a tool call as tool_start on the stream of the turn
+// whose model call is running, routed exactly like notifyApprovalRequired:
+// d.sinks[d.activeTask], nothing when no turn is active, and nothing once
+// that stream has closed. tool and label must be code-built (see
+// toolStepLabel and handleQuickInvoke), never the call's arguments. The
+// caller ends the step on every return path, with a defer.
+func (d *Daemon) beginStep(tool, label string) *toolStep {
+	d.mu.Lock()
+	s := d.sinks[d.activeTask]
+	d.mu.Unlock()
+	st := &toolStep{sink: s, ev: runtime.Event{StepID: newID("stp"), Tool: tool, Label: label}}
+	st.emit(runtime.EventToolStart, "")
+	return st
+}
+
+// end sends the step's tool_end with its outcome.
+func (st *toolStep) end(status runtime.StepStatus) {
+	st.emit(runtime.EventToolEnd, status)
+}
+
+func (st *toolStep) emit(kind runtime.EventKind, status runtime.StepStatus) {
+	if st.sink == nil {
+		return
+	}
+	e := st.ev
+	e.Kind, e.Status = kind, status
+	st.sink.emit(e)
+}
+
+// toolStepLabel is a connector call's step tool and label: the function id
+// and its spec's Label (Activity, then Description, then the id) when the
+// registry knows the id; otherwise no tool and genericStepLabel.
+func (d *Daemon) toolStepLabel(fn string) (tool, label string) {
+	if d.cfg.Registry != nil {
+		if _, spec, ok := d.cfg.Registry.Lookup(fn); ok {
+			return fn, spec.Label(fn)
+		}
+	}
+	return "", genericStepLabel
 }
 
 func newID(prefix string) string {
@@ -285,6 +347,9 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/threads/{id}/messages", d.auth(d.handlePostThreadMessage))
 	mux.Handle("GET /v1/meetings", d.auth(d.handleListMeetings))
 	mux.Handle("GET /v1/meetings/{id}", d.auth(d.handleGetMeeting))
+	// V-notify: native-only (never in api.js or the water:// allowlist).
+	mux.Handle("GET /v1/notifications", d.auth(d.handleListNotifications))
+	mux.Handle("POST /v1/notifications/{id}/delivered", d.auth(d.handleMarkNotificationDelivered))
 	// The workspace UI's own static assets (internal/webui), behind the same
 	// client-token auth as every route. The security headers are set before
 	// auth runs, so every response under the prefix, a 401 included,
@@ -663,11 +728,19 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	// From here on every return path ends the step (V-events): status is
+	// set right before each response, and the deferred end sends it. A path
+	// that forgets to set it reads as an error, never as a step left
+	// running.
+	step := d.beginStep(d.toolStepLabel(body.Function))
+	status := runtime.StepError
+	defer func() { step.end(status) }()
 	// Belt and suspenders: the gate would deny a "quick." id anyway (no
 	// manifest connector named quick), but this makes the split with
 	// handleQuickInvoke explicit and directly testable, rather than relying
 	// solely on the gate's own default-deny.
 	if strings.HasPrefix(body.Function, "quick.") || strings.HasPrefix(body.Function, "quick__") {
+		status = runtime.StepDenied
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": "quick tools are served at /v1/quick/invoke, not /v1/tools/invoke"})
 		return
 	}
@@ -678,10 +751,12 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	if f, ok := d.cfg.Manifest.Function(body.Function); ok && gate.NeedsEnvelope(f.Level, ta.Taint) {
 		env, err := proposeEnvelope(r.Context(), d.cfg.Registry, d.cfg.Approvals, body.Function, body.Args, ta.Origin)
 		if err != nil {
+			status = runtime.StepDenied
 			writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 			return
 		}
 		d.notifyApprovalRequired(env)
+		status = runtime.StepQueued
 		writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "approval_id": env.ID})
 		return
 	}
@@ -689,6 +764,7 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	res, err := d.cfg.Gate.Invoke(r.Context(), gate.Call{Function: body.Function, Args: body.Args, Origin: ta.Origin, Taint: ta.Taint})
 	if err != nil && res.Output == nil {
 		// Nothing ran: refused, or the connector call itself failed.
+		status = runtime.StepDenied
 		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
 		return
 	}
@@ -713,9 +789,11 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 		// something after it failed: its audit record, or indexing its
 		// result. It must never read as "denied", which would invite the
 		// model to try it again.
+		status = runtime.StepError
 		writeJSON(w, http.StatusOK, map[string]any{"status": "executed_with_error", "output": res.Output, "error": err.Error()})
 		return
 	}
+	status = runtime.StepOK
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
 }
 
@@ -778,6 +856,12 @@ func (d *Daemon) baseEnv() runtime.Env {
 		// A fast path that pulls in external content (the morning brief)
 		// escalates the session the same way a tainted model turn does.
 		OnTaint: d.escalateTaint,
+		// The style block and channel caps (docs/slices/V.md D5). The same
+		// StyleBlock goes into the prewarm request (internal/cli's
+		// daemonPrewarmer), so the warm session's system prompt matches the
+		// real turn's and its process is not restarted on the first turn.
+		StyleBlock: d.cfg.StyleBlock,
+		MaxChars:   d.cfg.MaxChars,
 	}
 	// Assigned only when non-nil: a nil *decisions.Trigger boxed into the
 	// runtime.DecisionSource interface would be a non-nil interface holding
@@ -786,6 +870,13 @@ func (d *Daemon) baseEnv() runtime.Env {
 		env.Decisions = d.cfg.Decisions
 	}
 	return env
+}
+
+// SystemPrompt is the system prompt every main-path turn sends
+// (runtime.RoleSystem over baseEnv). A prewarm must send exactly this, or
+// the warm session restarts its process on the first real turn.
+func (d *Daemon) SystemPrompt() string {
+	return runtime.RoleSystem(d.baseEnv())
 }
 
 // turnEnv builds the runtime.Env for turn taskID, with the twin's tool

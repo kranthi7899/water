@@ -10,10 +10,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"water/internal/recordlinks"
 	"water/internal/store"
 )
 
@@ -66,14 +68,58 @@ func New(st *store.Store) *Manager {
 	return &Manager{st: st, now: time.Now, cueState: map[string]cueState{}}
 }
 
+// Start begins a session. When eventID names a stored calendar event, the
+// session is linked meeting -> involves -> person for every attendee the
+// roster resolves by email (docs/slices/V.md D6: deterministic links only).
+// People are resolved before the session row is written, so a store
+// failure there starts nothing; an attendee the roster doesn't know, or an
+// event id the store doesn't have, simply writes no edge.
 func (m *Manager) Start(ctx context.Context, eventID string) (Session, error) {
 	var b [12]byte
 	_, _ = rand.Read(b[:])
 	s := Session{ID: "mtg_" + hex.EncodeToString(b[:]), StartedAt: m.now().UTC(), EventID: strings.TrimSpace(eventID)}
+	people, err := m.attendees(ctx, s.EventID)
+	if err != nil {
+		return Session{}, err
+	}
 	if err := m.st.InsertMeetingSession(ctx, store.MeetingSessionRow{ID: s.ID, StartedAt: s.StartedAt, EventID: s.EventID}); err != nil {
 		return Session{}, err
 	}
+	if err := recordlinks.Involve(ctx, m.st, "meeting", s.ID, people); err != nil {
+		return Session{}, fmt.Errorf("meeting %s started, but linking its attendees failed: %w", s.ID, err)
+	}
 	return s, nil
+}
+
+// LinkAttendees (re)writes session id's attendee links from its calendar
+// event, exactly as Start does. Idempotent: re-running it adds no edge
+// that already exists, so it doubles as a backfill for sessions started
+// before this link existed, or before the roster knew an attendee.
+func (m *Manager) LinkAttendees(ctx context.Context, id string) error {
+	s, err := m.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	people, err := m.attendees(ctx, s.EventID)
+	if err != nil {
+		return err
+	}
+	return recordlinks.Involve(ctx, m.st, "meeting", s.ID, people)
+}
+
+// attendees resolves eventID's calendar attendees to roster person ids.
+func (m *Manager) attendees(ctx context.Context, eventID string) ([]string, error) {
+	if eventID == "" {
+		return nil, nil
+	}
+	e, err := store.EventBySourceID(ctx, m.st, eventID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return recordlinks.ResolvePeople(ctx, m.st, e.Attendees)
 }
 
 func (m *Manager) Get(ctx context.Context, id string) (Session, error) {

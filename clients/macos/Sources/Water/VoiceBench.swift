@@ -1,10 +1,10 @@
 import Foundation
 import WaterClientCore
 
-/// `Water --voice-bench [--n <count>]`: runs `count` (default 30) synthetic
-/// voice turns headlessly — no NSApplication, no mic, no human — matching
-/// `--selftest`'s early-exit convention in main.swift, and reports
-/// aggregate per-checkpoint-interval latency stats
+/// `Water --voice-bench [--n <count>] [--tts apple|kokoro]`: runs `count`
+/// (default 30) synthetic voice turns headlessly — no NSApplication, no
+/// mic, no human — matching `--selftest`'s early-exit convention in
+/// main.swift, and reports aggregate per-checkpoint-interval latency stats
 /// (`VoiceLatencyStats`/`VoiceTurnAggregator`, WaterClientCore).
 ///
 /// What's real vs. synthetic, honestly, since there's no microphone or
@@ -13,24 +13,30 @@ import WaterClientCore
 ///   recognize, so both are stamped back-to-back at the top of each
 ///   iteration, standing in for "a hold-to-talk capture already produced
 ///   this canned text." Their measured interval is ~0ms by construction —
-///   not a real capture-latency number, and the aggregate report should be
-///   read accordingly.
+///   not a real capture-latency number.
 /// - **Real**: everything from "request sent" on. Each iteration makes a
 ///   real `POST /v1/turns` over the real Unix socket (`UnixSocketClient`,
-///   the same client the app uses) and hands the first reply sentence to a
-///   real `AppleSpeechOutput` through a real `SentenceSpeechQueue` for the
-///   "first audio" checkpoint — deliberately `AppleSpeechOutput`, not
-///   Kokoro/FluidAudio, so `--voice-bench` needs no multi-hundred-MB model
-///   download and stays runnable anywhere (a fresh machine, a sandboxed CI
-///   run) with nothing to consent to first. Audio may not actually be
-///   audible in a headless run with no spinning main run loop (nothing
-///   here calls `RunLoop.main.run()`/`dispatchMain()`) — irrelevant to what
-///   this measures: "first audio" is hand-off to the engine's `play` call
-///   (see VoiceTrace.swift's doc comment on `Checkpoint.firstAudio`), which
-///   happens synchronously within that call, before anything needs a run
-///   loop to continue.
+///   the same client the app uses) and hands reply sentences to a real
+///   engine through a real `SentenceSpeechQueue` for the "first audio"
+///   checkpoint (hand-off to the engine's `play`; see VoiceTrace.swift).
+///   - `--tts apple` (default): `AppleSpeechOutput`. Nothing to download,
+///     runs anywhere.
+///   - `--tts kokoro` (V-hud): `KokoroSpeaker`, so first audio includes
+///     Kokoro's synthesis of the first sentence — the number that matters
+///     for the Kokoro engine. It needs the models already in
+///     `SpeechModels.root` (accept the app's download dialog once); the
+///     bench never downloads. The model load and one warm-up synthesis run
+///     before the first turn and are reported separately, not counted in
+///     any turn.
+///
+/// The turn streams on a background thread while the main run loop is
+/// pumped, because Kokoro's synthesis completes on the main actor; events
+/// are handled on main, as in the app.
 enum VoiceBench {
-    static let defaultN = 30
+    static let defaultN = VoiceBenchOptions.defaultN
+    /// How long to wait for first audio after `done`, and for a turn.
+    static let firstAudioTimeout: TimeInterval = 30
+    static let turnTimeout: TimeInterval = 300
 
     /// Cycled through so a run longer than the prompt list doesn't repeat
     /// the exact same text back-to-back; content doesn't matter for
@@ -45,19 +51,16 @@ enum VoiceBench {
     ]
 
     static func run(arguments: [String]) -> Int32 {
-        var args = Array(arguments.dropFirst().filter { $0 != "--voice-bench" })
-        var n = defaultN
-        if let i = args.firstIndex(of: "--n"), i + 1 < args.count {
-            guard let v = Int(args[i + 1]), v > 0 else {
-                print("voice-bench: --n needs a positive integer, got \(args[i + 1].debugDescription)")
-                return 2
-            }
-            n = v
-            args.removeSubrange(i...(i + 1))
+        let opts: VoiceBenchOptions
+        switch VoiceBenchOptions.parse(arguments) {
+        case .success(let o): opts = o
+        case .failure(let e):
+            print("voice-bench: \(e.message)")
+            return 2
         }
 
         let client = UnixSocketClient(socketPath: UnixSocketClient.defaultSocketPath())
-        print("voice-bench: n=\(n) socket=\(client.socketPath)")
+        print("voice-bench: n=\(opts.n) tts=\(opts.tts.rawValue) socket=\(client.socketPath)")
         do {
             _ = try client.health()
         } catch {
@@ -72,54 +75,108 @@ enum VoiceBench {
             return 1
         }
 
-        let speech = AppleSpeechOutput()
+        let speech: SpeechOutput
+        switch opts.tts {
+        case .apple:
+            speech = AppleSpeechOutput()
+        case .kokoro:
+            guard EngineSelector.isAppleSilicon else {
+                print("voice-bench: Kokoro needs Apple silicon")
+                return 1
+            }
+            guard SpeechModels.allOnDisk() else {
+                print("voice-bench: the speech models aren't in \(SpeechModels.root.path). Launch Water.app and accept the download first; the bench never downloads.")
+                return 1
+            }
+            let kokoro = KokoroSpeaker(manager: SpeechModels.makeKokoroManager())
+            let t0 = Date()
+            var warmed: Bool?
+            kokoro.prepare("Ready.") { warmed = $0 != nil }
+            guard pump(until: { warmed != nil }, timeout: 600), warmed == true else {
+                print("voice-bench: Kokoro failed to load or synthesize")
+                return 1
+            }
+            print(String(format: "voice-bench: kokoro load + warm-up synthesis %.0fms (not counted)",
+                         Date().timeIntervalSince(t0) * 1000))
+            speech = kokoro
+        }
         let queue = SentenceSpeechQueue(output: speech)
         var traces: [VoiceTurnTrace] = []
 
-        for i in 0..<n {
+        for i in 0..<opts.n {
             let prompt = cannedPrompts[i % cannedPrompts.count]
             var trace = VoiceTurnTrace()
             trace.mark(.keyUp)
             trace.mark(.sttFinal) // synthetic — see the type doc comment
-            queue.onWillPlay = { trace.mark(.firstAudio) }
+            var firstAudio = false
+            queue.onWillPlay = {
+                trace.mark(.firstAudio)
+                firstAudio = true
+            }
 
-            trace.mark(.requestSent)
             var sawDone = false
-            do {
-                try client.streamTurn(channel: .voice, prompt: prompt, token: token) { e in
-                    switch e.kind {
-                    case .ack: trace.mark(.ack)
-                    case .sentence:
-                        trace.mark(.firstSentence)
-                        queue.enqueue(e.text ?? "")
-                    case .done:
-                        trace.mark(.done)
-                        sawDone = true
-                    default: break
+            var sawSentence = false
+            var finished = false
+            var failure: Error?
+            trace.mark(.requestSent)
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    try client.streamTurn(channel: .voice, prompt: prompt, token: token) { e in
+                        DispatchQueue.main.async {
+                            switch e.kind {
+                            case .ack: trace.mark(.ack)
+                            case .sentence:
+                                trace.mark(.firstSentence)
+                                sawSentence = true
+                                queue.enqueue(e.text ?? "")
+                            case .done:
+                                trace.mark(.done)
+                                sawDone = true
+                            default: break
+                            }
+                        }
+                    }
+                    DispatchQueue.main.async { finished = true }
+                } catch {
+                    DispatchQueue.main.async {
+                        failure = error
+                        finished = true
                     }
                 }
-            } catch {
-                print("voice-bench: turn \(i) failed: \(error.localizedDescription)")
-                queue.stop()
+            }
+            _ = pump(until: { finished }, timeout: turnTimeout)
+            if sawSentence, failure == nil {
+                _ = pump(until: { firstAudio }, timeout: firstAudioTimeout)
+            }
+            // Resets the queue for the next iteration: without this, a
+            // queue still "playing" from this turn would just accumulate
+            // every later turn's sentences as pending.
+            queue.stop()
+            if let failure {
+                print("voice-bench: turn \(i) failed: \(failure.localizedDescription)")
                 continue
             }
-            // Resets the queue for the next iteration regardless of whether
-            // this run loop ever pumps long enough for the engine's `done`
-            // callback to arrive (see the type doc comment on why that
-            // callback may never fire headlessly) — without this, a queue
-            // still "playing" from this turn would just accumulate every
-            // later turn's sentences as pending and never play any of them.
-            queue.stop()
             print(trace.logLine(turnID: "bench-\(i)"))
             if sawDone { traces.append(trace) }
         }
 
-        print("voice-bench: \(traces.count)/\(n) turns completed")
+        print("voice-bench: \(traces.count)/\(opts.n) turns completed")
         guard !traces.isEmpty else { return 1 }
         for (label, stats) in VoiceTurnAggregator.aggregate(traces) {
             print(String(format: "  %@: n=%d min=%.0fms median=%.0fms p90=%.0fms max=%.0fms",
                          label, stats.count, stats.minMs, stats.medianMs, stats.p90Ms, stats.maxMs))
         }
         return 0
+    }
+
+    /// Runs the main run loop (which also drains the main dispatch queue
+    /// and main-actor work) until `done()` or the timeout. True if done.
+    private static func pump(until done: () -> Bool, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !done() {
+            if Date() >= deadline { return false }
+            RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return true
     }
 }

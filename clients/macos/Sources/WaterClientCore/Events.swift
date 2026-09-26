@@ -11,18 +11,33 @@ public enum Channel: String {
 
 /// One NDJSON event from POST /v1/turns, mirroring runtime.Event:
 /// `{"kind": "...", "text": "...", "approval_id": "...", "action": "...",
-/// "risk": "...", "payload_hash": "...", "error": "..."}`.
+/// "risk": "...", "payload_hash": "...", "read_back": "...", "error": "...",
+/// "step_id": "...", "tool": "...", "label": "...", "status": "..."}`.
 ///
-/// `approval_required` carries `action`, `risk` and `payload_hash` (enough to
-/// decide it via POST /v1/approvals/{id}/decision) and is best-effort: it
-/// covers only approvals this turn's own model queued while it was running.
-/// Refresh GET /v1/approvals on `done` for everything else.
+/// `approval_required` carries `action`, `risk`, `payload_hash` (enough to
+/// decide it via POST /v1/approvals/{id}/decision) and `read_back`, the
+/// code-built text to show or speak before asking yes or no. It is
+/// best-effort: it covers approvals this turn staged (a model tool call
+/// queued while its model ran, or a Tier-0 write intent) and a spoken yes
+/// that needs a tap. Refresh GET /v1/approvals on `done` for everything else.
+///
+/// `tool_start`/`tool_end` bracket one tool call the model made during this
+/// turn (V-events): the same `step_id` on both, the function id in `tool`
+/// (empty when the daemon didn't recognise it), a code-built `label` that
+/// never contains the call's arguments, and on `tool_end` a `status` of
+/// ok, queued, denied or error. The label is fixed text by construction;
+/// show it as plain text anyway, like every other string here.
 ///
 /// Every stream ends with exactly one terminal event, `done` or `error`;
 /// nothing follows it (the daemon's turnSink closes after it).
 public struct TurnEvent: Decodable, Equatable {
     public enum Kind: Equatable {
         case ack, delta, sentence, approvalRequired
+        /// This turn is waiting for another turn's model call to finish
+        /// (runtime.EventQueued): at most once, after ack, before any delta.
+        case queued
+        /// A tool call started / ended (see the type's doc comment).
+        case toolStart, toolEnd
         /// The router's handoff acknowledgement on a non-voice channel
         /// (Design §11.4 step 6, internal/nervous/nervous.go's emitHandoff
         /// doc comment): today the daemon still sends a zero-text `ack` for
@@ -40,6 +55,9 @@ public struct TurnEvent: Decodable, Equatable {
             case "delta": self = .delta
             case "sentence": self = .sentence
             case "approval_required": self = .approvalRequired
+            case "queued": self = .queued
+            case "tool_start": self = .toolStart
+            case "tool_end": self = .toolEnd
             case "handoff": self = .handoff
             case "done": self = .done
             case "error": self = .error
@@ -54,24 +72,44 @@ public struct TurnEvent: Decodable, Equatable {
     public var action: String?
     public var risk: String?
     public var payloadHash: String?
+    /// For `approval_required`: approvals.ReadBack, built by the daemon's
+    /// code from the envelope's payload. Nil from an older daemon.
+    public var readBack: String?
     public var error: String?
+    /// For `tool_start`/`tool_end`: the step both events share.
+    public var stepID: String?
+    /// For `tool_start`/`tool_end`: the function id, e.g. "gcal.list_events".
+    public var tool: String?
+    /// For `tool_start`/`tool_end`: what to show while it runs.
+    public var label: String?
+    /// For `tool_end`: "ok", "queued", "denied" or "error" (kept as the raw
+    /// string, so a future status decodes too).
+    public var status: String?
 
     public init(kind: Kind, text: String? = nil, approvalID: String? = nil,
                 action: String? = nil, risk: String? = nil, payloadHash: String? = nil,
-                error: String? = nil) {
+                readBack: String? = nil, error: String? = nil,
+                stepID: String? = nil, tool: String? = nil, label: String? = nil, status: String? = nil) {
         self.kind = kind
         self.text = text
         self.approvalID = approvalID
         self.action = action
         self.risk = risk
         self.payloadHash = payloadHash
+        self.readBack = readBack
         self.error = error
+        self.stepID = stepID
+        self.tool = tool
+        self.label = label
+        self.status = status
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, text, error, action, risk
+        case kind, text, error, action, risk, tool, label, status
         case approvalID = "approval_id"
         case payloadHash = "payload_hash"
+        case readBack = "read_back"
+        case stepID = "step_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -82,7 +120,12 @@ public struct TurnEvent: Decodable, Equatable {
         action = try c.decodeIfPresent(String.self, forKey: .action)
         risk = try c.decodeIfPresent(String.self, forKey: .risk)
         payloadHash = try c.decodeIfPresent(String.self, forKey: .payloadHash)
+        readBack = try c.decodeIfPresent(String.self, forKey: .readBack)
         error = try c.decodeIfPresent(String.self, forKey: .error)
+        stepID = try c.decodeIfPresent(String.self, forKey: .stepID)
+        tool = try c.decodeIfPresent(String.self, forKey: .tool)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        status = try c.decodeIfPresent(String.self, forKey: .status)
     }
 
     /// For `approval_required`: the queued action's name (e.g.

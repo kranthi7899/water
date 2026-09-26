@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -42,12 +43,67 @@ func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ranked := decisions.Rank(open)
-	if ranked == nil {
-		// No cards is always `[]` on the wire, never `null`: a typed client
-		// decoding an array (Swift's JSONDecoder) rejects null.
-		ranked = []*decisions.Card{}
+	staged, err := d.stagedCardViews(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	writeJSON(w, http.StatusOK, ranked)
+	// No cards is always `[]` on the wire, never `null`: a typed client
+	// decoding an array (Swift's JSONDecoder) rejects null.
+	out := make([]decisionCardView, 0, len(ranked))
+	for _, c := range ranked {
+		v := decisionCardView{Card: c}
+		if cs, ok := staged[c.ID]; ok {
+			v.CardState = &cs
+		}
+		out = append(out, v)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// decisionCardView is one card as GET /v1/decisions returns it: the card's
+// own fields, unchanged (Go names, as before), plus card_state when the
+// card was staged (V-ui2, docs/slices/V.md D3), so a client can show
+// "staged, awaiting your yes" instead of offering to stage it again.
+// Dismissed cards never appear, so card_state is only ever "staged".
+type decisionCardView struct {
+	*decisions.Card
+	CardState *cardStateView `json:"card_state,omitempty"`
+}
+
+// cardStateView is a staged card's record: the envelope it waits on and
+// that envelope's status now (pending until answered; an edit re-points the
+// card at the new envelope, see handleEditApproval). approval_status is
+// empty when the envelope can't be read.
+type cardStateView struct {
+	Status         string    `json:"status"`
+	ApprovalID     string    `json:"approval_id"`
+	ApprovalStatus string    `json:"approval_status,omitempty"`
+	StagedAt       time.Time `json:"staged_at"`
+}
+
+// stagedCardViews reads every staged card's state and its envelope's
+// current status (stale envelopes are expired first, as the approvals list
+// does, so a lapsed one never reads as pending).
+func (d *Daemon) stagedCardViews(ctx context.Context) (map[string]cardStateView, error) {
+	staged, err := d.cfg.Store.StagedCardStates(ctx)
+	if err != nil || len(staged) == 0 {
+		return nil, err
+	}
+	if err := d.cfg.Approvals.ExpireStale(ctx); err != nil {
+		return nil, err
+	}
+	out := make(map[string]cardStateView, len(staged))
+	for id, cs := range staged {
+		v := cardStateView{Status: cs.Status, ApprovalID: cs.ApprovalID, StagedAt: cs.DecidedAt}
+		if cs.ApprovalID != "" {
+			if env, err := d.cfg.Approvals.Get(ctx, cs.ApprovalID); err == nil {
+				v.ApprovalStatus = string(env.Status)
+			}
+		}
+		out[id] = v
+	}
+	return out, nil
 }
 
 // handleEmailDecisionReport renders one open decision card as a

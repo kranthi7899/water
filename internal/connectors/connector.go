@@ -37,6 +37,24 @@ type Function struct {
 	// External marks output that carries content written by others, which
 	// must be treated as untrusted data downstream.
 	External bool
+	// Activity, optional, is the plain CEO-facing line a client shows while
+	// this function runs ("Checking your calendar"), in a tool_start /
+	// tool_end step (docs/slices/V.md §7.4 V-events). It is fixed text
+	// written here, never built from a call's arguments. Empty falls back
+	// to Description (see Label).
+	Activity string
+}
+
+// Label is what a client shows for a running call of f: Activity, else
+// Description, else fallback (the caller passes the function id).
+func (f Function) Label(fallback string) string {
+	if s := strings.TrimSpace(f.Activity); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(f.Description); s != "" {
+		return s
+	}
+	return fallback
 }
 
 // Connector is implemented once per upstream tool.

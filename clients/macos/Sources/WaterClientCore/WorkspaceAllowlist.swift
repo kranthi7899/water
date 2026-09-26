@@ -72,6 +72,10 @@ public enum WorkspaceAllowlist {
         route("GET", "/v1/approvals", query: ["status", "kind", "limit"]),
         route("GET", "/v1/approvals/{id}"),
         route("POST", "/v1/approvals/{id}/decision"),
+        // V-ui2: approval edit (voids the envelope, stages a new pending
+        // one; nothing runs). Added by hand here, in api.js and in the Go
+        // pin test.
+        route("POST", "/v1/approvals/{id}/edit"),
         route("GET", "/v1/threads"),
         route("POST", "/v1/threads"),
         route("POST", "/v1/threads/anchor"),
@@ -147,6 +151,19 @@ public enum WorkspaceAllowlist {
         isAlnum(s) || s == "/" || s == "-" || s == "_" || s == "."
     }
 
+    /// The page's views (`app.js` VIEWS), for `window.water.open(view, id)`
+    /// calls made natively.
+    public static let pageViews: Set<String> = ["today", "decisions", "drafts", "approvals", "threads", "meetings"]
+
+    /// Whether native code may ask the page to open `view` at `id` (the
+    /// Activity HUD's Edit, a tapped notification). Both travel as
+    /// `callAsyncJavaScript` arguments, never string-built JS; this keeps
+    /// them to known views and daemon ids anyway. A nil id opens the view's
+    /// list (a tapped "and N more" notification opens Today).
+    public static func isOpenTarget(view: String, id: String?) -> Bool {
+        pageViews.contains(view) && (id.map(isID) ?? true)
+    }
+
     /// Every id the daemon hands the UI: `env_…`, `thr_…`, `card-…`, task ids.
     static func isID(_ s: String) -> Bool {
         !s.isEmpty && s.count <= 128 && s.unicodeScalars.allSatisfy { isAlnum($0) || $0 == "_" || $0 == "-" }
@@ -185,21 +202,66 @@ public enum WorkspaceAllowlist {
 /// A message the workspace page posts to the native `water` script message
 /// handler (`window.webkit.messageHandlers.water.postMessage(...)`). The
 /// page is untrusted, so this is a closed set: anything that isn't exactly
-/// one of these shapes is ignored.
+/// one of these shapes is ignored (V-ui2: the bar's hold-to-talk mic).
 public enum WorkspaceMessage: Equatable {
-    /// The page's mic button: toggle push-to-talk, as the menu's "Talk to
-    /// Water" does.
-    case mic
+    /// The bar's mic was pressed: start listening, and send the transcript
+    /// as a voice turn into `thread` (`POST /v1/turns` with `thread_id`,
+    /// native only). Exactly `{type: "mic-down", thread: "thr_<hex>"}`.
+    case micDown(thread: String)
+    /// The bar's mic was released: stop listening and send. Exactly
+    /// `{type: "mic-up"}`.
+    case micUp
 
     public static let handlerName = "water"
 
     /// `body` is what WebKit hands over (a JSON-like Foundation value).
     public static func parse(_ body: Any) -> WorkspaceMessage? {
-        guard let dict = body as? [String: Any], dict.count == 1, let type = dict["type"] as? String else { return nil }
+        guard let dict = body as? [String: Any], let type = dict["type"] as? String else { return nil }
         switch type {
-        case "mic": return .mic
-        default: return nil
+        case "mic-down":
+            guard dict.count == 2, let thread = dict["thread"] as? String, isThreadID(thread) else { return nil }
+            return .micDown(thread: thread)
+        case "mic-up":
+            guard dict.count == 1 else { return nil }
+            return .micUp
+        default:
+            return nil
         }
+    }
+
+    /// `^thr_[0-9a-f]+$` (what the daemon's store mints), at most 64 hex
+    /// digits. The daemon checks the same shape again on `thread_id`.
+    public static func isThreadID(_ s: String) -> Bool {
+        guard s.hasPrefix("thr_") else { return false }
+        let hex = s.unicodeScalars.dropFirst(4)
+        return !hex.isEmpty && hex.count <= 64 && hex.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+    }
+}
+
+/// Which workspace thread the next voice transcript belongs to (V-ui2).
+/// Set only by the page's mic-down; any other capture (the voice hotkey,
+/// the menu's Talk) clears it, so a hotkey question never lands in a thread
+/// the page opened earlier. `take()` hands it out once, for exactly one
+/// transcript.
+public struct WorkspaceVoiceTarget: Equatable {
+    public private(set) var thread: String?
+
+    public init() {}
+
+    /// The page's mic went down for `thread` (already shape-checked by
+    /// `WorkspaceMessage.parse`).
+    public mutating func micDown(thread: String) {
+        self.thread = WorkspaceMessage.isThreadID(thread) ? thread : nil
+    }
+
+    /// A capture that didn't come from the page started, or the capture
+    /// failed: nothing goes to a thread.
+    public mutating func clear() { thread = nil }
+
+    /// The transcript is ready: the thread it goes to (if any), once.
+    public mutating func take() -> String? {
+        defer { thread = nil }
+        return thread
     }
 }
 

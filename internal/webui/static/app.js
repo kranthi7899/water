@@ -1,9 +1,11 @@
-// app.js: the workspace UI's views (Today, Decisions, Approvals, Threads,
-// Meetings). Rendering goes through dom.js only; every server string is a
-// text node. Nothing here executes an outward action by itself: a decision
-// card is staged into a PENDING approval envelope, and only the Approvals
-// view's explicit two-step confirm answers that envelope "yes", through the
-// same approval-decision endpoint every other client uses (api.js).
+// app.js: the workspace UI's views (Today, Decisions, Drafts, Approvals,
+// Threads, Meetings) and the bottom bar. Rendering goes through dom.js only;
+// every server string is a text node. Nothing here executes an outward
+// action by itself: a decision card is staged into a PENDING approval
+// envelope, and only an explicit, separate confirm click answers that
+// envelope "yes", through the same approval-decision endpoint every other
+// client uses (api.js). Editing an envelope voids it and stages a new one,
+// which again needs its own yes.
 'use strict';
 
 (function () {
@@ -12,7 +14,12 @@
 
   const main = document.getElementById('main');
   const toastEl = document.getElementById('toast');
-  const VIEWS = ['today', 'decisions', 'approvals', 'threads', 'meetings'];
+  const VIEWS = ['today', 'decisions', 'drafts', 'approvals', 'threads', 'meetings'];
+  // Outward-message actions (docs/slices/V.md D2): what Drafts lists, and
+  // the actions whose "executed" reads as "sent".
+  const OUTWARD = ['gmail.send_message', 'twinlink.send_message'];
+  // The shape the store mints and the native mic handler accepts.
+  const THREAD_ID = /^thr_[0-9a-f]+$/;
 
   const state = {
     view: 'today',
@@ -23,6 +30,10 @@
     // per thread so they survive the re-fetch on done.
     threadNotices: new Map(),
     streaming: null, // {threadId, taskId}
+    // The thread currently rendered in the Threads view: where the bottom
+    // bar posts, and where a streaming reply is drawn.
+    threadUI: null, // {id, title, log, notices}
+    expectHash: null,
   };
 
   // ---------- small helpers ----------
@@ -52,6 +63,15 @@
     return h('span', { class: 'badge' + (kind ? ' ' + kind : '') }, text);
   }
 
+  // armed disables a confirm button for a moment after it appears, so a
+  // double-click on the button it replaced can't land on it: approving stays
+  // two deliberate clicks (D3).
+  function armed(b) {
+    b.disabled = true;
+    setTimeout(() => { b.disabled = false; }, 600);
+    return b;
+  }
+
   function button(label, onClick, cls, extra) {
     return h('button', Object.assign({ type: 'button', class: cls || 'secondary', on: { click: onClick } }, extra || {}), label);
   }
@@ -71,6 +91,20 @@
 
   function current(gen) { return gen === state.gen; }
 
+  function isOutward(action) { return OUTWARD.includes(String(action || '')); }
+
+  // statusLabel is an envelope's status as shown: an executed outward
+  // message reads "sent".
+  function statusLabel(status, action) {
+    if (status === 'executed' && isOutward(action)) return 'sent';
+    return status || '';
+  }
+
+  function statusBadge(env) {
+    const s = get(env, 'status');
+    return badge(statusLabel(s, get(env, 'action')), 'status-' + s);
+  }
+
   // ---------- routing ----------
 
   function parseHash() {
@@ -85,16 +119,31 @@
     return { view, param };
   }
 
+  // go renders view/param now and resolves once it has; the hashchange the
+  // new hash causes is recognised and skipped, so nothing renders twice.
   function go(view, param) {
     const hash = '#' + view + (param ? '/' + encodeURIComponent(param) : '');
-    if (location.hash === hash) render();
-    else location.hash = hash;
+    if (location.hash !== hash) {
+      state.expectHash = hash;
+      location.hash = hash;
+    }
+    return render();
+  }
+
+  function onHashChange() {
+    if (state.expectHash && location.hash === state.expectHash) {
+      state.expectHash = null;
+      return;
+    }
+    state.expectHash = null;
+    render();
   }
 
   function render() {
     const { view, param } = parseHash();
     state.view = view;
     state.param = param;
+    state.threadUI = null;
     const gen = ++state.gen;
     for (const b of document.querySelectorAll('.nav')) {
       const on = b.dataset.view === view;
@@ -104,16 +153,18 @@
     const container = h('div', { class: 'view view-' + view });
     replace(main, container);
     container.appendChild(h('p', { class: 'loading' }, 'Loading…'));
-    const fn = { today: viewToday, decisions: viewDecisions, approvals: viewApprovals, threads: viewThreads, meetings: viewMeetings }[view];
-    fn(container, param, gen).catch((err) => {
+    updateBarTarget();
+    const fn = { today: viewToday, decisions: viewDecisions, drafts: viewDrafts, approvals: viewApprovals, threads: viewThreads, meetings: viewMeetings }[view];
+    return fn(container, param, gen).catch((err) => {
       if (current(gen)) replace(container, errorBox('Could not load ' + view, err));
-    });
+    }).finally(() => { if (current(gen)) updateBarTarget(); });
   }
 
   async function openThreadAbout(type, id) {
     try {
       const res = await api.anchorThread(type, id);
       go('threads', get(res && res.thread, 'id'));
+      refreshRecent();
     } catch (err) {
       toast('Could not open a thread: ' + errText(err), 'bad');
     }
@@ -166,11 +217,122 @@
     sched.appendChild(sl);
 
     const day = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
-    replace(c, header('Today', day), h('div', { class: 'grid-2' }, needs, sched));
+    replace(c, header('Today', day), h('div', { class: 'stack' }, needs, sched));
   }
 
   function readinessLabel(r) {
     return { ready: 'Ready', missing_info: 'Missing info', blocked: 'Blocked' }[r] || String(r);
+  }
+
+  // ---------- payload forms (staging and editing) ----------
+
+  // payloadFields decides the editable fields for one staged action: the
+  // card's own payload keys when it carries one, the usual to/subject/body
+  // for a mail action, or a raw JSON box otherwise.
+  function payloadFields(action) {
+    const p = get(action, 'Payload', 'payload');
+    const fn = get(action, 'Function', 'function') || '';
+    if (p && typeof p === 'object' && Object.keys(p).length) return fieldsOf(p);
+    if (/\.(send_message|draft_message|draft_for_review)$/.test(fn)) {
+      return [{ key: 'to', kind: 'list', value: [] }, { key: 'subject', kind: 'text', value: '' }, { key: 'body', kind: 'long', value: '' }];
+    }
+    return [{ key: '', kind: 'json', value: {} }];
+  }
+
+  function fieldsOf(p) {
+    return Object.keys(p).map((k) => ({ key: k, kind: kindOf(p[k]), value: p[k] }));
+  }
+
+  function kindOf(v) {
+    if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return 'list';
+    if (typeof v === 'string') return (v.length > 80 || v.includes('\n')) ? 'long' : 'text';
+    return 'json';
+  }
+
+  let formSeq = 0;
+
+  // payloadInputs builds one labelled input per field into form and
+  // returns read(), which gives the payload back (throwing on bad JSON).
+  function payloadInputs(form, fields) {
+    const inputs = [];
+    const prefix = 'f' + (++formSeq) + '-';
+    fields.forEach((f, i) => {
+      const fid = prefix + i;
+      let input;
+      if (f.kind === 'long' || f.kind === 'json') {
+        input = h('textarea', { id: fid, rows: f.kind === 'json' ? 6 : 8, spellcheck: f.kind === 'json' ? 'false' : 'true' });
+        input.value = f.kind === 'json' ? JSON.stringify(f.value, null, 2) : String(f.value || '');
+      } else {
+        input = h('input', { id: fid, type: 'text', autocomplete: 'off' });
+        input.value = f.kind === 'list' ? list(f.value).join(', ') : String(f.value || '');
+      }
+      inputs.push({ f, input });
+      const label = f.key ? f.key + (f.kind === 'list' ? ' (comma separated)' : f.kind === 'json' ? ' (JSON)' : '') : 'Payload (JSON)';
+      form.appendChild(h('label', { for: fid }, label));
+      form.appendChild(input);
+    });
+    return function read() {
+      let payload = {};
+      for (const { f, input } of inputs) {
+        let v;
+        if (f.kind === 'list') v = input.value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+        else if (f.kind === 'json') v = JSON.parse(input.value || 'null');
+        else v = input.value;
+        if (f.key) payload[f.key] = v; else payload = v;
+      }
+      return payload;
+    };
+  }
+
+  // editForm edits a pending envelope (docs/slices/V.md D3): the old one is
+  // voided and a new pending one is staged, which needs its own yes.
+  // onEdited receives the new envelope.
+  function editForm(env, onEdited, onCancel) {
+    const form = h('div', { class: 'form' }, h('h3', null, 'Edit ' + (get(env, 'action') || '')),
+      h('p', { class: 'muted small' }, 'Saving replaces this approval with a new one. Nothing is sent until you approve the new one.'));
+    const read = payloadInputs(form, fieldsOf(get(env, 'payload') || {}));
+    const msg = h('div');
+    const save = button('Save as a new approval', async () => {
+      let payload;
+      try { payload = read(); } catch (err) {
+        replace(msg, h('div', { class: 'error' }, 'The payload is not valid JSON: ' + err.message));
+        return;
+      }
+      save.disabled = true;
+      try {
+        const res = await api.editApproval(get(env, 'id'), get(env, 'payload_hash'), payload);
+        toast('Saved. The old approval was voided; review the new one.', 'warn');
+        refreshCounts();
+        onEdited(get(res, 'envelope') || {});
+      } catch (err) {
+        save.disabled = false;
+        replace(msg, errorBox(err.status === 409 ? 'This approval changed or was already answered' : 'Could not save the edit', err));
+      }
+    }, 'primary');
+    form.appendChild(msg);
+    form.appendChild(h('div', { class: 'actions' }, save, button('Cancel', onCancel, 'ghost')));
+    return form;
+  }
+
+  // decisionResult renders api.decideApproval's answer.
+  function decisionResult(res, action) {
+    const done = h('div', { class: get(res, 'error') ? 'error' : 'ok' });
+    if (get(res, 'answer') === 'yes') {
+      done.appendChild(h('p', null, get(res, 'executed')
+        ? (isOutward(action) ? 'Approved and sent.' : 'Approved and done.')
+        : 'Approved, but it did not run.'));
+    } else {
+      done.appendChild(h('p', null, 'Denied. Nothing was done.'));
+    }
+    if (get(res, 'error')) done.appendChild(h('p', null, 'Error: ' + get(res, 'error')));
+    if (get(res, 'outcome_unknown')) {
+      done.appendChild(h('p', { class: 'warn-text' }, 'The outcome is unknown: it may have happened. Check before asking for it again.'));
+    }
+    if (get(res, 'output') !== undefined) {
+      done.appendChild(h('details', null, h('summary', null, 'Result'),
+        h('pre', { class: 'mono' }, JSON.stringify(get(res, 'output'), null, 2))));
+    }
+    return done;
   }
 
   // ---------- Decisions ----------
@@ -183,26 +345,31 @@
     if (!cards.length) body.appendChild(empty('No open decisions.'));
     let focus = null;
     for (const card of cards) {
-      const el = decisionCard(card);
+      const el = decisionCard(card, gen);
       if (param && get(card, 'ID', 'id') === param) { el.classList.add('focus'); focus = el; }
       body.appendChild(el);
     }
-    replace(c, header('Decisions', 'Staging a card creates a pending approval. Nothing is sent until you confirm it in Approvals.'), body);
+    replace(c, header('Decisions', 'Approving a card is two steps: stage it, read exactly what will happen, then confirm. Nothing is sent before you confirm.'), body);
     if (focus) focus.scrollIntoView({ block: 'start' });
   }
 
-  function decisionCard(card) {
+  function decisionCard(card, gen) {
     const id = get(card, 'ID', 'id');
     const isUntrusted = Boolean(get(card, 'Untrusted', 'untrusted'));
     const sev = get(card, 'Severity', 'severity');
     const readiness = get(card, 'Readiness', 'readiness');
     const deadline = get(card, 'Deadline', 'deadline');
+    const cs = get(card, 'card_state');
+    const stagedID = cs && get(cs, 'status') === 'staged' ? get(cs, 'approval_id') : '';
+    const stagedStatus = stagedID ? get(cs, 'approval_status') : '';
+    const awaiting = stagedID && stagedStatus === 'pending';
     const status = h('div', { class: 'card-status' });
 
     const el = h('article', { class: 'card' },
       h('header', { class: 'card-head' },
         h('h2', null, get(card, 'Lead', 'lead') || get(card, 'Question', 'question') || id),
         h('div', { class: 'row-meta' },
+          awaiting ? badge('Staged, awaiting your yes', 'status-pending') : null,
           sev ? badge('Severity ' + sev, sev >= 3 ? 'hot' : '') : null,
           readiness ? badge(readinessLabel(readiness), 'ready-' + readiness) : null,
           isUntrusted ? badge('External content', 'warn') : null,
@@ -219,9 +386,8 @@
           h('span', { class: 'ev-text' }, get(ev, 'Text', 'text') || ''),
           h('span', { class: 'ev-source' }, get(ev, 'Source', 'source') || '')));
       }
-      const sec = h('section', { class: 'card-sec' + (isUntrusted ? ' untrusted-sec' : '') },
-        h('h3', null, isUntrusted ? 'Evidence (includes external content, shown as text)' : 'Evidence'), ul);
-      el.appendChild(sec);
+      el.appendChild(h('section', { class: 'card-sec' + (isUntrusted ? ' untrusted-sec' : '') },
+        h('h3', null, isUntrusted ? 'Evidence (includes external content, shown as text)' : 'Evidence'), ul));
     }
 
     const options = list(get(card, 'Options', 'options'));
@@ -245,95 +411,113 @@
     el.appendChild(h('section', { class: 'card-sec' }, h('h3', null, 'Recommendation'),
       h('p', { class: rec ? '' : 'muted' }, rec || 'None: the evidence does not support one.')));
 
-    // Staged actions: each actionable one can be prepared and staged.
-    const actions = list(get(card, 'StagedActions', 'staged_actions'));
     const stageArea = h('div', { class: 'stage-area' });
     const actionRow = h('div', { class: 'actions' });
-    for (const a of actions) {
-      const fn = get(a, 'Function', 'function') || '';
-      if (get(a, 'Actionable', 'actionable')) {
-        actionRow.appendChild(button('Prepare ' + fn, () => {
-          replace(stageArea, stageForm(id, a, status));
-        }, 'primary'));
-      } else {
-        actionRow.appendChild(h('span', { class: 'muted not-granted', title: 'The manifest does not grant this at level A yet' }, fn + ' (not granted)'));
+    if (!awaiting) {
+      // Staged actions: each actionable one can be prepared and staged.
+      for (const a of list(get(card, 'StagedActions', 'staged_actions'))) {
+        const fn = get(a, 'Function', 'function') || '';
+        if (get(a, 'Actionable', 'actionable')) {
+          actionRow.appendChild(button('Prepare ' + fn, () => {
+            replace(stageArea, stageForm(id, a, status, gen));
+          }, 'primary'));
+        } else {
+          actionRow.appendChild(h('span', { class: 'muted not-granted', title: 'The manifest does not grant this at level A yet' }, fn + ' (not granted)'));
+        }
       }
     }
     actionRow.appendChild(button('Open a thread about this', () => openThreadAbout('decision', id)));
-    actionRow.appendChild(button('Dismiss', () => replace(stageArea, dismissForm(id, el, status)), 'ghost'));
+    actionRow.appendChild(button('Reject', () => replace(stageArea, dismissForm(id, el, status)), 'ghost'));
     el.appendChild(actionRow);
     el.appendChild(stageArea);
     el.appendChild(status);
+
+    if (awaiting) {
+      // Staged earlier (this session or another): show that envelope's
+      // read-back and the confirm step, never a second staging.
+      replace(status, h('p', { class: 'muted' }, 'Loading the staged approval…'));
+      api.approval(stagedID).then((env) => {
+        if (current(gen)) replace(status, stagedPanel(env, status, gen, false));
+      }).catch((err) => {
+        if (current(gen)) replace(status, errorBox('Could not load the staged approval', err));
+      });
+    } else if (stagedID && stagedStatus) {
+      status.appendChild(h('p', { class: 'muted small' },
+        stagedStatus === 'executed'
+          ? 'Staged earlier, approved and done. You can stage it again.'
+          : 'Staged earlier; that approval was ' + stagedStatus + '. You can stage it again.'));
+    }
     return el;
   }
 
-  // payloadFields decides the editable fields for one staged action: the
-  // card's own payload keys when it carries one, the usual to/subject/body
-  // for a mail action, or a raw JSON box otherwise.
-  function payloadFields(action) {
-    const p = get(action, 'Payload', 'payload');
-    const fn = get(action, 'Function', 'function') || '';
-    if (p && typeof p === 'object' && Object.keys(p).length) {
-      return Object.keys(p).map((k) => ({ key: k, kind: kindOf(p[k]), value: p[k] }));
-    }
-    if (/\.(send_message|draft_message|draft_for_review)$/.test(fn)) {
-      return [{ key: 'to', kind: 'list', value: [] }, { key: 'subject', kind: 'text', value: '' }, { key: 'body', kind: 'long', value: '' }];
-    }
-    return [{ key: '', kind: 'json', value: {} }];
-  }
+  // stagedPanel is the second half of a card's approve (D3): the staged
+  // envelope's code-built read-back and the confirm. justStaged means the
+  // CEO clicked Stage a moment ago, so one more deliberate click confirms;
+  // a card found already staged on load asks "Approve…" then "Yes".
+  function stagedPanel(env, status, gen, justStaged) {
+    const id = get(env, 'id');
+    const action = get(env, 'action');
+    const out = h('div');
+    const actions = h('div', { class: 'actions' });
+    const panel = h('div', { class: 'ok staged' },
+      h('p', null, justStaged
+        ? 'Staged. Nothing has been sent. Read exactly what will happen, then confirm.'
+        : 'Staged, awaiting your yes. Nothing has been sent.'),
+      h('div', { class: 'readback' }, get(env, 'read_back') || ''),
+      actions, out);
 
-  function kindOf(v) {
-    if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return 'list';
-    if (typeof v === 'string') return (v.length > 80 || v.includes('\n')) ? 'long' : 'text';
-    return 'json';
-  }
-
-  function stageForm(cardId, action, status) {
-    const fn = get(action, 'Function', 'function') || '';
-    const fields = payloadFields(action);
-    const inputs = [];
-    const form = h('div', { class: 'form' }, h('h3', null, 'Prepare ' + fn));
-    fields.forEach((f, i) => {
-      const fid = 'f-' + cardId.replace(/[^a-zA-Z0-9_-]/g, '') + '-' + i;
-      let input;
-      if (f.kind === 'long' || f.kind === 'json') {
-        input = h('textarea', { id: fid, rows: f.kind === 'json' ? 6 : 8, spellcheck: f.kind === 'json' ? 'false' : 'true' });
-        input.value = f.kind === 'json' ? JSON.stringify(f.value, null, 2) : String(f.value || '');
-      } else {
-        input = h('input', { id: fid, type: 'text', autocomplete: 'off' });
-        input.value = f.kind === 'list' ? list(f.value).join(', ') : String(f.value || '');
-      }
-      inputs.push({ f, input });
-      const label = f.key ? f.key + (f.kind === 'list' ? ' (comma separated)' : f.kind === 'json' ? ' (JSON)' : '') : 'Payload (JSON)';
-      form.appendChild(h('label', { for: fid }, label));
-      form.appendChild(input);
+    // The confirm button starts disabled briefly so a double-click on the
+    // button it replaced can't land on it: approval stays two deliberate clicks.
+    const yes = () => armed(button(isOutward(action) ? 'Yes, send it' : 'Yes, approve and run', () => decide('yes'), 'primary'));
+    const edit = button('Edit', () => {
+      replace(out, editForm(env, (next) => replace(status, stagedPanel(next, status, gen, true)), () => replace(out)));
     });
-    const submit = button('Stage for approval', async () => {
-      let payload = {};
+    const openBtn = button('Open in Approvals', () => go('approvals', id), 'ghost');
+    function reset() {
+      if (justStaged) replace(actions, yes(), edit, openBtn);
+      else {
+        const approve = button('Approve…', () => {
+          replace(actions, h('span', { class: 'confirm-q' }, 'Run this now, exactly as read back above?'), yes(), button('Not yet', reset, 'ghost'));
+        }, 'primary');
+        replace(actions, approve, edit, openBtn);
+      }
+    }
+    async function decide(reply) {
+      for (const b of actions.querySelectorAll('button')) b.disabled = true;
       try {
-        for (const { f, input } of inputs) {
-          let v;
-          if (f.kind === 'list') v = input.value.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-          else if (f.kind === 'json') v = JSON.parse(input.value || 'null');
-          else v = input.value;
-          if (f.key) payload[f.key] = v; else payload = v;
-        }
+        const res = await api.decideApproval(id, get(env, 'payload_hash'), reply);
+        replace(actions);
+        replace(out, decisionResult(res, action));
+        refreshCounts();
       } catch (err) {
+        if (err.status === 409) {
+          toast('This approval changed since you opened it. Showing the current version.', 'warn');
+          if (current(gen)) render();
+          return;
+        }
+        for (const b of actions.querySelectorAll('button')) b.disabled = false;
+        replace(out, errorBox('Could not record your answer', err));
+      }
+    }
+    reset();
+    return panel;
+  }
+
+  function stageForm(cardId, action, status, gen) {
+    const fn = get(action, 'Function', 'function') || '';
+    const form = h('div', { class: 'form' }, h('h3', null, 'Prepare ' + fn));
+    const read = payloadInputs(form, payloadFields(action));
+    const submit = button('Stage for approval', async () => {
+      let payload;
+      try { payload = read(); } catch (err) {
         replace(status, h('div', { class: 'error' }, 'The payload is not valid JSON: ' + err.message));
         return;
       }
       submit.disabled = true;
       try {
         const res = await api.stageDecision(cardId, fn, payload);
-        const env = get(res, 'envelope') || {};
         replace(form);
-        replace(status,
-          h('div', { class: 'ok' },
-            h('p', null, get(res, 'status') === 'already_staged'
-              ? 'Already staged. This approval is still waiting for your confirmation.'
-              : 'Staged. Nothing has been sent: confirm it in Approvals.'),
-            h('div', { class: 'readback' }, get(env, 'read_back') || ''),
-            button('Review and confirm', () => go('approvals', get(res, 'approval_id')), 'primary')));
+        replace(status, stagedPanel(get(res, 'envelope') || {}, status, gen, get(res, 'status') !== 'already_staged'));
         refreshCounts();
       } catch (err) {
         submit.disabled = false;
@@ -344,26 +528,42 @@
     return form;
   }
 
+  // dismissForm is Reject (D3): the card is dismissed, with an optional
+  // reason. It never touches an envelope already staged from it.
   function dismissForm(cardId, cardEl, status) {
     const input = h('input', { type: 'text', placeholder: 'Reason (optional)', maxlength: 1000, autocomplete: 'off' });
-    const form = h('div', { class: 'form' }, h('label', null, 'Dismiss this decision?'), input);
-    const confirm = button('Dismiss', async () => {
+    const form = h('div', { class: 'form' }, h('label', null, 'Reject this decision?'), input);
+    const confirm = button('Reject', async () => {
       confirm.disabled = true;
       try {
         await api.dismissDecision(cardId, input.value.trim());
         cardEl.classList.add('gone');
-        replace(cardEl, h('p', { class: 'muted' }, 'Dismissed.'));
+        replace(cardEl, h('p', { class: 'muted' }, 'Rejected.'));
         refreshCounts();
       } catch (err) {
         confirm.disabled = false;
-        replace(status, errorBox('Could not dismiss', err));
+        replace(status, errorBox('Could not reject', err));
       }
     }, 'danger');
     form.appendChild(h('div', { class: 'actions' }, confirm, button('Keep', () => replace(form), 'ghost')));
     return form;
   }
 
-  // ---------- Approvals ----------
+  // ---------- Approvals and Drafts ----------
+
+  function approvalRow(e, selected, view) {
+    const id = get(e, 'id');
+    return h('li', null, h('button', {
+      type: 'button', class: 'row' + (selected ? ' selected' : ''), on: { click: () => go(view, id) },
+    },
+    h('span', { class: 'row-main' },
+      h('span', { class: 'row-title' }, get(e, 'action') || id),
+      h('span', { class: 'row-sub' }, get(e, 'summary') || ''),
+      h('span', { class: 'row-meta' },
+        statusBadge(e),
+        get(e, 'risk') ? badge('Risk ' + get(e, 'risk'), 'risk-' + get(e, 'risk')) : null,
+        h('span', { class: 'muted' }, fmtAgo(get(e, 'created_at')))))));
+  }
 
   async function viewApprovals(c, param, gen) {
     const tabs = h('div', { class: 'tabs', role: 'tablist' });
@@ -380,30 +580,44 @@
 
     const [envs] = await Promise.all([
       api.approvals(state.approvalTab, 100),
-      param ? renderApprovalDetail(detail, param, gen) : Promise.resolve(replace(detail, empty('Select an approval to review it.'))),
+      param ? renderApprovalDetail(detail, param, gen, 'approvals') : Promise.resolve(replace(detail, empty('Select an approval to review it.'))),
     ]);
     if (!current(gen)) return;
     const items = list(envs);
     if (state.approvalTab === 'pending') setCount('approvals', items.length);
     const ul = h('ul', { class: 'rows' });
     if (!items.length) listPane.appendChild(empty(state.approvalTab === 'pending' ? 'No approvals waiting.' : 'Nothing decided yet.'));
-    for (const e of items) {
-      const id = get(e, 'id');
-      ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row' + (id === param ? ' selected' : ''), on: { click: () => go('approvals', id) },
-      },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(e, 'action') || id),
-        h('span', { class: 'row-sub' }, get(e, 'summary') || ''),
-        h('span', { class: 'row-meta' },
-          badge(get(e, 'status') || '', 'status-' + get(e, 'status')),
-          get(e, 'risk') ? badge('Risk ' + get(e, 'risk'), 'risk-' + get(e, 'risk')) : null,
-          h('span', { class: 'muted' }, fmtAgo(get(e, 'created_at'))))))));
-    }
+    for (const e of items) ul.appendChild(approvalRow(e, get(e, 'id') === param, 'approvals'));
     listPane.appendChild(ul);
   }
 
-  async function renderApprovalDetail(pane, id, gen) {
+  // pendingDrafts is D2-A: the pending envelopes whose action is an outward
+  // message, one ?kind= call per action, merged oldest first.
+  async function pendingDrafts() {
+    const lists = await Promise.all(OUTWARD.map((k) => api.approvals('pending', 100, k)));
+    const all = [].concat(...lists.map(list));
+    all.sort((a, b) => String(get(a, 'created_at')).localeCompare(String(get(b, 'created_at'))));
+    return all;
+  }
+
+  async function viewDrafts(c, param, gen) {
+    const listPane = h('div', { class: 'list-pane' });
+    const detail = h('div', { class: 'detail-pane' });
+    replace(c, header('Drafts', 'Messages Water has written for you, waiting for your yes before they are sent. Gmail drafts saved straight to Gmail stay there and are not listed.'),
+      h('div', { class: 'split' }, listPane, detail));
+    const [items] = await Promise.all([
+      pendingDrafts(),
+      param ? renderApprovalDetail(detail, param, gen, 'drafts') : Promise.resolve(replace(detail, empty('Select a draft to read it before it is sent.'))),
+    ]);
+    if (!current(gen)) return;
+    setCount('drafts', items.length);
+    if (!items.length) listPane.appendChild(empty('No drafts waiting to be sent.'));
+    const ul = h('ul', { class: 'rows' });
+    for (const e of items) ul.appendChild(approvalRow(e, get(e, 'id') === param, 'drafts'));
+    listPane.appendChild(ul);
+  }
+
+  async function renderApprovalDetail(pane, id, gen, view) {
     let env;
     try {
       env = await api.approval(id);
@@ -413,6 +627,7 @@
     }
     if (!current(gen)) return;
     const status = get(env, 'status');
+    const action = get(env, 'action');
     const out = h('div', { class: 'result' });
     const expires = get(env, 'expires_at');
     const pending = status === 'pending';
@@ -427,46 +642,34 @@
     const refs = list(get(env, 'evidence_refs'));
 
     const actions = h('div', { class: 'actions' });
+    const threadBtn = button('Open a thread about this', () => openThreadAbout('approval', id));
+    let reset = () => replace(actions, threadBtn);
     if (pending) {
       const approve = button('Approve…', () => {
         replace(actions,
-          h('span', { class: 'confirm-q' }, 'Run this now, exactly as read back above?'),
-          button('Yes, approve and run', () => decide('yes'), 'primary'),
-          button('Not yet', () => { replace(actions, approve, deny, threadBtn); }, 'ghost'));
+          h('span', { class: 'confirm-q' }, isOutward(action) ? 'Send this now, exactly as read back above?' : 'Run this now, exactly as read back above?'),
+          armed(button(isOutward(action) ? 'Yes, send it' : 'Yes, approve and run', () => decide('yes'), 'primary')),
+          button('Not yet', () => reset(), 'ghost'));
       }, 'primary');
+      const edit = button('Edit', () => {
+        replace(out, editForm(env, (next) => go(view, get(next, 'id')), () => replace(out)));
+      });
       const deny = button('Deny', () => decide('no'), 'danger');
-      actions.appendChild(approve);
-      actions.appendChild(deny);
+      reset = () => replace(actions, approve, edit, deny, threadBtn);
     }
-    const threadBtn = button('Open a thread about this', () => openThreadAbout('approval', id));
-    actions.appendChild(threadBtn);
+    reset();
 
     async function decide(reply) {
       for (const b of actions.querySelectorAll('button')) b.disabled = true;
       try {
         const res = await api.decideApproval(id, get(env, 'payload_hash'), reply);
-        const done = h('div', { class: get(res, 'error') ? 'error' : 'ok' });
-        const answer = get(res, 'answer');
-        if (answer === 'yes') {
-          done.appendChild(h('p', null, get(res, 'executed') ? 'Approved and done.' : 'Approved, but it did not run.'));
-        } else {
-          done.appendChild(h('p', null, 'Denied. Nothing was done.'));
-        }
-        if (get(res, 'error')) done.appendChild(h('p', null, 'Error: ' + get(res, 'error')));
-        if (get(res, 'outcome_unknown')) {
-          done.appendChild(h('p', { class: 'warn-text' }, 'The outcome is unknown: it may have happened. Check before asking for it again.'));
-        }
-        if (get(res, 'output') !== undefined) {
-          done.appendChild(h('details', null, h('summary', null, 'Result'),
-            h('pre', { class: 'mono' }, JSON.stringify(get(res, 'output'), null, 2))));
-        }
-        replace(out, done);
+        replace(out, decisionResult(res, action));
         replace(actions, threadBtn);
         refreshCounts();
       } catch (err) {
         if (err.status === 409) {
           toast('This approval changed since you opened it. Showing the current version.', 'warn');
-          if (current(gen)) renderApprovalDetail(pane, id, gen);
+          if (current(gen)) renderApprovalDetail(pane, id, gen, view);
           return;
         }
         for (const b of actions.querySelectorAll('button')) b.disabled = false;
@@ -477,9 +680,9 @@
     replace(pane,
       h('article', { class: 'approval' },
         h('header', { class: 'card-head' },
-          h('h2', null, get(env, 'action') || id),
+          h('h2', null, action || id),
           h('div', { class: 'row-meta' },
-            badge(status || '', 'status-' + status),
+            statusBadge(env),
             get(env, 'risk') ? badge('Risk ' + get(env, 'risk'), 'risk-' + get(env, 'risk')) : null,
             get(env, 'origin') ? badge('Origin ' + get(env, 'origin')) : null,
             h('span', { class: 'muted' }, 'Created ' + fmtDate(get(env, 'created_at'))),
@@ -508,6 +711,7 @@
         try {
           const t = await api.createThread(input.value.trim());
           go('threads', get(t, 'id'));
+          refreshRecent();
         } catch (err) { toast('Could not create a thread: ' + errText(err), 'bad'); }
       };
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
@@ -515,14 +719,15 @@
       input.focus();
     }, 'primary');
     const newArea = h('div');
-    replace(c, header('Threads', null, newBtn), newArea, h('div', { class: 'split' }, listPane, detail));
+    replace(c, header('Threads', 'Type in the bar below, or hold the mic, to talk in the open thread.', newBtn), newArea, h('div', { class: 'split' }, listPane, detail));
 
     const [threads] = await Promise.all([
       api.threads(),
-      param ? renderThreadDetail(detail, param, gen) : Promise.resolve(replace(detail, empty('Select a thread, or open one from a decision, approval or meeting.'))),
+      param ? renderThreadDetail(detail, param, gen) : Promise.resolve(replace(detail, empty('Select a thread, or open one from a decision, approval or meeting. A message typed below with no thread open starts a new one.'))),
     ]);
     if (!current(gen)) return;
     const items = list(threads);
+    renderRecent(items);
     if (!items.length) listPane.appendChild(empty('No threads yet.'));
     const ul = h('ul', { class: 'rows' });
     for (const t of items) {
@@ -552,7 +757,7 @@
     return h('div', { class: 'notice' },
       h('strong', null, 'Approval needed: '), n.action || '',
       h('div', { class: 'readback' }, n.readBack || ''),
-      button('Review', () => go('approvals', n.id), 'primary'));
+      button('Review', () => go(isOutward(n.action) ? 'drafts' : 'approvals', n.id), 'primary'));
   }
 
   async function renderThreadDetail(pane, id, gen) {
@@ -581,91 +786,222 @@
     }
     const log = h('div', { class: 'messages' });
     for (const m of msgs) {
-      log.appendChild(messageEl(get(m, 'role'), get(m, 'text'), fmtDate(get(m, 'created_at'))).el);
+      const ch = get(m, 'channel');
+      const meta = (ch === 'voice' ? 'voice · ' : '') + fmtDate(get(m, 'created_at'));
+      log.appendChild(messageEl(get(m, 'role'), get(m, 'text'), meta).el);
     }
-    if (!msgs.length) log.appendChild(empty('No messages yet.'));
+    if (!msgs.length) log.appendChild(empty('No messages yet. Type below, or hold the mic.'));
     const notices = h('div', { class: 'notices' });
     for (const n of state.threadNotices.get(id) || []) notices.appendChild(approvalNotice(n));
 
-    const input = h('textarea', { rows: 3, placeholder: 'Ask your twin about this…', 'aria-label': 'Message' });
-    const send = button('Send', () => submit(), 'primary');
-    const cancel = button('Stop', async () => {
+    replace(pane, h('article', { class: 'thread' }, parts, log, notices));
+    state.threadUI = { id: get(t, 'id') || id, title: get(t, 'title') || 'Untitled', log, notices };
+    updateBarTarget();
+    if (log.lastElementChild) log.lastElementChild.scrollIntoView({ block: 'end' });
+  }
+
+  // ---------- the bottom bar ----------
+
+  const bar = {
+    input: document.getElementById('bar-input'),
+    send: document.getElementById('bar-send'),
+    stop: document.getElementById('bar-stop'),
+    mic: document.getElementById('mic'),
+    status: document.getElementById('bar-status'),
+    target: document.getElementById('bar-target'),
+  };
+
+  function barStatus(text) { bar.status.textContent = text || ''; }
+
+  // openThreadID is the thread the bar talks to: the one showing in the
+  // Threads view, or '' (the bar then starts a new free-standing thread).
+  function openThreadID() {
+    const ui = state.threadUI;
+    return state.view === 'threads' && ui && ui.id === state.param ? ui.id : '';
+  }
+
+  function updateBarTarget() {
+    const ui = state.threadUI;
+    bar.target.textContent = openThreadID() && ui ? 'In thread: ' + ui.title : 'No thread open: sending starts a new thread.';
+  }
+
+  function titleFrom(text) {
+    const one = text.replace(/\s+/g, ' ').trim();
+    return one.length > 60 ? one.slice(0, 59) + '…' : one;
+  }
+
+  function setBarBusy(busy) {
+    bar.send.disabled = busy;
+    bar.input.disabled = busy;
+    bar.stop.hidden = !busy;
+  }
+
+  async function barSubmit() {
+    const text = bar.input.value.trim();
+    if (!text || state.streaming) return;
+    setBarBusy(true);
+    let id = openThreadID();
+    if (!id) {
+      try {
+        id = get(await api.createThread(titleFrom(text)), 'id');
+      } catch (err) {
+        setBarBusy(false);
+        toast('Could not start a thread: ' + errText(err), 'bad');
+        return;
+      }
+    }
+    bar.input.value = '';
+    if (openThreadID() !== id) await go('threads', id);
+    await sendToThread(id, text);
+    refreshRecent();
+  }
+
+  // sendToThread posts text to thread id (api.postThreadMessage,
+  // the one turn path) and draws the reply as it streams, when that thread
+  // is on screen. On done the thread is re-fetched, so the view shows
+  // exactly what the daemon stored.
+  async function sendToThread(id, text) {
+    const ui = state.threadUI && state.threadUI.id === id ? state.threadUI : null;
+    const log = ui ? ui.log : h('div');
+    const notices = ui ? ui.notices : h('div');
+    const emptyEl = log.querySelector('.empty');
+    if (emptyEl) emptyEl.remove();
+    log.appendChild(messageEl('ceo', text, 'now').el);
+    const reply = messageEl('twin', '', 'thinking…');
+    reply.el.classList.add('pending');
+    log.appendChild(reply.el);
+    if (ui) reply.el.scrollIntoView({ block: 'end' });
+    setBarBusy(true);
+    barStatus('');
+    state.streaming = { threadId: id, taskId: '' };
+    let failed = '';
+    try {
+      await api.postThreadMessage(id, text, (taskId) => { state.streaming.taskId = taskId; }, (ev) => {
+        switch (ev.kind) {
+          case 'queued':
+            barStatus('Waiting for another turn to finish…');
+            break;
+          case 'delta':
+            barStatus('');
+            reply.body.textContent += ev.text || '';
+            break;
+          case 'approval_required': {
+            const n = { id: ev.approval_id, action: ev.action, readBack: ev.read_back };
+            const arr = state.threadNotices.get(id) || [];
+            arr.push(n);
+            state.threadNotices.set(id, arr);
+            notices.appendChild(approvalNotice(n));
+            refreshCounts();
+            break;
+          }
+          case 'done':
+            if (!reply.body.textContent && ev.text) reply.body.textContent = ev.text;
+            break;
+          case 'error':
+            failed = ev.error || ev.text || 'the turn failed';
+            break;
+          default:
+            break; // ack, sentence, tool steps and anything newer: ignored
+        }
+      });
+    } catch (err) {
+      failed = errText(err);
+    } finally {
+      state.streaming = null;
+      setBarBusy(false);
+      barStatus('');
+    }
+    if (failed) {
+      reply.el.classList.remove('pending');
+      reply.el.classList.add('failed');
+      reply.body.textContent = (reply.body.textContent ? reply.body.textContent + '\n\n' : '') + 'Error: ' + failed;
+      return;
+    }
+    if (state.view === 'threads' && state.param === id) render();
+  }
+
+  function setupBar() {
+    bar.send.addEventListener('click', barSubmit);
+    bar.input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); barSubmit(); }
+    });
+    bar.stop.addEventListener('click', async () => {
       if (state.streaming && state.streaming.taskId) {
         try { await api.cancelTask(state.streaming.taskId); } catch (_) { /* the turn may already be done */ }
       }
-    }, 'ghost', { hidden: true });
-    const statusLine = h('div', { class: 'muted small' });
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
     });
+    updateBarTarget();
+  }
 
-    async function submit() {
-      const text = input.value.trim();
-      if (!text || state.streaming) return;
-      const emptyEl = log.querySelector('.empty');
-      if (emptyEl) emptyEl.remove();
-      log.appendChild(messageEl('ceo', text, 'now').el);
-      const reply = messageEl('twin', '', 'thinking…');
-      reply.el.classList.add('pending');
-      log.appendChild(reply.el);
-      reply.el.scrollIntoView({ block: 'end' });
-      input.value = '';
-      send.disabled = true;
-      input.disabled = true;
-      cancel.hidden = false;
-      state.streaming = { threadId: id, taskId: '' };
-      let failed = '';
-      try {
-        await api.postThreadMessage(id, text, (taskId) => { state.streaming.taskId = taskId; }, (ev) => {
-          switch (ev.kind) {
-            case 'queued':
-              statusLine.textContent = 'Waiting for another turn to finish…';
-              break;
-            case 'delta':
-              statusLine.textContent = '';
-              reply.body.textContent += ev.text || '';
-              break;
-            case 'approval_required': {
-              const n = { id: ev.approval_id, action: ev.action, readBack: ev.read_back };
-              const arr = state.threadNotices.get(id) || [];
-              arr.push(n);
-              state.threadNotices.set(id, arr);
-              notices.appendChild(approvalNotice(n));
-              refreshCounts();
-              break;
-            }
-            case 'done':
-              if (!reply.body.textContent && ev.text) reply.body.textContent = ev.text;
-              break;
-            case 'error':
-              failed = ev.error || ev.text || 'the turn failed';
-              break;
-            default:
-              break; // ack, sentence and anything newer: ignored
-          }
-        });
-      } catch (err) {
-        failed = errText(err);
-      } finally {
-        state.streaming = null;
+  // setupMic wires the bar's hold-to-talk mic. The page never runs a voice
+  // turn itself: pressing posts {type: 'mic-down', thread} to the native
+  // side, releasing posts {type: 'mic-up'}. The native side listens, sends
+  // the transcript as a voice turn into that thread, speaks the reply, and
+  // then calls window.water.refresh().
+  function setupMic() {
+    const wk = window.webkit;
+    const handler = wk && wk.messageHandlers && wk.messageHandlers.water;
+    if (!handler || typeof handler.postMessage !== 'function') {
+      bar.mic.hidden = true;
+      return;
+    }
+    bar.mic.hidden = false;
+    const post = (msg) => {
+      try { handler.postMessage(msg); return true; } catch (err) { toast('Voice is unavailable: ' + errText(err), 'bad'); return false; }
+    };
+    let holding = false; // the button is held down right now
+    let sentDown = false; // this hold reached the native side
+
+    async function down() {
+      if (holding || state.streaming) return;
+      holding = true;
+      sentDown = false;
+      bar.mic.classList.add('holding');
+      let id = openThreadID();
+      if (!id) {
+        barStatus('Starting a new thread…');
+        try {
+          id = get(await api.createThread('Voice conversation'), 'id');
+        } catch (err) {
+          holding = false;
+          bar.mic.classList.remove('holding');
+          barStatus('');
+          toast('Could not start a thread: ' + errText(err), 'bad');
+          return;
+        }
+        await go('threads', id);
+        refreshRecent();
       }
-      if (failed) {
-        reply.el.classList.remove('pending');
-        reply.el.classList.add('failed');
-        reply.body.textContent = (reply.body.textContent ? reply.body.textContent + '\n\n' : '') + 'Error: ' + failed;
-        send.disabled = false;
-        input.disabled = false;
-        cancel.hidden = true;
-        return;
+      if (!holding) { barStatus(''); return; } // released before the thread was ready
+      if (!THREAD_ID.test(id)) { up(); return; }
+      if (post({ type: 'mic-down', thread: id })) {
+        sentDown = true;
+        barStatus('Listening… release to send.');
       }
-      // The daemon stored the reply before sending done; re-fetch so the
-      // view shows exactly what was saved.
-      if (state.view === 'threads' && state.param === id) render();
     }
 
-    replace(pane, h('article', { class: 'thread' }, parts, log, notices,
-      h('div', { class: 'composer' }, input, h('div', { class: 'actions' }, send, cancel, statusLine))));
-    log.lastElementChild && log.lastElementChild.scrollIntoView({ block: 'end' });
+    function up() {
+      if (!holding) return;
+      holding = false;
+      bar.mic.classList.remove('holding');
+      if (!sentDown) return;
+      sentDown = false;
+      if (post({ type: 'mic-up' })) barStatus('Sent by voice. The reply is spoken, then appears in this thread.');
+    }
+
+    bar.mic.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { bar.mic.setPointerCapture(e.pointerId); } catch (_) { /* not capturable */ }
+      down();
+    });
+    for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) bar.mic.addEventListener(ev, up);
+    bar.mic.addEventListener('keydown', (e) => {
+      if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); down(); }
+    });
+    bar.mic.addEventListener('keyup', (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); up(); } });
+    bar.mic.addEventListener('blur', up);
+    window.addEventListener('blur', up);
   }
 
   // ---------- Meetings ----------
@@ -751,44 +1087,54 @@
       h('div', { class: 'actions' }, button('Open a thread about this', () => openThreadAbout('meeting', id)))));
   }
 
-  // ---------- counts, mic, boot ----------
+  // ---------- counts, recent threads, boot ----------
+
+  const RECENT = 6;
+
+  function renderRecent(threads) {
+    const ul = document.getElementById('recent-threads');
+    const items = list(threads).slice(0, RECENT);
+    replace(ul, items.map((t) => {
+      const id = get(t, 'id');
+      return h('li', null, h('button', {
+        type: 'button', class: 'recent-item' + (state.view === 'threads' && state.param === id ? ' active' : ''),
+        title: get(t, 'title') || 'Untitled',
+        on: { click: () => go('threads', id) },
+      }, get(t, 'title') || 'Untitled'));
+    }));
+    if (!items.length) ul.appendChild(h('li', { class: 'muted small' }, 'None yet'));
+  }
+
+  async function refreshRecent() {
+    try { renderRecent(await api.threads()); } catch (_) { /* best-effort */ }
+  }
 
   async function refreshCounts() {
     try {
-      const [t, pending] = await Promise.all([api.today(), api.approvals('pending', 500)]);
+      const [t, pending, drafts] = await Promise.all([api.today(), api.approvals('pending', 500), pendingDrafts()]);
       setCount('today', list(get(t, 'needs_you')).length);
       setCount('approvals', list(pending).length);
+      setCount('drafts', drafts.length);
     } catch (_) { /* counts are best-effort */ }
-  }
-
-  function setupMic() {
-    const mic = document.getElementById('mic');
-    const wk = window.webkit;
-    const handler = wk && wk.messageHandlers && wk.messageHandlers.water;
-    if (!handler || typeof handler.postMessage !== 'function') {
-      mic.hidden = true;
-      return;
-    }
-    mic.hidden = false;
-    mic.addEventListener('click', () => {
-      try { handler.postMessage({ type: 'mic' }); } catch (err) { toast('Voice is unavailable: ' + errText(err), 'bad'); }
-    });
   }
 
   function boot() {
     for (const b of document.querySelectorAll('.nav')) {
       b.addEventListener('click', () => go(b.dataset.view));
     }
-    document.getElementById('refresh').addEventListener('click', () => { render(); refreshCounts(); });
-    window.addEventListener('hashchange', render);
+    document.getElementById('refresh').addEventListener('click', () => { render(); refreshCounts(); refreshRecent(); });
+    window.addEventListener('hashchange', onHashChange);
+    setupBar();
     setupMic();
     render();
     refreshCounts();
-    setInterval(refreshCounts, 60000);
-    // For the native shell (e.g. a tapped notification): open a view.
+    refreshRecent();
+    setInterval(() => { refreshCounts(); refreshRecent(); }, 60000);
+    // For the native shell: open a view (a tapped notification, the HUD's
+    // Edit), or refresh after a held-mic voice turn finished.
     window.water = Object.freeze({
       open: (view, param) => { if (VIEWS.includes(view)) go(view, param ? String(param) : ''); },
-      refresh: () => { render(); refreshCounts(); },
+      refresh: () => { barStatus(''); render(); refreshCounts(); refreshRecent(); },
     });
   }
 

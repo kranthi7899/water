@@ -26,4 +26,49 @@ import Testing
     @Test func intelOrRosettaWithoutModelsReadyChoosesAppleSpeech() {
         #expect(EngineSelection.choose(isAppleSilicon: false, modelsReady: false) == .appleSpeech)
     }
+    // MARK: launchPlan (V-hud's section 1 leftovers)
+
+    /// Intel: Apple Speech, with the notice exactly once, whatever else is
+    /// true.
+    @Test func intelShowsTheNoticeOnceAndNeverAsks() {
+        for ready in [false, true] {
+            for declined in [false, true] {
+                #expect(EngineSelection.launchPlan(isAppleSilicon: false, modelsOnDisk: ready, declined: declined,
+                                                   previouslyReady: ready, intelNoticeShown: false)
+                        == .useAppleSpeech(showIntelNotice: true))
+                #expect(EngineSelection.launchPlan(isAppleSilicon: false, modelsOnDisk: ready, declined: declined,
+                                                   previouslyReady: ready, intelNoticeShown: true)
+                        == .useAppleSpeech(showIntelNotice: false))
+            }
+        }
+    }
+
+    @Test func appleSiliconWithModelsOnDiskUsesThem() {
+        #expect(EngineSelection.launchPlan(isAppleSilicon: true, modelsOnDisk: true, declined: false,
+                                           previouslyReady: true, intelNoticeShown: false) == .useFluidAudio)
+        // Files on disk win even over an old decline (they got there somehow).
+        #expect(EngineSelection.launchPlan(isAppleSilicon: true, modelsOnDisk: true, declined: true,
+                                           previouslyReady: false, intelNoticeShown: false) == .useFluidAudio)
+    }
+
+    @Test func firstLaunchAsks() {
+        #expect(EngineSelection.launchPlan(isAppleSilicon: true, modelsOnDisk: false, declined: false,
+                                           previouslyReady: false, intelNoticeShown: false)
+                == .askConsent(redownload: false))
+    }
+
+    /// Models downloaded before to FluidAudio's default folder: Water now
+    /// reads only its own folder, so it asks again (never downloads
+    /// silently) and says why.
+    @Test func modelsInTheOldFolderAskAgainAsARedownload() {
+        #expect(EngineSelection.launchPlan(isAppleSilicon: true, modelsOnDisk: false, declined: false,
+                                           previouslyReady: true, intelNoticeShown: false)
+                == .askConsent(redownload: true))
+    }
+
+    @Test func aDeclineIsRespectedAndNoIntelNoticeOnAppleSilicon() {
+        #expect(EngineSelection.launchPlan(isAppleSilicon: true, modelsOnDisk: false, declined: true,
+                                           previouslyReady: true, intelNoticeShown: false)
+                == .useAppleSpeech(showIntelNotice: false))
+    }
 }

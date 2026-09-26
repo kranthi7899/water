@@ -12,6 +12,7 @@ import (
 	"water/internal/approvals"
 	"water/internal/decisions"
 	"water/internal/gate"
+	"water/internal/recordlinks"
 	"water/internal/store"
 	"water/internal/twins"
 )
@@ -51,6 +52,19 @@ func cardLookupError(w http.ResponseWriter, id string, err error) {
 		return
 	}
 	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+// linkDecision writes decision -> involves -> person for the card's source
+// message sender when the roster resolves it by email
+// (recordlinks.LinkDecision; docs/slices/V.md D6: deterministic links only,
+// never guessed). Idempotent, and a no-op for a sender the roster doesn't
+// know or a source item that isn't a stored message.
+func (d *Daemon) linkDecision(ctx context.Context, card *decisions.Card) error {
+	if card == nil || d.cfg.Store == nil {
+		return nil
+	}
+	_, err := recordlinks.LinkDecision(ctx, d.cfg.Store, card.ID, card.SourceItemIDs)
+	return err
 }
 
 // decisionStageRequest is POST /v1/decisions/{id}/stage's body. Function
@@ -116,8 +130,15 @@ func (d *Daemon) handleStageDecision(w http.ResponseWriter, r *http.Request) {
 	case prev.Status == "staged" && prev.ApprovalID != "":
 		// Staging twice must not queue a second envelope for the same card
 		// while the first still awaits an answer: hand back that one.
-		if env, gerr := d.cfg.Approvals.Get(ctx, prev.ApprovalID); gerr == nil && env.Status == approvals.Pending && env.ExpiresAt.After(time.Now()) {
+		env, gerr := d.cfg.Approvals.Get(ctx, prev.ApprovalID)
+		if gerr == nil && env.Status == approvals.Pending && env.ExpiresAt.After(time.Now()) {
 			writeJSON(w, http.StatusOK, decisionStageResponse{Status: "already_staged", CardID: id, ApprovalID: env.ID, Envelope: viewOf(env)})
+			return
+		}
+		// Approved (execution in flight) or executed: a new envelope would be
+		// a duplicate send one yes away. Only denied/expired may be re-staged.
+		if gerr == nil && (env.Status == approvals.Approved || env.Status == approvals.Executed) {
+			http.Error(w, "decision card "+id+" was already acted on ("+string(env.Status)+" "+env.ID+"); dismiss it instead of staging again", http.StatusConflict)
 			return
 		}
 	}
@@ -183,6 +204,13 @@ func (d *Daemon) handleStageDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Deterministic links (docs/slices/V.md D6) go first, after every
+	// refusal above and before anything is queued: a store failure here
+	// stages nothing, so a retry starts clean.
+	if err := d.linkDecision(ctx, card); err != nil {
+		http.Error(w, "linking decision card "+id+" failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	env, err := d.cfg.Approvals.Propose(ctx, approvals.Envelope{
 		Action: chosen.Function, Payload: payload, Origin: string(gate.P0),
 		Risk:         string(functionRisk(d.cfg.Registry, chosen.Function)),
@@ -239,8 +267,13 @@ func (d *Daemon) handleDismissDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reason too long (max 1000 bytes)", http.StatusBadRequest)
 		return
 	}
-	if _, err := d.findOpenCard(r.Context(), id); err != nil {
+	card, err := d.findOpenCard(r.Context(), id)
+	if err != nil {
 		cardLookupError(w, id, err)
+		return
+	}
+	if err := d.linkDecision(r.Context(), card); err != nil {
+		http.Error(w, "linking decision card "+id+" failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	cs := store.CardState{CardID: id, Status: "dismissed", Reason: reason, DecidedAt: time.Now().UTC()}

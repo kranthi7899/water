@@ -36,6 +36,7 @@ import Testing
             ("GET", "water://app/v1/approvals?kind=gmail.send_message", "/v1/approvals?kind=gmail.send_message"),
             ("GET", "water://app/v1/approvals/env_ab12", "/v1/approvals/env_ab12"),
             ("POST", "water://app/v1/approvals/env_ab12/decision", "/v1/approvals/env_ab12/decision"),
+            ("POST", "water://app/v1/approvals/env_ab12/edit", "/v1/approvals/env_ab12/edit"),
             ("GET", "water://app/v1/threads", "/v1/threads"),
             ("POST", "water://app/v1/threads", "/v1/threads"),
             ("POST", "water://app/v1/threads/anchor", "/v1/threads/anchor"),
@@ -76,7 +77,6 @@ import Testing
             ("POST", "water://app/v1/token"),
             ("POST", "water://app/v1/intents/promote"),
             ("POST", "water://app/v1/intents/reload"),
-            ("POST", "water://app/v1/approvals/env_1/edit"),
             ("POST", "water://app/v1/decisions/card-1/email"),
             ("POST", "water://app/v1/meetings/start"),
             ("POST", "water://app/v1/meetings/ms_1/stop"),
@@ -262,20 +262,87 @@ import Testing
 
     // MARK: script messages
 
-    @Test func onlyTheExactMicMessageIsRecognised() {
-        #expect(WorkspaceMessage.parse(["type": "mic"]) == .mic)
-        #expect(WorkspaceMessage.parse(["type": "MIC"]) == nil)
-        #expect(WorkspaceMessage.parse(["type": "mic", "then": "send"]) == nil)
+    /// V-ui2: approval edit is reachable, POST only and only on one
+    /// approval id; the page still has no turn route of any kind.
+    @Test func approvalEditIsPostOnlyOnOneApproval() {
+        #expect(allowed("POST", "water://app/v1/approvals/env_1/edit") == "/v1/approvals/env_1/edit")
+        #expect(!decide("GET", "water://app/v1/approvals/env_1/edit").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/edit").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/env_1/edit/x").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/env_1/edit?x=1").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/env%2F1/edit").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/../edit").isAllowed)
+        #expect(!decide("POST", "water://app/v1/decisions/card-1/edit").isAllowed)
+        #expect(!decide("POST", "water://app/v1/threads/thr_1/edit").isAllowed)
+        for url in ["water://app/v1/turns", "water://app/v1/turns?thread_id=thr_1", "water://app/v1/turns/thr_1"] {
+            #expect(!decide("POST", url).isAllowed, "\(url)")
+        }
+    }
+
+    // MARK: script messages
+
+    @Test func onlyTheExactMicHoldMessagesAreRecognised() {
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_0a1b2c"]) == .micDown(thread: "thr_0a1b2c"))
+        #expect(WorkspaceMessage.parse(["type": "mic-up"]) == .micUp)
+        // The old toggle message is gone.
+        #expect(WorkspaceMessage.parse(["type": "mic"]) == nil)
+        // mic-down needs exactly a well-formed thread id, nothing else.
+        #expect(WorkspaceMessage.parse(["type": "mic-down"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": ""]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_ABCD"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_12g"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "env_0a1b"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_0a/../x"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": " thr_0a"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_0a\n"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_" + String(repeating: "a", count: 65)]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": 12]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": ["thr_0a"]]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "mic-down", "thread": "thr_0a", "prompt": "send it"]) == nil)
+        // mic-up carries nothing.
+        #expect(WorkspaceMessage.parse(["type": "mic-up", "thread": "thr_0a"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "MIC-UP"]) == nil)
         #expect(WorkspaceMessage.parse(["type": "open", "url": "https://evil"]) == nil)
         #expect(WorkspaceMessage.parse(["type": 1]) == nil)
-        #expect(WorkspaceMessage.parse("mic") == nil)
-        #expect(WorkspaceMessage.parse([["type": "mic"]]) == nil)
+        #expect(WorkspaceMessage.parse("mic-up") == nil)
+        #expect(WorkspaceMessage.parse([["type": "mic-up"]]) == nil)
         #expect(WorkspaceMessage.parse(NSNull()) == nil)
+        #expect(WorkspaceMessage.isThreadID("thr_" + String(repeating: "f", count: 64)))
     }
 
     @Test func localErrorsCarryARestrictiveCSP() {
         let h = WorkspaceProxy.localErrorHeaders()
         #expect(h["Content-Security-Policy"]?.hasPrefix("default-src 'none'") == true)
         #expect(h["X-Content-Type-Options"] == "nosniff")
+    }
+
+    @Test func openTargetsAreKnownViewsAndDaemonIDs() {
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "approvals", id: "env_0a1b"))
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "threads", id: "thr_12"))
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "drafts", id: "env_0a1b"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "settings", id: "env_1"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "approvals", id: ""))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "approvals", id: "env_1');alert(1);//"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "approvals", id: "../x"))
+        // No id opens the view's list (a tapped "and N more" banner opens Today).
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "today", id: nil))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "settings", id: nil))
+    }
+
+    /// V-notify's routes are native-only: the page can never list or mark
+    /// notifications, in any form.
+    @Test func notificationRoutesAreNeverReachableFromThePage() {
+        let cases: [(String, String)] = [
+            ("GET", "water://app/v1/notifications"),
+            ("GET", "water://app/v1/notifications?undelivered=1"),
+            ("GET", "water://app/v1/notifications?undelivered=1&limit=50"),
+            ("POST", "water://app/v1/notifications/ntf_1/delivered"),
+            ("GET", "water://app/v1/notifications/ntf_1"),
+            ("POST", "water://app/v1/notifications"),
+        ]
+        for (m, url) in cases {
+            #expect(!decide(m, url).isAllowed, "\(m) \(url) must be denied")
+        }
     }
 }

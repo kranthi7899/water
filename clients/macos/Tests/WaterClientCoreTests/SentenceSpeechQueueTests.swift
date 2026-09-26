@@ -262,4 +262,78 @@ final class FakeSpeechOutput: SpeechOutput {
         #expect(callCount == 2)
         out.finishPlay(1)
     }
+    // MARK: onIdle (V-hud: the blob stops "speaking" when this fires)
+
+    @Test func onIdleFiresOnceWhenTheLastSentenceFinishes() {
+        let out = FakeSpeechOutput()
+        let q = SentenceSpeechQueue(output: out)
+        var idle = 0
+        q.onIdle = { idle += 1 }
+
+        q.enqueue("one")
+        q.enqueue("two")
+        out.resolvePrepare(0)
+        out.resolvePrepare(1)
+        #expect(idle == 0)
+        out.finishPlay(0) // hand-off to "two": not idle
+        #expect(idle == 0)
+        out.finishPlay(1)
+        #expect(idle == 1)
+    }
+
+    /// Slower synthesis than playback leaves a gap between sentences; that
+    /// gap is not idle, because the next one is still preparing.
+    @Test func onIdleDoesNotFireInAGapWhileTheNextSentencePrepares() {
+        let out = FakeSpeechOutput()
+        let q = SentenceSpeechQueue(output: out)
+        var idle = 0
+        q.onIdle = { idle += 1 }
+        q.enqueue("one")
+        out.resolvePrepare(0)
+        q.enqueue("two")
+        out.finishPlay(0) // "two" hasn't finished preparing
+        #expect(idle == 0)
+        out.resolvePrepare(1)
+        out.finishPlay(1)
+        #expect(idle == 1)
+    }
+
+    @Test func onIdleFiresOnBargeInOnlyWhenSomethingWasInFlight() {
+        let out = FakeSpeechOutput()
+        let q = SentenceSpeechQueue(output: out)
+        var idle = 0
+        q.onIdle = { idle += 1 }
+        q.stop() // nothing in flight
+        #expect(idle == 0)
+        q.enqueue("one")
+        out.resolvePrepare(0)
+        q.stop()
+        #expect(idle == 1)
+        out.finishPlay(0) // stale: no second idle
+        #expect(idle == 1)
+    }
+
+    @Test func onIdleFiresWhenEverySentenceFailsToSynthesize() {
+        let out = FakeSpeechOutput()
+        let q = SentenceSpeechQueue(output: out)
+        var idle = 0
+        q.onIdle = { idle += 1 }
+        q.enqueue("one")
+        out.resolvePrepare(0, succeeds: false)
+        #expect(idle == 1)
+    }
+
+    @Test func onIdleFiresAgainForASecondReply() {
+        let out = FakeSpeechOutput()
+        let q = SentenceSpeechQueue(output: out)
+        var idle = 0
+        q.onIdle = { idle += 1 }
+        q.enqueue("one")
+        out.resolvePrepare(0)
+        out.finishPlay(0)
+        q.enqueue("two")
+        out.resolvePrepare(1)
+        out.finishPlay(1)
+        #expect(idle == 2)
+    }
 }

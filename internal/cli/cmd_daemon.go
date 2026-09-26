@@ -28,6 +28,7 @@ import (
 	"water/internal/nervous"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/promote"
+	"water/internal/nervous/render"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
 	"water/internal/store"
@@ -218,20 +219,46 @@ type daemonPrewarmer struct {
 	roleMD   string
 	manifest *twins.Manifest
 	d        *gateway.Daemon
+	// styleBlock must be the same string gateway.Config.StyleBlock gets:
+	// WarmSession restarts its process whenever System differs, so a
+	// prewarm without it would be thrown away on the first real turn
+	// (docs/slices/V.md D5; TestPrewarmSystemMatchesTurnSystem).
+	styleBlock string
 }
 
 func (p *daemonPrewarmer) Prewarm(ctx context.Context) (string, error) {
 	if p.warm == nil {
 		return "skipped", nil
 	}
+	return p.warm.Prewarm(ctx, p.request())
+}
+
+// request is the prewarm request: the system prompt, model and tool policy
+// a real main-path turn sends. Once the daemon is wired (always, by the
+// time a prewarm fires) the system prompt is the daemon's own
+// SystemPrompt, so the two cannot drift; before that it is built from the
+// same role and style strings runDaemon hands gateway.Config.
+func (p *daemonPrewarmer) request() backend.Request {
 	req := backend.Request{
-		System: runtime.RoleSystem(runtime.Env{RoleMD: p.roleMD}),
+		System: runtime.RoleSystem(runtime.Env{RoleMD: p.roleMD, StyleBlock: p.styleBlock}),
 		Model:  p.manifest.ModelFor(twins.TierFast),
 	}
 	if p.d != nil {
+		req.System = p.d.SystemPrompt()
 		req.Tools = p.d.TwinToolPolicy()
 	}
-	return p.warm.Prewarm(ctx, req)
+	return req
+}
+
+// styleMaxChars is style.yaml's max_chars for each turn channel.
+func styleMaxChars(s *render.Style) map[runtime.Channel]int {
+	out := map[runtime.Channel]int{}
+	for _, ch := range []runtime.Channel{runtime.ChannelCLI, runtime.ChannelTextBar, runtime.ChannelVoice} {
+		if n := s.MaxChars(string(ch)); n > 0 {
+			out[ch] = n
+		}
+	}
+	return out
 }
 
 func (a *App) runDaemon(ctx context.Context) error {
@@ -331,7 +358,13 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// *gateway.Daemon for the twin's tool policy, which doesn't exist until
 	// after *nervous.Nervous — a gateway.Config field — is built, so it's
 	// wired in the same two-step way tc is, just below.
-	prewarmer := &daemonPrewarmer{warm: warm, roleMD: deps.roleMD, manifest: deps.manifest}
+	// styleBlock and maxChars carry style.yaml into the main path
+	// (docs/slices/V.md D5): the block goes into the system prompt of every
+	// turn AND of the prewarm (both from this one string), the caps into
+	// each turn's channel hint.
+	styleBlock := deps.style.PromptBlock()
+	maxChars := styleMaxChars(deps.style)
+	prewarmer := &daemonPrewarmer{warm: warm, roleMD: deps.roleMD, manifest: deps.manifest, styleBlock: styleBlock}
 	// as wires a matched write intent's proposal to the approval queue
 	// (Design §12); it needs *gateway.Daemon, which doesn't exist until
 	// after *nervous.Nervous is built, so it's wired in the same two-step
@@ -390,6 +423,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 		Home:    config.Home(), PromotionEnabled: cfg.Router.Promotion.Enabled, MaxLearned: cfg.Router.Promotion.MaxLearned,
 		ReloadIntents: reloader.Reload,
 		NeedsYou:      needsYouSvc,
+		StyleBlock:    styleBlock,
+		MaxChars:      maxChars,
 	})
 	tc.d = d
 	prewarmer.d = d

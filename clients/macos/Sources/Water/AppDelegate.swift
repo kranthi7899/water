@@ -30,6 +30,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The workspace window (Slice V-ui): the daemon's web UI in a
     /// WKWebView, reached only through the `water://` scheme handler.
     private var workspace: WorkspaceWindowController!
+    /// The Activity HUD (V-hud): the blob, live steps and approval cards,
+    /// in its own floating panel next to the text bar.
+    private var hud: ActivityHUD!
+    /// Native notifications (V-notify): polls the daemon's needs-you
+    /// notifications and opens a tapped one's thread in the workspace. Nil
+    /// when not running as a bundled app.
+    private var notifier: Notifier?
     /// Live only while push-to-talk is listening (R-27): streams
     /// SFSpeechRecognizer's partial results to the daemon, and hands its
     /// turn id to the final `send(_:channel:turnID:)` call so the daemon can
@@ -44,10 +51,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Which `speakingTurn` `voiceTrace` belongs to, so a stray event from a
     /// different turn (or from `channel != .voice`) never marks it.
     private var voiceTraceTurn: Int?
+    /// The workspace thread the next voice transcript goes to (V-ui2):
+    /// set only by the page's mic-down, cleared by any other capture.
+    private var workspaceVoice = WorkspaceVoiceTarget()
 
     func applicationDidFinishLaunching(_ note: Notification) {
         setUpStatusItem()
         setUpEngine()
+        setUpActivityHUD()
 
         panel.onSubmit = { [weak self] text in self?.send(text, channel: .textBar) }
         panel.onClose = { [weak self] in
@@ -61,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setUpVoice()
         setUpMeeting()
         setUpWorkspace()
+        setUpNotifier()
         fetchVoiceProfile()
 
         hotkeys = HotKeyMonitor { [weak self] key in
@@ -69,7 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case HotKeyConfig.textBar: self.toggleTextBar()
             case HotKeyConfig.meeting: self.meeting.toggle()
             case HotKeyConfig.workspace: self.workspace.toggle()
-            case HotKeyConfig.voice: self.voice.startHold() // key went down: start recording
+            case HotKeyConfig.voice:
+                // Key went down: start recording, the HUD shows at
+                // onListening. A hotkey question is never a thread message.
+                self.workspaceVoice.clear()
+                self.voice.startHold()
             default: break
             }
         }
@@ -85,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // never mixing two holds' checkpoints together.
             self.voiceTrace = VoiceTurnTrace()
             self.voiceTrace?.mark(.keyUp)
+            if self.voice.state == .listening { self.hud.holdEnded() }
             self.voice.endHold()
         }
         hotkeys.onTrustChange = { [weak self] _ in self?.refreshAccessibilityItem() }
@@ -154,7 +171,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func askFromMenu() { panel.show() }
 
-    @objc private func talkFromMenu() { voice.toggle() }
+    @objc private func talkFromMenu() { toggleVoice() }
+
+    /// The menu's "Talk to Water" and the workspace mic: a click can't be
+    /// held, so it toggles; the second click is the HUD's "hold ended".
+    private func toggleVoice() {
+        if voice.state == .listening { hud.holdEnded() }
+        if voice.state == .idle { workspaceVoice.clear() }
+        voice.toggle()
+    }
 
     @objc private func meetingFromMenu() { meeting.toggle() }
 
@@ -174,9 +199,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speechQueue.stop()
     }
 
-    private func send(_ text: String, channel: Channel, turnID: String? = nil) {
+    private func send(_ text: String, channel: Channel, turnID: String? = nil, threadID: String? = nil) {
         interruptSpeech() // runner.run cancels the old stream; this silences it
         let turn = speakingTurn
+        let hudTurn = hud.turnSent()
         // V-8: this is the only voice turn `voiceTrace` (started at
         // key-up) ever attaches to — a text-bar/CLI turn, or a
         // toggle-started voice turn with no key-up trace, just leaves it
@@ -189,9 +215,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setStatus(channel == .voice ? "Thinking… (voice)" : "Thinking…")
         // During meeting capture every question is about the meeting: the
         // daemon adds its recent transcript (untrusted, and it taints the turn).
-        let meetingID = meeting.state == .active ? meeting.session?.id : nil
-        runner.run(channel: channel, prompt: text, meetingID: meetingID, turnID: turnID, onEvent: { [weak self] e in
+        // A workspace thread turn (the page's held mic) is about the thread,
+        // not the meeting: the daemon refuses the pair, so the thread wins.
+        let meetingID = meeting.state == .active && threadID == nil ? meeting.session?.id : nil
+        runner.run(channel: channel, prompt: text, meetingID: meetingID, turnID: turnID, threadID: threadID, onEvent: { [weak self] e in
             guard let self else { return }
+            self.hud.event(e, turn: hudTurn)
             switch e.kind {
             case .ack:
                 if channel == .voice, turn == self.voiceTraceTurn { self.voiceTrace?.mark(.ack) }
@@ -217,12 +246,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Terminal: nothing follows done or error on a turn stream.
                 self.clearStatus()
                 self.finishVoiceTrace(turn: turn, mark: .done)
+                // The daemon stored both messages in the thread before done:
+                // show them in the open page.
+                if threadID != nil { self.workspace.refresh() }
             case .error:
                 self.clearStatus()
                 self.panel.appendError(e.error ?? "the daemon reported an error")
                 // No `.done` mark here: the log line just ends at whatever
                 // checkpoint this turn actually reached before it errored.
                 self.finishVoiceTrace(turn: turn, mark: nil)
+            case .queued, .toolStart, .toolEnd:
+                // The Activity HUD shows steps (hud.event above); the
+                // panel's transcript stays text only.
+                break
             case .unknown:
                 break
             }
@@ -230,10 +266,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.panel.appendNote(note)
         }, onFinish: { [weak self] err in
             guard let self else { return }
+            self.hud.turnEnded(turn: hudTurn)
             self.clearStatus()
             if let err {
                 self.panel.appendError(err.localizedDescription)
             }
+            // Also on a failed or refused thread turn, so the page drops its
+            // "sent by voice" line and shows what was (or wasn't) stored.
+            if threadID != nil { self.workspace.refresh() }
         })
     }
 
@@ -263,7 +303,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch EngineSelector.resolveBlocking() {
         case .fluidAudio:
             speechOutput = KokoroSpeaker(manager: EngineSelector.kokoroManager)
-            voice = VoiceController(holdLabel: HotKeyConfig.voice.label, capture: ParakeetCapture())
+            // The same instance the download flow loaded (if it ran this
+            // launch); otherwise load it now, so the first hold is fast.
+            EngineSelector.parakeet.prewarm()
+            voice = VoiceController(holdLabel: HotKeyConfig.voice.label, capture: EngineSelector.parakeet)
         case .appleSpeech:
             speechOutput = AppleSpeechOutput()
             voice = VoiceController(holdLabel: HotKeyConfig.voice.label)
@@ -273,7 +316,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // just chose — see VoiceTrace.swift's doc comment on
         // Checkpoint.firstAudio for why hand-off, not the engine's own
         // internal playback-start signal.
-        speechQueue.onWillPlay = { [weak self] in self?.voiceTrace?.mark(.firstAudio) }
+        speechQueue.onWillPlay = { [weak self] in
+            self?.voiceTrace?.mark(.firstAudio)
+            self?.hud?.speechStarted()
+        }
+        speechQueue.onIdle = { [weak self] in self?.hud?.speechIdle() }
+    }
+
+    /// The Activity HUD (V-hud), fed from here: hotkey and capture
+    /// (`holdStarted`/`holdEnded`/`cancelled`, mic level), every turn's
+    /// events (`send`), and the speech queue (started, idle, output level).
+    /// Its own socket client, so a click never waits behind a turn stream.
+    private func setUpActivityHUD() {
+        let client = UnixSocketClient(socketPath: runner.client.socketPath)
+        // An approved action runs inside the decision request (a send can
+        // take a while); a timeout here is reported as "didn't go through"
+        // and the re-read that follows shows what actually happened.
+        client.readTimeout = 120
+        hud = ActivityHUD(client: client, tokens: runner.tokens)
+        hud.anchorFrame = { [weak self] in self?.panel.anchorFrame ?? .zero }
+        hud.onEdit = { [weak self] id in self?.workspace.open(view: "approvals", id: id) }
+        hud.onNote = { [weak self] note in
+            guard let self else { return }
+            self.panel.show()
+            self.panel.appendNote(note)
+        }
+        (speechOutput as? SpeechLevelSource)?.onLevel = { [weak self] v in self?.hud.ttsLevel(v) }
+        voice.onLevel = { [weak self] v in self?.hud.micLevel(v) }
     }
 
     private func setUpVoice() {
@@ -287,6 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.runner.cancel()
             self.interruptSpeech()
+            self.hud.holdStarted()
             self.panel.setInput("")
             self.panel.show(placeholder: "Listening… release \(HotKeyConfig.voice.label) to send")
             self.panel.setStatus("● Listening")
@@ -307,10 +377,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.panel.setInput(text)
             let turnID = self.partialStreamer?.turnID
             self.partialStreamer = nil
-            self.send(text, channel: .voice, turnID: turnID)
+            self.send(text, channel: .voice, turnID: turnID, threadID: self.workspaceVoice.take())
         }
         voice.onFailure = { [weak self] message in
             guard let self else { return }
+            self.hud.cancelled()
+            if self.workspaceVoice.take() != nil { self.workspace.refresh() }
             self.partialStreamer = nil
             self.clearStatus()
             self.panel.show()
@@ -375,12 +447,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // them) must not share a CancelToken or timeout with the text bar.
         let client = UnixSocketClient(socketPath: runner.client.socketPath)
         workspace = WorkspaceWindowController(client: client, tokens: runner.tokens)
-        // The page's mic button: the same push-to-talk toggle as the menu's
-        // "Talk to Water". A click can't be held, so it toggles (click to
-        // start listening, click again to send) rather than hold-to-talk;
-        // the transcript goes out as an ordinary voice turn and its reply
-        // shows in the text bar and is spoken, exactly as from the hotkey.
-        workspace.onMic = { [weak self] in self?.voice.toggle() }
+        // The bar's mic is hold-to-talk (V-ui2), like the voice hotkey:
+        // pressed starts listening, released sends. The transcript goes out
+        // as a voice turn with the page's thread_id (native only; the page
+        // never reaches /v1/turns), so the question and reply land in that
+        // thread. It is spoken and drives the HUD like any voice turn, and
+        // the page is refreshed on done.
+        workspace.onMicDown = { [weak self] thread in
+            guard let self else { return }
+            guard self.voice.state == .idle else { return } // already listening from the hotkey or menu
+            self.workspaceVoice.micDown(thread: thread)
+            self.voice.startHold()
+        }
+        workspace.onMicUp = { [weak self] in
+            guard let self, self.workspaceVoice.thread != nil else { return }
+            if self.voice.state == .listening { self.hud.holdEnded() }
+            self.voice.endHold()
+        }
+    }
+
+    /// V-notify. Its own client, so a poll never waits behind a turn or a
+    /// page request. It asks for notification permission only when there is
+    /// a first banner to show.
+    private func setUpNotifier() {
+        let client = UnixSocketClient(socketPath: runner.client.socketPath)
+        // Anchoring a decision rebuilds its card on the daemon, which can take a
+        // moment; the poll itself answers at once.
+        client.readTimeout = 120
+        notifier = Notifier.makeIfBundled(client: client, tokens: runner.tokens)
+        notifier?.onOpen = { [weak self] view, id in self?.workspace.open(view: view, id: id) }
+        notifier?.start()
     }
 
     /// The listening indicator: while a session is live the menu-bar icon

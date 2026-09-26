@@ -162,6 +162,9 @@ public final class UnixSocketClient {
     ///   id here as `turn_id` so the daemon can correlate this final turn
     ///   with whatever speculative work it already did (R-19). Nil or empty
     ///   sends none — existing, unchanged behavior.
+    /// - threadID: a workspace thread (V-ui2, the page's held mic): the
+    ///   daemon answers in that thread and stores both messages there. See
+    ///   `turnRequest`.
     /// - onTaskID: called once, before any event, with the daemon's
     ///   `X-Water-Task-Id` — the id `cancelTask(id:token:)` takes. Closing
     ///   the stream (`cancel`) also cancels the turn; this is for a caller
@@ -170,16 +173,34 @@ public final class UnixSocketClient {
     /// The stream ends after exactly one terminal event (`done` or `error`):
     /// the daemon returns right after it, which ends the chunked body, so
     /// this returns without waiting for the socket to close.
+    /// The `POST /v1/turns` request `streamTurn` sends (pure, tested).
+    /// `threadID` (V-ui2) runs the turn inside that workspace thread: the
+    /// daemon stores both messages there. It is sent only when it has a
+    /// thread id's shape, and never together with a meeting id (the daemon
+    /// refuses the pair); a thread wins, since only the page's mic sets it.
+    public static func turnRequest(channel: Channel, prompt: String, token: String, clear: Bool = false,
+                                   meetingID: String? = nil, turnID: String? = nil,
+                                   threadID: String? = nil) throws -> HTTPRequest {
+        var body: [String: Any] = ["channel": channel.rawValue, "prompt": prompt, "clear": clear]
+        let thread = threadID.flatMap { WorkspaceMessage.isThreadID($0) ? $0 : nil }
+        if let thread {
+            body["thread_id"] = thread
+        } else if let m = meetingID?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
+            body["meeting_id"] = m
+        }
+        if let t = turnID?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { body["turn_id"] = t }
+        return try HTTPRequest.json("POST", "/v1/turns", token: token, body)
+    }
+
     public func streamTurn(channel: Channel, prompt: String, token: String, clear: Bool = false,
                            meetingID: String? = nil,
                            turnID: String? = nil,
+                           threadID: String? = nil,
                            cancel: CancelToken? = nil,
                            onTaskID: ((String) -> Void)? = nil,
                            onEvent: @escaping (TurnEvent) -> Void) throws {
-        var body: [String: Any] = ["channel": channel.rawValue, "prompt": prompt, "clear": clear]
-        if let m = meetingID?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty { body["meeting_id"] = m }
-        if let t = turnID?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty { body["turn_id"] = t }
-        let req = try HTTPRequest.json("POST", "/v1/turns", token: token, body)
+        let req = try Self.turnRequest(channel: channel, prompt: prompt, token: token, clear: clear,
+                                       meetingID: meetingID, turnID: turnID, threadID: threadID)
         var status = 0
         var errBody = Data()
         var splitter = NDJSONLineSplitter()

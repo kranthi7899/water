@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -79,5 +80,27 @@ func TestMarkNotificationDeliveredRemovesFromUndeliveredAndIsIdempotent(t *testi
 	// Marking an unknown id delivered must not error either.
 	if err := s.MarkNotificationDelivered(ctx, "ntf_does_not_exist"); err != nil {
 		t.Fatalf("MarkNotificationDelivered on unknown id: %v", err)
+	}
+}
+
+func TestGetNotificationReturnsDeliveredStateAndErrNotFound(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	if _, err := s.InsertNotificationIfNew(ctx, Notification{ID: "ntf_a", RecordType: "decision", RecordID: "card-1", Title: "T", Body: "B"}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.GetNotification(ctx, "ntf_a")
+	if err != nil || n.RecordID != "card-1" || n.Title != "T" || n.DeliveredAt != nil {
+		t.Fatalf("GetNotification = %+v, %v", n, err)
+	}
+	if err := s.MarkNotificationDelivered(ctx, "ntf_a"); err != nil {
+		t.Fatal(err)
+	}
+	n, err = s.GetNotification(ctx, "ntf_a")
+	if err != nil || n.DeliveredAt == nil {
+		t.Fatalf("after delivery: %+v, %v; want DeliveredAt set", n, err)
+	}
+	if _, err := s.GetNotification(ctx, "ntf_missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown id: err = %v, want ErrNotFound", err)
 	}
 }

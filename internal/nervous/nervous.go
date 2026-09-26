@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"water/internal/approvals"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
@@ -554,7 +555,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 			n.answerVoiceApprove(ctx, id, t, *result, env, emit, rec, answeredTier, at)
 			return
 		}
-		n.answerQuick(id, t, *result, env, emit, rec, answeredTier)
+		n.answerQuick(ctx, id, t, *result, env, emit, rec, answeredTier)
 		return
 	}
 
@@ -567,7 +568,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 // TryTier0 hands a matched write intent to tryWriteIntent, which sets
 // ApprovalID for a level-A proposal; the delivery path below needed no
 // change for that). tier is "t0".
-func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event), rec *routeRecorder, tier string) {
+func (n *Nervous) answerQuick(ctx context.Context, id string, t Turn, result render.Result, env runtime.Env, emit func(runtime.Event), rec *routeRecorder, tier string) {
 	rec.owner = "quick"
 	rec.answeredBy = tier
 	rec.intent = result.Intent
@@ -606,10 +607,24 @@ func (n *Nervous) answerQuick(id string, t Turn, result render.Result, env runti
 		env.OnTaint(result.Tainted)
 	}
 	if result.ApprovalID != "" {
-		emitQuick(runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: result.ApprovalID})
+		emitQuick(approvalRequired(ctx, env.Approvals, result.ApprovalID))
 	}
 	emitQuick(runtime.Event{Kind: runtime.EventDone, Text: text})
 	_ = n.turns.Done(id, turn.StateDone)
+}
+
+// approvalRequired is the approval_required event for envelope id, filled
+// in from the queue (action, risk, payload_hash and the code-built
+// read-back, runtime.ApprovalRequiredEvent) so a Tier-0 write intent's
+// announcement is as complete as the model-queued path's. A missing queue
+// or a failed lookup still sends the bare id, as before.
+func approvalRequired(ctx context.Context, q *approvals.Queue, id string) runtime.Event {
+	if q != nil {
+		if env, err := q.Get(ctx, id); err == nil {
+			return runtime.ApprovalRequiredEvent(env)
+		}
+	}
+	return runtime.Event{Kind: runtime.EventApprovalRequired, ApprovalID: id}
 }
 
 // quickOutcome maps a quick answer's render.Result.Kind to the route_log

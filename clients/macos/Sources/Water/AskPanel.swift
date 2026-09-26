@@ -112,12 +112,20 @@ final class AskPanelController: NSObject, NSTextFieldDelegate {
     }
 
     private func position(height: CGFloat) {
+        panel.setFrame(frame(height: height), display: true)
+    }
+
+    private func frame(height: CGFloat) -> NSRect {
         let screen = NSScreen.main ?? NSScreen.screens.first
         let vf = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let x = vf.midX - width / 2
         let top = vf.maxY - vf.height * 0.18
-        panel.setFrame(NSRect(x: x, y: top - height, width: width, height: height), display: true)
+        return NSRect(x: x, y: top - height, width: width, height: height)
     }
+
+    /// Where the panel is, or where it would open when hidden: the Activity
+    /// HUD sits next to it either way.
+    var anchorFrame: NSRect { panel.isVisible ? panel.frame : frame(height: compactHeight) }
 
     private func expand() {
         guard scroll.isHidden else { return }

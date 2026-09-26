@@ -12,6 +12,7 @@ import (
 	"water/internal/meetings"
 	"water/internal/nervous"
 	"water/internal/runtime"
+	"water/internal/store"
 )
 
 // DecisionResult is what POST /v1/approvals/{id}/decision returns: the
@@ -64,7 +65,7 @@ func viewOf(e approvals.Envelope) ApprovalView {
 }
 
 // handleTurn streams one turn as NDJSON: ack, queued?, delta*, sentence*,
-// approval_required*, then done or error. The turn's origin is always P0
+// tool_start/tool_end pairs, approval_required*, then done or error. The turn's origin is always P0
 // (the CEO's immediate request); taint is computed from what the assembled
 // context pulled in.
 //
@@ -78,13 +79,21 @@ func viewOf(e approvals.Envelope) ApprovalView {
 //
 // channel is one of "cli", "voice" or "text-bar" (case-insensitive; empty
 // means cli, for older callers). Anything else is a 400 before the stream
-// starts. Only voice gets sentence events and the brief-spoken-reply prompt.
+// starts. Every turn's message names its channel and style.yaml budget
+// (runtime.ChannelHint); only voice gets sentence events and the
+// spoken-reply hint.
 //
-// approval_required is best-effort and covers only approvals queued by this
+// tool_start/tool_end (V-events) bracket each tool call this turn's model
+// makes while its model call is running (handleToolInvoke,
+// handleQuickInvoke; see beginStep), routed like approval_required below.
+//
+// approval_required is best-effort and covers approvals queued by this
 // turn's own model tool calls while its model call is running (one model
 // turn runs at a time; a turn waiting for its slot is not announced another
-// turn's approvals). It carries approval_id, action, risk, payload_hash and
-// read_back (the code-built text to speak or show), enough to decide it;
+// turn's approvals), plus a Tier-0 write intent's envelope and a spoken yes
+// that needs a tap (internal/nervous). It carries approval_id, action, risk,
+// payload_hash and read_back (the code-built text to speak or show), enough
+// to decide it (only the bare id if the envelope can't be read back);
 // GET /v1/approvals/{id} returns the full ApprovalView. Approvals from anywhere else — POST
 // /v1/decisions/{id}/email, the agent-mail watcher, a call that lands after
 // the stream closed — appear only in GET /v1/approvals, so a client should
@@ -110,6 +119,14 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		// take over and, on a match, reuse any cached speculative answer).
 		// Empty is unchanged, existing behavior.
 		TurnID string `json:"turn_id"`
+		// ThreadID, when set, runs this turn inside that workspace thread
+		// (V-ui2: the workspace's held mic): the thread's context rides
+		// along and both the CEO's text and the reply are stored in it,
+		// exactly as POST /v1/threads/{id}/messages does (one shared
+		// helper, streamThreadTurn). It must look like a thread id
+		// (^thr_[0-9a-f]+$, else 400) and name an existing thread (else
+		// 404); it can't be combined with meeting_id or a clear-only turn.
+		ThreadID string `json:"thread_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -118,6 +135,10 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 	ch, ok := parseChannel(body.Channel)
 	if !ok {
 		http.Error(w, "unknown channel (want cli|voice|text-bar)", http.StatusBadRequest)
+		return
+	}
+	if body.ThreadID != "" {
+		d.handleThreadTurn(w, r, ch, body.ThreadID, body.Prompt, body.MeetingID, body.Clear, body.TurnID)
 		return
 	}
 	clearOnly := body.Clear && strings.TrimSpace(body.Prompt) == ""
@@ -165,6 +186,38 @@ func (d *Daemon) handleTurn(w http.ResponseWriter, r *http.Request) {
 		Tainted:  meetingTainted,
 		ClientID: strings.TrimSpace(body.TurnID),
 	})
+}
+
+// handleThreadTurn is POST /v1/turns with a thread_id. Every refusal comes
+// before the stream starts and before anything is stored or run.
+func (d *Daemon) handleThreadTurn(w http.ResponseWriter, r *http.Request, ch runtime.Channel, threadID, prompt, meetingID string, clear bool, turnID string) {
+	switch {
+	case !isThreadID(threadID):
+		http.Error(w, "thread_id is not a thread id", http.StatusBadRequest)
+		return
+	case strings.TrimSpace(meetingID) != "":
+		http.Error(w, "thread_id and meeting_id can't be combined", http.StatusBadRequest)
+		return
+	case strings.TrimSpace(prompt) == "":
+		http.Error(w, "empty prompt", http.StatusBadRequest)
+		return
+	case len(prompt) > maxThreadText:
+		http.Error(w, "prompt too long for a thread (max 16 KiB)", http.StatusBadRequest)
+		return
+	}
+	t, err := d.cfg.Store.GetThread(r.Context(), threadID)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Error(w, "no such thread", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if clear && d.cfg.Warm != nil {
+		d.cfg.Warm.Clear()
+	}
+	d.streamThreadTurn(w, r, t, prompt, ch, strings.TrimSpace(turnID))
 }
 
 // streamTurnRequest is one turn for streamTurn: the CEO's own text (the

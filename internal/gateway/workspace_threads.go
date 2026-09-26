@@ -14,6 +14,7 @@ import (
 
 	"water/internal/approvals"
 	"water/internal/meetings"
+	"water/internal/recordlinks"
 	"water/internal/runtime"
 	"water/internal/store"
 )
@@ -197,6 +198,11 @@ func (d *Daemon) resolveAnchor(ctx context.Context, anchorType, anchorID string)
 		if err != nil {
 			return anchorSnapshot{}, err
 		}
+		// Anchoring is one of the moments D6 links a decision to its source
+		// sender, so the new thread has that edge to copy.
+		if err := d.linkDecision(ctx, card); err != nil {
+			return anchorSnapshot{}, err
+		}
 		title := card.Lead
 		if title == "" {
 			title = card.Question
@@ -344,6 +350,12 @@ func (d *Daemon) handleAnchorThread(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "thread created, but linking it to its anchor failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// The thread inherits its anchor's involves/for_project edges as
+		// they stand now (docs/slices/V.md D6): copied, never derived.
+		if err := recordlinks.CopyLinks(ctx, d.cfg.Store, at, id, "thread", t.ID); err != nil {
+			http.Error(w, "thread created, but copying its anchor's links failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, threadAnchorResponse{Thread: viewThread(t, true), Created: created})
 }
@@ -399,8 +411,7 @@ func (d *Daemon) handlePostThreadMessage(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unknown channel (want cli|voice|text-bar)", http.StatusBadRequest)
 		return
 	}
-	ctx := r.Context()
-	t, err := d.cfg.Store.GetThread(ctx, threadID)
+	t, err := d.cfg.Store.GetThread(r.Context(), threadID)
 	if errors.Is(err, store.ErrNotFound) {
 		http.Error(w, "no such thread", http.StatusNotFound)
 		return
@@ -409,12 +420,26 @@ func (d *Daemon) handlePostThreadMessage(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	d.streamThreadTurn(w, r, t, body.Text, ch, strings.TrimSpace(body.TurnID))
+}
+
+// streamThreadTurn runs one CEO turn inside thread t and records it there:
+// the CEO's message is stored before the turn starts, the thread's anchor
+// snapshot and recent history ride along as the turn's context prefix, and
+// the twin's reply is stored when done is produced (before the client
+// receives done). It is shared by POST /v1/threads/{id}/messages and POST
+// /v1/turns with a thread_id (the workspace's held mic, V-ui2), so a voice
+// question lands in the thread exactly as a typed one does. The caller has
+// validated text and channel and looked t up; the response headers must not
+// have been written yet.
+func (d *Daemon) streamThreadTurn(w http.ResponseWriter, r *http.Request, t store.Thread, text string, ch runtime.Channel, clientID string) {
+	ctx := r.Context()
 	history, err := d.cfg.Store.ThreadMessages(ctx, t.ID, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, err := d.cfg.Store.AppendThreadMessage(ctx, store.ThreadMessage{ThreadID: t.ID, Role: "ceo", Channel: string(ch), Text: body.Text}); err != nil {
+	if _, err := d.cfg.Store.AppendThreadMessage(ctx, store.ThreadMessage{ThreadID: t.ID, Role: "ceo", Channel: string(ch), Text: text}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -427,10 +452,10 @@ func (d *Daemon) handlePostThreadMessage(w http.ResponseWriter, r *http.Request)
 	var taskID string
 	d.streamTurn(w, r, streamTurnRequest{
 		Channel:  ch,
-		Text:     body.Text,
+		Text:     text,
 		Context:  threadTurnContext(t, history),
 		Tainted:  t.AnchorUntrusted || replaysTwinReply(history),
-		ClientID: strings.TrimSpace(body.TurnID),
+		ClientID: clientID,
 		Observe: func(e runtime.Event) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -438,9 +463,9 @@ func (d *Daemon) handlePostThreadMessage(w http.ResponseWriter, r *http.Request)
 			case runtime.EventDelta:
 				reply.WriteString(e.Text)
 			case runtime.EventDone:
-				text := e.Text
-				if strings.TrimSpace(text) == "" {
-					text = reply.String()
+				answer := e.Text
+				if strings.TrimSpace(answer) == "" {
+					answer = reply.String()
 				}
 				if taskID == "" {
 					taskID = w.Header().Get("X-Water-Task-Id")
@@ -448,11 +473,27 @@ func (d *Daemon) handlePostThreadMessage(w http.ResponseWriter, r *http.Request)
 				// Detached from the request: the reply was produced, and a
 				// client hanging up at this instant must not lose it.
 				_, _ = d.cfg.Store.AppendThreadMessage(context.WithoutCancel(ctx), store.ThreadMessage{
-					ThreadID: t.ID, Role: "twin", Channel: string(ch), TaskID: taskID, Text: text,
+					ThreadID: t.ID, Role: "twin", Channel: string(ch), TaskID: taskID, Text: answer,
 				})
 			}
 		},
 	})
+}
+
+// isThreadID reports whether s has the shape store.newThreadID mints:
+// "thr_" then lowercase hex. POST /v1/turns checks thread_id with it before
+// any lookup, as the workspace's native mic handler does (^thr_[0-9a-f]+$).
+func isThreadID(s string) bool {
+	hex, ok := strings.CutPrefix(s, "thr_")
+	if !ok || hex == "" || len(hex) > 64 {
+		return false
+	}
+	for _, c := range hex {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // threadTurnContext renders a thread's anchor snapshot and recent messages

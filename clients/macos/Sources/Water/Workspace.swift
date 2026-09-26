@@ -145,12 +145,18 @@ final class WorkspaceSchemeHandler: NSObject, WKURLSchemeHandler {
 /// The workspace window: one NSWindow + WKWebView, created on first use and
 /// kept (hidden, not destroyed) when closed so an open thread survives.
 final class WorkspaceWindowController: NSObject, WKNavigationDelegate, WKUIDelegate {
-    /// The page's mic button (`{type: "mic"}`).
-    var onMic: (() -> Void)?
+    /// The bar's hold-to-talk mic (V-ui2): pressed, for this thread
+    /// (`{type: "mic-down", thread}`), and released (`{type: "mic-up"}`).
+    var onMicDown: ((String) -> Void)?
+    var onMicUp: (() -> Void)?
 
     private let schemeHandler: WorkspaceSchemeHandler
     private var window: NSWindow?
     private var webView: WKWebView?
+    /// True once the page has finished loading (so `window.water` exists).
+    private var pageLoaded = false
+    /// An `open(view:id:)` waiting for the page to finish loading.
+    private var pendingOpen: (view: String, id: String)?
 
     init(client: UnixSocketClient, tokens: TokenProvider) {
         schemeHandler = WorkspaceSchemeHandler(client: client, tokens: tokens)
@@ -162,6 +168,37 @@ final class WorkspaceWindowController: NSObject, WKNavigationDelegate, WKUIDeleg
         if window == nil { build() }
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Shows the window at one record: `window.water.open(view, id)` in the
+    /// page (app.js), with both values passed as `callAsyncJavaScript`
+    /// arguments, never spliced into script text. Used by the Activity
+    /// HUD's Edit (`approvals`, envelope id) and a tapped notification
+    /// (`threads`, thread id; or a record's own view). A nil id opens the
+    /// view's list. An unknown view or a non-id just shows the window.
+    func open(view: String, id: String?) {
+        show()
+        guard WorkspaceAllowlist.isOpenTarget(view: view, id: id) else { return }
+        let id = id ?? ""
+        if pageLoaded, let webView {
+            Self.callOpen(webView, view: view, id: id)
+        } else {
+            pendingOpen = (view, id)
+        }
+    }
+
+    private static func callOpen(_ webView: WKWebView, view: String, id: String) {
+        webView.callAsyncJavaScript("if (window.water) { window.water.open(view, id); }",
+                                    arguments: ["view": view, "id": id], in: nil, in: .page) { _ in }
+    }
+
+    /// Re-renders the page's current view (`window.water.refresh()`), e.g.
+    /// after a held-mic voice turn stored its messages in the open thread.
+    /// A no-op until the page has loaded; it never shows the window.
+    func refresh() {
+        guard pageLoaded, let webView else { return }
+        webView.callAsyncJavaScript("if (window.water) { window.water.refresh(); }",
+                                    arguments: [:], in: nil, in: .page) { _ in }
     }
 
     /// Hotkey: bring it forward, or hide it when it is already in front.
@@ -226,7 +263,16 @@ final class WorkspaceWindowController: NSObject, WKNavigationDelegate, WKUIDeleg
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        pageLoaded = false
         webView.load(URLRequest(url: WorkspaceAllowlist.startURL))
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pageLoaded = true
+        if let p = pendingOpen {
+            pendingOpen = nil
+            Self.callOpen(webView, view: p.view, id: p.id)
+        }
     }
 
     // MARK: UI delegate: no windows, no panels
@@ -248,8 +294,9 @@ final class WorkspaceWindowController: NSObject, WKNavigationDelegate, WKUIDeleg
         let origin = message.frameInfo.securityOrigin
         guard origin.protocol == WorkspaceAllowlist.scheme, origin.host == WorkspaceAllowlist.host else { return }
         switch WorkspaceMessage.parse(message.body) {
-        case .mic?: onMic?()
-        case nil: break // unknown messages are ignored
+        case .micDown(let thread)?: onMicDown?(thread)
+        case .micUp?: onMicUp?()
+        case nil: break // anything else, a malformed thread id included, is ignored
         }
     }
 }

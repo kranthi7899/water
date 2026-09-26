@@ -10,6 +10,7 @@ package needsyou
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"water/internal/approvals"
 	"water/internal/decisions"
+	"water/internal/recordlinks"
 	"water/internal/store"
 )
 
@@ -32,6 +34,10 @@ type Item struct {
 	Readiness string
 	Untrusted bool
 	CreatedAt time.Time
+
+	// sourceItemIDs is a decision card's SourceItemIDs, kept (unexported,
+	// so never serialized into Today's JSON) for Tick's involves links.
+	sourceItemIDs []string
 }
 
 const (
@@ -126,6 +132,8 @@ func itemFromCard(c *decisions.Card, now time.Time) Item {
 		Readiness: string(c.Readiness),
 		Untrusted: c.Untrusted,
 		CreatedAt: now,
+
+		sourceItemIDs: append([]string(nil), c.SourceItemIDs...),
 	}
 }
 
@@ -169,6 +177,13 @@ func NewService(src DecisionSource, q *approvals.Queue, st *store.Store, minSeve
 // notified", not any in-memory state here — that's what makes "notify once
 // per record, ever" survive a daemon restart even though the snapshot
 // itself does not.
+//
+// Each decision item is also linked decision -> involves -> person for its
+// source message's sender, when the roster resolves that sender by email
+// (docs/slices/V.md D6; recordlinks.LinkDecision). The write is idempotent,
+// so re-linking on every tick adds nothing new. A link failure never stops
+// the remaining notifications: failures are collected and returned after
+// every item has been handled.
 func (s *Service) Tick(ctx context.Context, now time.Time) error {
 	items, err := Compute(ctx, s.src, s.q, s.st, now, s.minSeverity, s.approvalGrace)
 	if err != nil {
@@ -189,7 +204,16 @@ func (s *Service) Tick(ctx context.Context, now time.Time) error {
 			return fmt.Errorf("needsyou: recording notification for %s %s: %w", item.Kind, item.ID, err)
 		}
 	}
-	return nil
+	var linkErrs []error
+	for _, item := range items {
+		if item.Kind != KindDecision {
+			continue
+		}
+		if _, err := recordlinks.LinkDecision(ctx, s.st, item.ID, item.sourceItemIDs); err != nil {
+			linkErrs = append(linkErrs, fmt.Errorf("needsyou: linking decision %s: %w", item.ID, err))
+		}
+	}
+	return errors.Join(linkErrs...)
 }
 
 // notificationText builds a native-notification Title/Body from an Item's
