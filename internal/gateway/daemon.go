@@ -366,6 +366,13 @@ func (d *Daemon) Mux() http.Handler {
 	// and the related-data panel behind "View related data (N)".
 	mux.Handle("POST /v1/decisions/{id}/actions/{action_id}/stage", d.auth(d.handleStageDecisionAction))
 	mux.Handle("GET /v1/decisions/{id}/related", d.auth(d.handleRelatedDecision))
+	// Slice UI Phase 3c: the Drafts editor (U10-A, a real drafts table
+	// rather than an envelope-as-draft). Save never proposes anything;
+	// submit never saves -- see drafts.go's own comments.
+	mux.Handle("GET /v1/drafts", d.auth(d.handleListDrafts))
+	mux.Handle("GET /v1/drafts/{id}", d.auth(d.handleGetDraft))
+	mux.Handle("POST /v1/drafts/{id}", d.auth(d.handleSaveDraft))
+	mux.Handle("POST /v1/drafts/{id}/submit", d.auth(d.handleSubmitDraft))
 	mux.Handle("GET /v1/threads", d.auth(d.handleListThreads))
 	mux.Handle("POST /v1/threads", d.auth(d.handleCreateThread))
 	mux.Handle("POST /v1/threads/anchor", d.auth(d.handleAnchorThread))

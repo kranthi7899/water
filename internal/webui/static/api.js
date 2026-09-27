@@ -109,5 +109,14 @@
     // disclosure ({id, name, template, source} / {id, name, source}).
     workspaces: () => request('GET', '/v1/workspaces'),
     dashboards: () => request('GET', '/v1/dashboards'),
+    // Phase 3c: the Drafts editor (U10-A, a real drafts table -- see
+    // view_drafts.js). Save persists to/subject/body only; submitDraft
+    // always sends the editor's current values (never relies on a prior
+    // save), which is what makes "send exactly what's on screen" hold even
+    // with unsaved edits.
+    drafts: () => request('GET', '/v1/drafts'),
+    draft: (id) => request('GET', '/v1/drafts/' + enc(id)),
+    saveDraft: (id, to, subject, body) => request('POST', '/v1/drafts/' + enc(id), { to, subject, body }),
+    submitDraft: (id, to, subject, body) => request('POST', '/v1/drafts/' + enc(id) + '/submit', { to, subject, body }),
   };
 })();

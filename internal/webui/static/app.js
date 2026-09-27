@@ -30,8 +30,11 @@
   const main = document.getElementById('main');
   const toastEl = document.getElementById('toast');
   const VIEWS = ['today', 'decisions', 'drafts', 'approvals', 'threads', 'meetings', 'dashboards', 'workspaces'];
-  // Outward-message actions (docs/slices/V.md D2): what Drafts lists, and
-  // the actions whose "executed" reads as "sent".
+  // Outward-message actions: the actions whose "executed" reads as "sent"
+  // and whose confirm question reads "Send" rather than "Run". (V's D2-A --
+  // "a pending envelope for one of these IS the draft" -- was reopened and
+  // replaced by Phase 3c/U10-A's real drafts table; this list is no longer
+  // also "what Drafts lists".)
   const OUTWARD = ['gmail.send_message', 'twinlink.send_message'];
   // The shape the store mints and the native mic handler accepts.
   const THREAD_ID = /^thr_[0-9a-f]+$/;
@@ -453,11 +456,13 @@
     return done;
   }
 
-  // ---------- Approvals/Drafts shared rendering ----------
+  // ---------- Approvals shared rendering ----------
   //
-  // approvalRow and renderApprovalDetail are used by both view_approvals.js
-  // and view_drafts.js (the same envelope list/detail shape, filtered
-  // differently); pendingDrafts is also used by refreshCounts below.
+  // approvalRow and renderApprovalDetail are view_approvals.js's own list/
+  // detail rendering, kept here because a decision card's per-action stage
+  // result and a few other flows also need the same envelope shape. Phase
+  // 3c's Drafts view no longer shares this (drafts are a separate table,
+  // not pending envelopes -- see view_drafts.js's own header comment).
 
   function approvalRow(e, selected, view) {
     const id = get(e, 'id');
@@ -483,15 +488,6 @@
     return h('li', null, h('button', {
       type: 'button', class: 'row' + (selected ? ' selected' : ''), on: { click: () => go(view, id) },
     }, avatar ? h('span', { class: 'row-line' }, avatar, main) : main));
-  }
-
-  // pendingDrafts is D2-A: the pending envelopes whose action is an outward
-  // message, one ?kind= call per action, merged oldest first.
-  async function pendingDrafts() {
-    const lists = await Promise.all(OUTWARD.map((k) => api.approvals('pending', 100, k)));
-    const all = [].concat(...lists.map(list));
-    all.sort((a, b) => String(get(a, 'created_at')).localeCompare(String(get(b, 'created_at'))));
-    return all;
   }
 
   // TRAIL_STEPS mirrors approvals.Envelope.Trail's four stages
@@ -685,11 +681,15 @@
     return { el, body };
   }
 
+  // A queued envelope -- outward or not -- is always reviewed in Approvals.
+  // (Before Phase 3c/U10-A, an outward one routed to "drafts" instead,
+  // because a pending envelope itself was the draft; now Drafts is a
+  // separate table this notice's envelope was never part of.)
   function approvalNotice(n) {
     return h('div', { class: 'notice' },
       h('strong', null, 'Approval needed: '), n.action || '',
       h('div', { class: 'readback' }, n.readBack || ''),
-      button('Review', () => go(isOutward(n.action) ? 'drafts' : 'approvals', n.id), 'primary'));
+      button('Review', () => go('approvals', n.id), 'primary'));
   }
 
   // ---------- the bottom bar ----------
@@ -920,10 +920,13 @@
 
   async function refreshCounts() {
     try {
-      const [t, pending, drafts] = await Promise.all([api.today(), api.approvals('pending', 500), pendingDrafts()]);
+      // Phase 3c: the Drafts badge counts the drafts table's own rows
+      // (api.drafts()), not pending outward envelopes -- U10-A retired that
+      // reading of "Drafts".
+      const [t, pending, drafts] = await Promise.all([api.today(), api.approvals('pending', 500), api.drafts()]);
       setCount('today', list(get(t, 'needs_you')).length);
       setCount('approvals', list(pending).length);
-      setCount('drafts', drafts.length);
+      setCount('drafts', list(drafts).length);
     } catch (_) { /* counts are best-effort */ }
   }
 
@@ -978,7 +981,7 @@
     decisionPriorityClass, deadlineDays, priorityClass, readinessLabel,
     go, goWorkspace, render, openThreadAbout, openExternal,
     payloadFields, fieldsOf, kindOf, payloadInputs, editForm, decisionResult,
-    approvalRow, renderApprovalDetail, pendingDrafts,
+    approvalRow, renderApprovalDetail,
     messageEl, approvalNotice, updateBarTarget, renderRecent,
     refreshCounts, refreshRecent,
   };

@@ -95,6 +95,8 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		// Phase 3b: the per-action stage route's middle segment and the
 		// related-data route.
 		"'/actions/'": true, "'/related'": true,
+		// Phase 3c: Drafts' "Send for approval" route.
+		"'/submit'": true,
 	}
 	for _, m := range regexp.MustCompile(`\+ '(/[^']*)'`).FindAllStringSubmatch(src, -1) {
 		if lit := "'" + m[1] + "'"; !suffixes[lit] {
@@ -105,6 +107,8 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		"'/v1/today'", "'/v1/decisions'", "'/v1/decisions/'", "'/v1/approvals?status='", "'/v1/approvals/'",
 		"'/v1/threads'", "'/v1/threads/anchor'", "'/v1/threads/'", "'/v1/tasks/'", "'/v1/meetings?limit='", "'/v1/meetings/'",
 		"'/v1/workspaces'", "'/v1/dashboards'",
+		// Phase 3c: the Drafts editor.
+		"'/v1/drafts'", "'/v1/drafts/'",
 	}
 	// Every quoted '/v1...' literal in api.js must be one of the above.
 	for _, part := range strings.Split(src, "'/v1")[1:] {

@@ -98,6 +98,13 @@ public enum WorkspaceAllowlist {
         // kept for one release, unchanged.
         route("POST", "/v1/decisions/{id}/actions/{id}/stage"),
         route("GET", "/v1/decisions/{id}/related"),
+        // Phase 3c: the Drafts editor (U10-A, a real drafts table --
+        // Save/"Send for approval" -- rather than a pending envelope being
+        // the draft). Added by hand here, in api.js and in the Go pin test.
+        route("GET", "/v1/drafts"),
+        route("GET", "/v1/drafts/{id}"),
+        route("POST", "/v1/drafts/{id}"),
+        route("POST", "/v1/drafts/{id}/submit"),
     ]
 
     /// Judges a URL the web view asked for.

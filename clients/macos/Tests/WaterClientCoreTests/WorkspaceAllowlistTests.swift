@@ -54,6 +54,11 @@ import Testing
             ("POST", "water://app/v1/decisions/card-0123abcd/actions/sugg-0123abcd/stage",
              "/v1/decisions/card-0123abcd/actions/sugg-0123abcd/stage"),
             ("GET", "water://app/v1/decisions/card-0123abcd/related", "/v1/decisions/card-0123abcd/related"),
+            // Slice UI Phase 3c: the Drafts editor.
+            ("GET", "water://app/v1/drafts", "/v1/drafts"),
+            ("GET", "water://app/v1/drafts/draft_0a1b", "/v1/drafts/draft_0a1b"),
+            ("POST", "water://app/v1/drafts/draft_0a1b", "/v1/drafts/draft_0a1b"),
+            ("POST", "water://app/v1/drafts/draft_0a1b/submit", "/v1/drafts/draft_0a1b/submit"),
         ]
         for (m, url, want) in cases {
             #expect(allowed(m, url) == want, "\(m) \(url)")
@@ -112,6 +117,9 @@ import Testing
         #expect(!decide("GET", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)
         #expect(!decide("POST", "water://app/v1/decisions/card-1/related").isAllowed)
         #expect(!decide("PUT", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)
+        #expect(!decide("DELETE", "water://app/v1/drafts/draft_1").isAllowed)
+        #expect(!decide("PUT", "water://app/v1/drafts/draft_1").isAllowed)
+        #expect(!decide("GET", "water://app/v1/drafts/draft_1/submit").isAllowed)
     }
 
     @Test func wrongOriginIsDenied() {
