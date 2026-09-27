@@ -744,6 +744,19 @@ any daemon started from this binary unless a real send is intended.
   `time.Now()` plus a fixed offset. Low priority — it only fails for
   roughly the hour or so before local midnight.
 
+## Found in Slice UI, Phase 4 (2026-09-27)
+
+- **No real customer data yet.** The new `company_customers` connector's
+  spreadsheet id is still a `CONFIGURE_ME_...` placeholder — the owner
+  needs to upload `Renaissance_Customers.xlsx` as a native Google Sheet
+  to the Water Google account (U3-A) before the Clients dashboard shows
+  anything but "Not connected." Not a bug; expected until that happens.
+- The assumed column layouts for "Spend by Application", "Monthly P&L"
+  and the customers "Accounts" sheet are best-effort guesses (no live
+  sheet access yet, same caveat `gsheets.go`'s own existing lookups
+  already carry) — will need correcting once real data lands and the
+  actual sheet layout is known.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
