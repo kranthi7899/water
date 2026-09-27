@@ -435,6 +435,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 		Home:    config.Home(), PromotionEnabled: cfg.Router.Promotion.Enabled, MaxLearned: cfg.Router.Promotion.MaxLearned,
 		ReloadIntents: reloader.Reload,
 		NeedsYou:      needsYouSvc,
+		Workspaces:    deps.workspaces,
+		Dashboards:    deps.dashboards,
 		StyleBlock:    styleBlock,
 		MaxChars:      maxChars,
 	})

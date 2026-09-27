@@ -98,6 +98,7 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 	allowed := []string{
 		"'/v1/today'", "'/v1/decisions'", "'/v1/decisions/'", "'/v1/approvals?status='", "'/v1/approvals/'",
 		"'/v1/threads'", "'/v1/threads/anchor'", "'/v1/threads/'", "'/v1/tasks/'", "'/v1/meetings?limit='", "'/v1/meetings/'",
+		"'/v1/workspaces'", "'/v1/dashboards'",
 	}
 	// Every quoted '/v1...' literal in api.js must be one of the above.
 	for _, part := range strings.Split(src, "'/v1")[1:] {
@@ -112,7 +113,19 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 			t.Errorf("api.js calls %s, which is not on the UI's allowlist", lit)
 		}
 	}
-	for _, f := range []string{"app.js", "dom.js"} {
+	// Every other shipped .js file (dom.js, app.js, and every per-view
+	// file the UI splits its views into) must never call the API
+	// directly — only api.js does. Driven by webui.Files() rather than a
+	// hardcoded list, so a new view file added later is checked
+	// automatically instead of silently escaping this test.
+	files, err := webui.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".js") || f == "api.js" {
+			continue
+		}
 		b, err := webui.ReadFile(f)
 		if err != nil {
 			t.Fatal(err)

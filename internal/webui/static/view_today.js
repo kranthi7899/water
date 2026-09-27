@@ -1,0 +1,60 @@
+// view_today.js: the Today view (docs/slices/UI.md Phase 2 split app.js into
+// one file per view). Registers window.views.today. Every helper used here
+// beyond dom.js/api.js comes from window.appShared (set up by app.js, loaded
+// before this file; see index.html and app.js's own header comment).
+'use strict';
+
+(function () {
+  const { h, replace, get, list, fmtTime, fmtAgo } = window.dom;
+  const api = window.api;
+
+  async function viewToday(c, _param, gen) {
+    const S = window.appShared;
+    const t = await api.today();
+    if (!S.current(gen)) return;
+    const items = list(get(t, 'needs_you'));
+    const schedule = list(get(t, 'schedule'));
+    S.setCount('today', items.length);
+
+    const needs = h('section', { class: 'panel' }, h('h2', null, 'Needs you'));
+    if (!items.length) needs.appendChild(S.empty('Nothing needs you right now.'));
+    const ul = h('ul', { class: 'rows' });
+    for (const it of items) {
+      const kind = get(it, 'Kind', 'kind');
+      const id = get(it, 'ID', 'id');
+      const deadline = get(it, 'Deadline', 'deadline');
+      const readiness = get(it, 'Readiness', 'readiness');
+      ul.appendChild(h('li', null, h('button', {
+        type: 'button', class: 'row ' + S.priorityClass(it),
+        on: { click: () => S.go(kind === 'approval' ? 'approvals' : 'decisions', id) },
+      },
+      h('span', { class: 'row-main' },
+        h('span', { class: 'row-title' }, get(it, 'Title', 'title') || id),
+        h('span', { class: 'row-meta' },
+          S.badge(kind === 'approval' ? 'Approval' : 'Decision', kind),
+          readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, S.readinessLabel(readiness)) : null,
+          get(it, 'Untrusted', 'untrusted') ? S.extGlyph() : null,
+          S.dueBadge(deadline),
+          kind === 'approval' ? h('span', { class: 'muted' }, 'Waiting ' + fmtAgo(get(it, 'CreatedAt', 'created_at')).replace(' ago', '')) : null)))));
+    }
+    needs.appendChild(ul);
+
+    const sched = h('section', { class: 'panel' }, h('h2', null, 'Schedule'));
+    if (!schedule.length) sched.appendChild(S.empty('No events today.'));
+    const sl = h('ul', { class: 'schedule' });
+    for (const e of schedule) {
+      const when = get(e, 'all_day') ? 'All day' : fmtTime(get(e, 'start_at')) + ' – ' + fmtTime(get(e, 'end_at'));
+      sl.appendChild(h('li', null,
+        h('span', { class: 'when' }, when),
+        h('span', { class: 'what' }, get(e, 'title') || '(untitled)',
+          get(e, 'location') ? h('span', { class: 'muted where' }, get(e, 'location')) : null)));
+    }
+    sched.appendChild(sl);
+
+    const day = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
+    replace(c, S.header('Today', day), h('div', { class: 'stack' }, needs, sched));
+  }
+
+  window.views = window.views || {};
+  window.views.today = viewToday;
+})();

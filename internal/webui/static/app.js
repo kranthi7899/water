@@ -1,25 +1,45 @@
-// app.js: the workspace UI's views (Today, Decisions, Drafts, Approvals,
-// Threads, Meetings) and the bottom bar. Rendering goes through dom.js only;
-// every server string is a text node. Nothing here executes an outward
-// action by itself: a decision card is staged into a PENDING approval
-// envelope, and only an explicit, separate confirm click answers that
-// envelope "yes", through the same approval-decision endpoint every other
-// client uses (api.js). Editing an envelope voids it and stages a new one,
-// which again needs its own yes.
+// app.js: the workspace UI's router and shared glue (docs/slices/UI.md Phase
+// 2 split app.js's former 1200-odd lines into one file per view —
+// view_today.js, view_decisions.js, view_approvals.js, view_drafts.js,
+// view_meetings.js, view_threads.js, view_dashboards.js, view_workspaces.js —
+// plus this file, which now holds only what more than one view needs: the
+// hash router, the shared UI helpers, the payload/staging forms, the bottom
+// bar, and boot.
+//
+// Every helper a view file needs is exposed on window.appShared, assigned
+// near the bottom of this IIFE. This file is loaded before the view files
+// (see index.html), so by the time any view file's own IIFE runs,
+// window.appShared and window.views (the per-view registry each view file
+// fills in, keyed by hash view name) already exist. Nothing here calls
+// boot() directly, though: it waits for DOMContentLoaded, which fires only
+// once every deferred script — this one and every view file after it — has
+// run, so render()'s first call always finds every view already registered.
+//
+// Rendering goes through dom.js only; every server string is a text node.
+// Nothing here executes an outward action by itself: a decision card is
+// staged into a PENDING approval envelope, and only an explicit, separate
+// confirm click answers that envelope "yes", through the same
+// approval-decision endpoint every other client uses (api.js). Editing an
+// envelope voids it and stages a new one, which again needs its own yes.
 'use strict';
 
 (function () {
-  const { h, replace, get, list, fmtDate, fmtTime, fmtDay, fmtAgo, untrusted } = window.dom;
+  const { h, replace, get, list, fmtDate, fmtDay, fmtAgo } = window.dom;
   const api = window.api;
 
   const main = document.getElementById('main');
   const toastEl = document.getElementById('toast');
-  const VIEWS = ['today', 'decisions', 'drafts', 'approvals', 'threads', 'meetings'];
+  const VIEWS = ['today', 'decisions', 'drafts', 'approvals', 'threads', 'meetings', 'dashboards', 'workspaces'];
   // Outward-message actions (docs/slices/V.md D2): what Drafts lists, and
   // the actions whose "executed" reads as "sent".
   const OUTWARD = ['gmail.send_message', 'twinlink.send_message'];
   // The shape the store mints and the native mic handler accepts.
   const THREAD_ID = /^thr_[0-9a-f]+$/;
+  // DEFAULT_WORKSPACE_SUB is the sub-page a bare workspace open (no second
+  // segment) lands on (docs/slices/UI.md Phase 2: "pick a sensible default
+  // <sub> value and document it"). Every workspace gets an "overview" for
+  // now; per-workspace sub-navigation is Phase 5's job.
+  const DEFAULT_WORKSPACE_SUB = 'overview';
 
   const state = {
     view: 'today',
@@ -172,17 +192,39 @@
     return p === 'urgent' ? 'p-urgent' : p === 'high' ? 'p-high' : 'p-normal';
   }
 
+  // readinessLabel is only ever called for a non-ready state (Today and the
+  // decision card both check readiness !== 'ready' first): "ready" itself
+  // is shown by omission, not a badge (docs/slices/UI.md Phase 0b).
+  function readinessLabel(r) {
+    return { missing_info: 'Missing info', blocked: 'Blocked' }[r] || String(r);
+  }
+
   // ---------- routing ----------
 
+  // parseHash reads location.hash into {view, param}. Every view except
+  // "workspaces" keeps its original one-segment shape: param is whatever
+  // follows the first "/", decoded as one component. "workspaces" gains an
+  // optional second segment (docs/slices/UI.md Phase 2, "workspaces/<id>/
+  // <sub>"): the two segments are decoded independently, so an id or sub
+  // that itself needed a "%2F" can never be confused with the segment
+  // divider.
   function parseHash() {
     const raw = location.hash.replace(/^#/, '');
     const i = raw.indexOf('/');
     let view = i < 0 ? raw : raw.slice(0, i);
+    let rest = i < 0 ? '' : raw.slice(i + 1);
+    if (!VIEWS.includes(view)) { view = 'today'; rest = ''; }
     let param = '';
-    if (i >= 0) {
-      try { param = decodeURIComponent(raw.slice(i + 1)); } catch (_) { param = ''; }
+    if (view === 'workspaces') {
+      const j = rest.indexOf('/');
+      let id = j < 0 ? rest : rest.slice(0, j);
+      let sub = j < 0 ? '' : rest.slice(j + 1);
+      try { id = id ? decodeURIComponent(id) : ''; } catch (_) { id = ''; }
+      try { sub = sub ? decodeURIComponent(sub) : ''; } catch (_) { sub = ''; }
+      param = id ? id + (sub ? '/' + sub : '') : '';
+    } else if (rest) {
+      try { param = decodeURIComponent(rest); } catch (_) { param = ''; }
     }
-    if (!VIEWS.includes(view)) { view = 'today'; param = ''; }
     return { view, param };
   }
 
@@ -190,6 +232,19 @@
   // new hash causes is recognised and skipped, so nothing renders twice.
   function go(view, param) {
     const hash = '#' + view + (param ? '/' + encodeURIComponent(param) : '');
+    if (location.hash !== hash) {
+      state.expectHash = hash;
+      location.hash = hash;
+    }
+    return render();
+  }
+
+  // goWorkspace is go's workspaces-specific sibling: id and sub are encoded
+  // (and so decoded) as two independent path segments, never as one
+  // component, so the hash reads as the documented "#workspaces/finance/
+  // overview" rather than "#workspaces/finance%2Foverview".
+  function goWorkspace(id, sub) {
+    const hash = '#workspaces/' + encodeURIComponent(id) + (sub ? '/' + encodeURIComponent(sub) : '');
     if (location.hash !== hash) {
       state.expectHash = hash;
       location.hash = hash;
@@ -206,6 +261,10 @@
     render();
   }
 
+  // render dispatches to window.views[view], the per-view file's own
+  // registered renderer (view_today.js's viewToday, and so on). A view name
+  // with nothing registered (which should never happen for a name in VIEWS)
+  // shows an error rather than throwing.
   function render() {
     const { view, param } = parseHash();
     state.view = view;
@@ -221,7 +280,11 @@
     replace(main, container);
     container.appendChild(h('p', { class: 'loading' }, 'Loading…'));
     updateBarTarget();
-    const fn = { today: viewToday, decisions: viewDecisions, drafts: viewDrafts, approvals: viewApprovals, threads: viewThreads, meetings: viewMeetings }[view];
+    const fn = window.views[view];
+    if (typeof fn !== 'function') {
+      replace(container, errorBox('Could not load ' + view, new Error('no view registered for ' + view)));
+      return Promise.resolve();
+    }
     return fn(container, param, gen).catch((err) => {
       if (current(gen)) replace(container, errorBox('Could not load ' + view, err));
     }).finally(() => { if (current(gen)) updateBarTarget(); });
@@ -237,62 +300,11 @@
     }
   }
 
-  // ---------- Today ----------
-
-  async function viewToday(c, _param, gen) {
-    const t = await api.today();
-    if (!current(gen)) return;
-    const items = list(get(t, 'needs_you'));
-    const schedule = list(get(t, 'schedule'));
-    setCount('today', items.length);
-
-    const needs = h('section', { class: 'panel' }, h('h2', null, 'Needs you'));
-    if (!items.length) needs.appendChild(empty('Nothing needs you right now.'));
-    const ul = h('ul', { class: 'rows' });
-    for (const it of items) {
-      const kind = get(it, 'Kind', 'kind');
-      const id = get(it, 'ID', 'id');
-      const deadline = get(it, 'Deadline', 'deadline');
-      const readiness = get(it, 'Readiness', 'readiness');
-      ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row ' + priorityClass(it),
-        on: { click: () => go(kind === 'approval' ? 'approvals' : 'decisions', id) },
-      },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(it, 'Title', 'title') || id),
-        h('span', { class: 'row-meta' },
-          badge(kind === 'approval' ? 'Approval' : 'Decision', kind),
-          readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, readinessLabel(readiness)) : null,
-          get(it, 'Untrusted', 'untrusted') ? extGlyph() : null,
-          dueBadge(deadline),
-          kind === 'approval' ? h('span', { class: 'muted' }, 'Waiting ' + fmtAgo(get(it, 'CreatedAt', 'created_at')).replace(' ago', '')) : null)))));
-    }
-    needs.appendChild(ul);
-
-    const sched = h('section', { class: 'panel' }, h('h2', null, 'Schedule'));
-    if (!schedule.length) sched.appendChild(empty('No events today.'));
-    const sl = h('ul', { class: 'schedule' });
-    for (const e of schedule) {
-      const when = get(e, 'all_day') ? 'All day' : fmtTime(get(e, 'start_at')) + ' – ' + fmtTime(get(e, 'end_at'));
-      sl.appendChild(h('li', null,
-        h('span', { class: 'when' }, when),
-        h('span', { class: 'what' }, get(e, 'title') || '(untitled)',
-          get(e, 'location') ? h('span', { class: 'muted where' }, get(e, 'location')) : null)));
-    }
-    sched.appendChild(sl);
-
-    const day = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date());
-    replace(c, header('Today', day), h('div', { class: 'stack' }, needs, sched));
-  }
-
-  // readinessLabel is only ever called for a non-ready state (Today and the
-  // decision card both check readiness !== 'ready' first): "ready" itself
-  // is shown by omission, not a badge (docs/slices/UI.md Phase 0b).
-  function readinessLabel(r) {
-    return { missing_info: 'Missing info', blocked: 'Blocked' }[r] || String(r);
-  }
-
   // ---------- payload forms (staging and editing) ----------
+  //
+  // Shared by view_decisions.js (stageForm) and view_approvals.js /
+  // view_drafts.js (renderApprovalDetail's Edit button), so they live here
+  // rather than in either view file.
 
   // payloadFields decides the editable fields for one staged action: the
   // card's own payload keys when it carries one, the usual to/subject/body
@@ -403,220 +415,11 @@
     return done;
   }
 
-  // ---------- Decisions ----------
-
-  async function viewDecisions(c, param, gen) {
-    const cards = list(await api.decisions());
-    if (!current(gen)) return;
-    setCount('decisions', cards.length);
-    const body = h('div', { class: 'cards' });
-    if (!cards.length) body.appendChild(empty('No open decisions.'));
-    let focus = null;
-    for (const card of cards) {
-      const el = decisionCard(card, gen);
-      if (param && get(card, 'ID', 'id') === param) { el.classList.add('focus'); focus = el; }
-      body.appendChild(el);
-    }
-    replace(c, header('Decisions', 'Approving a card is two steps: stage it, read exactly what will happen, then confirm. Nothing is sent before you confirm.'), body);
-    if (focus) focus.scrollIntoView({ block: 'start' });
-  }
-
-  function decisionCard(card, gen) {
-    const id = get(card, 'ID', 'id');
-    const isUntrusted = Boolean(get(card, 'Untrusted', 'untrusted'));
-    const sev = get(card, 'Severity', 'severity');
-    const readiness = get(card, 'Readiness', 'readiness');
-    const deadline = get(card, 'Deadline', 'deadline');
-    const cs = get(card, 'card_state');
-    const stagedID = cs && get(cs, 'status') === 'staged' ? get(cs, 'approval_id') : '';
-    const stagedStatus = stagedID ? get(cs, 'approval_status') : '';
-    const awaiting = stagedID && stagedStatus === 'pending';
-    const status = h('div', { class: 'card-status' });
-
-    const el = h('article', { class: 'card ' + decisionPriorityClass(sev, deadline) },
-      h('header', { class: 'card-head' },
-        h('h2', null, get(card, 'Lead', 'lead') || get(card, 'Question', 'question') || id),
-        h('div', { class: 'row-meta' },
-          awaiting ? badge('Staged, awaiting your yes', 'status-pending') : null,
-          readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, readinessLabel(readiness)) : null,
-          isUntrusted ? extGlyph() : null,
-          dueBadge(deadline))));
-
-    const question = get(card, 'Question', 'question');
-    if (question) el.appendChild(h('p', { class: 'question' }, question));
-
-    const evidence = list(get(card, 'Evidence', 'evidence'));
-    if (evidence.length) {
-      const ul = h('ul', { class: 'evidence' });
-      for (const ev of evidence) {
-        ul.appendChild(h('li', null,
-          h('span', { class: 'ev-text' }, get(ev, 'Text', 'text') || ''),
-          h('span', { class: 'ev-source' }, get(ev, 'Source', 'source') || '')));
-      }
-      el.appendChild(h('section', { class: 'card-sec' + (isUntrusted ? ' untrusted-sec' : '') },
-        h('h3', null, isUntrusted ? 'Evidence (includes external content, shown as text)' : 'Evidence'), ul));
-    }
-
-    const options = list(get(card, 'Options', 'options'));
-    if (options.length) {
-      const ul = h('ul', { class: 'options' });
-      for (const o of options) {
-        ul.appendChild(h('li', null, h('strong', null, get(o, 'Label', 'label') || ''),
-          get(o, 'Consequences', 'consequences') ? h('span', { class: 'muted' }, ' — ' + get(o, 'Consequences', 'consequences')) : null));
-      }
-      el.appendChild(h('section', { class: 'card-sec' }, h('h3', null, 'Options'), ul));
-    }
-
-    const gaps = list(get(card, 'Gaps', 'gaps'));
-    if (gaps.length) {
-      const ul = h('ul', { class: 'gaps' });
-      for (const g of gaps) ul.appendChild(h('li', null, String(g)));
-      el.appendChild(h('section', { class: 'card-sec' }, h('h3', null, 'Gaps'), ul));
-    }
-
-    const rec = get(card, 'Recommendation', 'recommendation');
-    el.appendChild(h('section', { class: 'card-sec' }, h('h3', null, 'Recommendation'),
-      h('p', { class: rec ? '' : 'muted' }, rec || 'None: the evidence does not support one.')));
-
-    const stageArea = h('div', { class: 'stage-area' });
-    const actionRow = h('div', { class: 'actions' });
-    if (!awaiting) {
-      // Staged actions: each actionable one can be prepared and staged.
-      for (const a of list(get(card, 'StagedActions', 'staged_actions'))) {
-        const fn = get(a, 'Function', 'function') || '';
-        if (get(a, 'Actionable', 'actionable')) {
-          actionRow.appendChild(button('Prepare ' + actionLabel(fn), () => {
-            replace(stageArea, stageForm(id, a, status, gen));
-          }, 'primary'));
-        } else {
-          actionRow.appendChild(h('span', { class: 'muted not-granted', title: 'The manifest does not grant this at level A yet' }, actionLabel(fn) + ' (not granted)'));
-        }
-      }
-    }
-    actionRow.appendChild(button('Open a thread about this', () => openThreadAbout('decision', id)));
-    actionRow.appendChild(button('Reject', () => replace(stageArea, dismissForm(id, el, status)), 'ghost'));
-    el.appendChild(actionRow);
-    el.appendChild(stageArea);
-    el.appendChild(status);
-
-    if (awaiting) {
-      // Staged earlier (this session or another): show that envelope's
-      // read-back and the confirm step, never a second staging.
-      replace(status, h('p', { class: 'muted' }, 'Loading the staged approval…'));
-      api.approval(stagedID).then((env) => {
-        if (current(gen)) replace(status, stagedPanel(env, status, gen, false));
-      }).catch((err) => {
-        if (current(gen)) replace(status, errorBox('Could not load the staged approval', err));
-      });
-    } else if (stagedID && stagedStatus) {
-      status.appendChild(h('p', { class: 'muted small' },
-        stagedStatus === 'executed'
-          ? 'Staged earlier, approved and done. You can stage it again.'
-          : 'Staged earlier; that approval was ' + stagedStatus + '. You can stage it again.'));
-    }
-    return el;
-  }
-
-  // stagedPanel is the second half of a card's approve (D3): the staged
-  // envelope's code-built read-back and the confirm. justStaged means the
-  // CEO clicked Stage a moment ago, so one more deliberate click confirms;
-  // a card found already staged on load asks "Approve…" then "Yes".
-  function stagedPanel(env, status, gen, justStaged) {
-    const id = get(env, 'id');
-    const action = get(env, 'action');
-    const out = h('div');
-    const actions = h('div', { class: 'actions' });
-    const panel = h('div', { class: 'ok staged' },
-      h('p', null, justStaged
-        ? 'Staged. Nothing has been sent. Read exactly what will happen, then confirm.'
-        : 'Staged, awaiting your yes. Nothing has been sent.'),
-      h('div', { class: 'readback' }, get(env, 'read_back') || ''),
-      actions, out);
-
-    // The confirm button starts disabled briefly so a double-click on the
-    // button it replaced can't land on it: approval stays two deliberate clicks.
-    const yes = () => armed(button(isOutward(action) ? 'Yes, send it' : 'Yes, approve and run', () => decide('yes'), 'primary'));
-    const edit = button('Edit', () => {
-      replace(out, editForm(env, (next) => replace(status, stagedPanel(next, status, gen, true)), () => replace(out)));
-    });
-    const openBtn = button('Open in Approvals', () => go('approvals', id), 'ghost');
-    function reset() {
-      if (justStaged) replace(actions, yes(), edit, openBtn);
-      else {
-        const approve = button('Approve…', () => {
-          replace(actions, h('span', { class: 'confirm-q' }, 'Run this now, exactly as read back above?'), yes(), button('Not yet', reset, 'ghost'));
-        }, 'primary');
-        replace(actions, approve, edit, openBtn);
-      }
-    }
-    async function decide(reply) {
-      for (const b of actions.querySelectorAll('button')) b.disabled = true;
-      try {
-        const res = await api.decideApproval(id, get(env, 'payload_hash'), reply);
-        replace(actions);
-        replace(out, decisionResult(res, action));
-        refreshCounts();
-      } catch (err) {
-        if (err.status === 409) {
-          toast('This approval changed since you opened it. Showing the current version.', 'warn');
-          if (current(gen)) render();
-          return;
-        }
-        for (const b of actions.querySelectorAll('button')) b.disabled = false;
-        replace(out, errorBox('Could not record your answer', err));
-      }
-    }
-    reset();
-    return panel;
-  }
-
-  function stageForm(cardId, action, status, gen) {
-    const fn = get(action, 'Function', 'function') || '';
-    const form = h('div', { class: 'form' }, h('h3', null, 'Prepare ' + actionLabel(fn)));
-    const read = payloadInputs(form, payloadFields(action));
-    const submit = button('Stage for approval', async () => {
-      let payload;
-      try { payload = read(); } catch (err) {
-        replace(status, h('div', { class: 'error' }, 'The payload is not valid JSON: ' + err.message));
-        return;
-      }
-      submit.disabled = true;
-      try {
-        const res = await api.stageDecision(cardId, fn, payload);
-        replace(form);
-        replace(status, stagedPanel(get(res, 'envelope') || {}, status, gen, get(res, 'status') !== 'already_staged'));
-        refreshCounts();
-      } catch (err) {
-        submit.disabled = false;
-        replace(status, errorBox('Staging refused', err));
-      }
-    }, 'primary');
-    form.appendChild(h('div', { class: 'actions' }, submit, button('Cancel', () => { replace(form); replace(status); }, 'ghost')));
-    return form;
-  }
-
-  // dismissForm is Reject (D3): the card is dismissed, with an optional
-  // reason. It never touches an envelope already staged from it.
-  function dismissForm(cardId, cardEl, status) {
-    const input = h('input', { type: 'text', placeholder: 'Reason (optional)', maxlength: 1000, autocomplete: 'off' });
-    const form = h('div', { class: 'form' }, h('label', null, 'Reject this decision?'), input);
-    const confirm = button('Reject', async () => {
-      confirm.disabled = true;
-      try {
-        await api.dismissDecision(cardId, input.value.trim());
-        cardEl.classList.add('gone');
-        replace(cardEl, h('p', { class: 'muted' }, 'Rejected.'));
-        refreshCounts();
-      } catch (err) {
-        confirm.disabled = false;
-        replace(status, errorBox('Could not reject', err));
-      }
-    }, 'danger');
-    form.appendChild(h('div', { class: 'actions' }, confirm, button('Keep', () => replace(form), 'ghost')));
-    return form;
-  }
-
-  // ---------- Approvals and Drafts ----------
+  // ---------- Approvals/Drafts shared rendering ----------
+  //
+  // approvalRow and renderApprovalDetail are used by both view_approvals.js
+  // and view_drafts.js (the same envelope list/detail shape, filtered
+  // differently); pendingDrafts is also used by refreshCounts below.
 
   function approvalRow(e, selected, view) {
     const id = get(e, 'id');
@@ -632,32 +435,6 @@
         h('span', { class: 'muted' }, fmtAgo(get(e, 'created_at')))))));
   }
 
-  async function viewApprovals(c, param, gen) {
-    const tabs = h('div', { class: 'tabs', role: 'tablist' });
-    for (const [key, label] of [['pending', 'Pending'], ['decided', 'Decided']]) {
-      tabs.appendChild(h('button', {
-        type: 'button', role: 'tab', class: 'tab' + (state.approvalTab === key ? ' active' : ''),
-        'aria-selected': state.approvalTab === key ? 'true' : 'false',
-        on: { click: () => { state.approvalTab = key; render(); } },
-      }, label));
-    }
-    const listPane = h('div', { class: 'list-pane' }, tabs);
-    const detail = h('div', { class: 'detail-pane' });
-    replace(c, header('Approvals', 'Every outward action waits here for your yes.'), h('div', { class: 'split' }, listPane, detail));
-
-    const [envs] = await Promise.all([
-      api.approvals(state.approvalTab, 100),
-      param ? renderApprovalDetail(detail, param, gen, 'approvals') : Promise.resolve(replace(detail, empty('Select an approval to review it.'))),
-    ]);
-    if (!current(gen)) return;
-    const items = list(envs);
-    if (state.approvalTab === 'pending') setCount('approvals', items.length);
-    const ul = h('ul', { class: 'rows' });
-    if (!items.length) listPane.appendChild(empty(state.approvalTab === 'pending' ? 'No approvals waiting.' : 'Nothing decided yet.'));
-    for (const e of items) ul.appendChild(approvalRow(e, get(e, 'id') === param, 'approvals'));
-    listPane.appendChild(ul);
-  }
-
   // pendingDrafts is D2-A: the pending envelopes whose action is an outward
   // message, one ?kind= call per action, merged oldest first.
   async function pendingDrafts() {
@@ -665,23 +442,6 @@
     const all = [].concat(...lists.map(list));
     all.sort((a, b) => String(get(a, 'created_at')).localeCompare(String(get(b, 'created_at'))));
     return all;
-  }
-
-  async function viewDrafts(c, param, gen) {
-    const listPane = h('div', { class: 'list-pane' });
-    const detail = h('div', { class: 'detail-pane' });
-    replace(c, header('Drafts', 'Messages Water has written for you, waiting for your yes before they are sent. Gmail drafts saved straight to Gmail stay there and are not listed.'),
-      h('div', { class: 'split' }, listPane, detail));
-    const [items] = await Promise.all([
-      pendingDrafts(),
-      param ? renderApprovalDetail(detail, param, gen, 'drafts') : Promise.resolve(replace(detail, empty('Select a draft to read it before it is sent.'))),
-    ]);
-    if (!current(gen)) return;
-    setCount('drafts', items.length);
-    if (!items.length) listPane.appendChild(empty('No drafts waiting to be sent.'));
-    const ul = h('ul', { class: 'rows' });
-    for (const e of items) ul.appendChild(approvalRow(e, get(e, 'id') === param, 'drafts'));
-    listPane.appendChild(ul);
   }
 
   async function renderApprovalDetail(pane, id, gen, view) {
@@ -766,50 +526,11 @@
           refs.length ? h('ul', { class: 'refs' }, refs.map((r) => h('li', { class: 'mono' }, String(r)))) : null)));
   }
 
-  // ---------- Threads ----------
-
-  async function viewThreads(c, param, gen) {
-    const listPane = h('div', { class: 'list-pane' });
-    const detail = h('div', { class: 'detail-pane' });
-    const newBtn = button('New thread', () => {
-      const input = h('input', { type: 'text', placeholder: 'Title (optional)', maxlength: 200, autocomplete: 'off' });
-      const create = async () => {
-        try {
-          const t = await api.createThread(input.value.trim());
-          go('threads', get(t, 'id'));
-          refreshRecent();
-        } catch (err) { toast('Could not create a thread: ' + errText(err), 'bad'); }
-      };
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
-      replace(newArea, h('div', { class: 'form inline' }, input, button('Create', create, 'primary'), button('Cancel', () => replace(newArea), 'ghost')));
-      input.focus();
-    }, 'primary');
-    const newArea = h('div');
-    replace(c, header('Threads', 'Type in the bar below, or hold the mic, to talk in the open thread.', newBtn), newArea, h('div', { class: 'split' }, listPane, detail));
-
-    const [threads] = await Promise.all([
-      api.threads(),
-      param ? renderThreadDetail(detail, param, gen) : Promise.resolve(replace(detail, empty('Select a thread, or open one from a decision, approval or meeting. A message typed below with no thread open starts a new one.'))),
-    ]);
-    if (!current(gen)) return;
-    const items = list(threads);
-    renderRecent(items);
-    if (!items.length) listPane.appendChild(empty('No threads yet.'));
-    const ul = h('ul', { class: 'rows' });
-    for (const t of items) {
-      const id = get(t, 'id');
-      const at = get(t, 'anchor_type');
-      ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row' + (id === param ? ' selected' : ''), on: { click: () => go('threads', id) },
-      },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(t, 'title') || 'Untitled'),
-        h('span', { class: 'row-meta' },
-          at ? badge(at, get(t, 'anchor_untrusted') ? 'warn' : '') : badge('free'),
-          h('span', { class: 'muted' }, fmtAgo(get(t, 'updated_at'))))))));
-    }
-    listPane.appendChild(ul);
-  }
+  // ---------- Threads shared rendering ----------
+  //
+  // messageEl and approvalNotice are used both by view_threads.js's own
+  // renderThreadDetail and by sendToThread below (the bar posts into
+  // whichever thread is open, regardless of which view is on screen).
 
   function messageEl(role, text, meta) {
     const body = h('div', { class: 'msg-text' }, text || '');
@@ -824,46 +545,6 @@
       h('strong', null, 'Approval needed: '), n.action || '',
       h('div', { class: 'readback' }, n.readBack || ''),
       button('Review', () => go(isOutward(n.action) ? 'drafts' : 'approvals', n.id), 'primary'));
-  }
-
-  async function renderThreadDetail(pane, id, gen) {
-    let res;
-    try {
-      res = await api.thread(id);
-    } catch (err) {
-      if (current(gen)) replace(pane, errorBox('Could not load thread', err));
-      return;
-    }
-    if (!current(gen)) return;
-    const t = get(res, 'thread') || {};
-    const msgs = list(get(res, 'messages'));
-    const at = get(t, 'anchor_type');
-    const ctx = get(t, 'anchor_context');
-
-    const parts = [h('header', { class: 'card-head' },
-      h('h2', null, get(t, 'title') || 'Untitled'),
-      h('div', { class: 'row-meta' }, at ? badge('About a ' + at) : null, h('span', { class: 'muted' }, 'Started ' + fmtDate(get(t, 'created_at')))))];
-    if (at && ctx) {
-      if (get(t, 'anchor_untrusted')) {
-        parts.push(untrusted('Quoted, untrusted: the ' + at + ' this thread is about, as it was when the thread began. It may include text written by someone else. Shown as plain text; the twin treats it as reference only, never as instructions.', ctx));
-      } else {
-        parts.push(h('figure', { class: 'context' }, h('figcaption', null, 'Context: the ' + at + ' this thread is about'), h('blockquote', { class: 'quoted' }, ctx)));
-      }
-    }
-    const log = h('div', { class: 'messages' });
-    for (const m of msgs) {
-      const ch = get(m, 'channel');
-      const meta = (ch === 'voice' ? 'voice · ' : '') + fmtDate(get(m, 'created_at'));
-      log.appendChild(messageEl(get(m, 'role'), get(m, 'text'), meta).el);
-    }
-    if (!msgs.length) log.appendChild(empty('No messages yet. Type below, or hold the mic.'));
-    const notices = h('div', { class: 'notices' });
-    for (const n of state.threadNotices.get(id) || []) notices.appendChild(approvalNotice(n));
-
-    replace(pane, h('article', { class: 'thread' }, parts, log, notices));
-    state.threadUI = { id: get(t, 'id') || id, title: get(t, 'title') || 'Untitled', log, notices };
-    updateBarTarget();
-    if (log.lastElementChild) log.lastElementChild.scrollIntoView({ block: 'end' });
   }
 
   // ---------- the bottom bar ----------
@@ -1070,89 +751,6 @@
     window.addEventListener('blur', up);
   }
 
-  // ---------- Meetings ----------
-
-  async function viewMeetings(c, param, gen) {
-    const listPane = h('div', { class: 'list-pane' });
-    const detail = h('div', { class: 'detail-pane' });
-    replace(c, header('Meetings', 'Recaps are phrased from meeting speech, so they are shown as quoted text.'), h('div', { class: 'split' }, listPane, detail));
-    const [ms] = await Promise.all([
-      api.meetings(30),
-      param ? renderMeetingDetail(detail, param, gen) : Promise.resolve(replace(detail, empty('Select a meeting to see its recap.'))),
-    ]);
-    if (!current(gen)) return;
-    const items = list(ms);
-    if (!items.length) listPane.appendChild(empty('No meetings recorded yet.'));
-    const ul = h('ul', { class: 'rows' });
-    for (const m of items) {
-      const id = get(m, 'session_id');
-      ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row' + (id === param ? ' selected' : ''), on: { click: () => go('meetings', id) },
-      },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(m, 'event_title') || 'Meeting'),
-        h('span', { class: 'row-meta' },
-          get(m, 'live') ? badge('Live', 'hot') : null,
-          recapBadge(get(m, 'recap')),
-          h('span', { class: 'muted' }, fmtDate(get(m, 'started_at'))))))));
-    }
-    listPane.appendChild(ul);
-  }
-
-  function recapBadge(r) {
-    const label = { ready: 'Recap ready', running: 'Recap running', skipped: 'No recap', failed: 'Recap failed', none: '' }[r];
-    return label ? badge(label, 'recap-' + r) : null;
-  }
-
-  function duration(a, b) {
-    const s = Date.parse(a), e = Date.parse(b);
-    if (isNaN(s) || isNaN(e) || e < s) return '';
-    const min = Math.round((e - s) / 60000);
-    return min < 60 ? min + ' min' : Math.floor(min / 60) + ' h ' + (min % 60) + ' min';
-  }
-
-  async function renderMeetingDetail(pane, id, gen) {
-    let m;
-    try {
-      m = await api.meeting(id);
-    } catch (err) {
-      if (current(gen)) replace(pane, errorBox('Could not load meeting', err));
-      return;
-    }
-    if (!current(gen)) return;
-    const recap = get(m, 'recap');
-    const ended = get(m, 'ended_at');
-    let body;
-    switch (recap) {
-      case 'ready':
-        body = untrusted('Recap (quoted, untrusted: phrased from what was said in the meeting; shown as plain text)', get(m, 'recap_text') || '');
-        break;
-      case 'running':
-        body = h('p', { class: 'muted' }, 'The recap is being written…');
-        // Poll while this exact view is still showing.
-        setTimeout(() => { if (current(gen)) renderMeetingDetail(pane, id, gen); }, 4000);
-        break;
-      case 'failed':
-        body = h('div', { class: 'error' }, 'The recap failed: ' + (get(m, 'recap_error') || 'unknown error'));
-        break;
-      case 'skipped':
-        body = h('p', { class: 'muted' }, 'No recap: ' + (get(m, 'recap_error') || 'nothing to recap'));
-        break;
-      default:
-        body = h('p', { class: 'muted' }, get(m, 'live') ? 'This meeting is still in progress.' : 'No recap for this meeting.');
-    }
-    replace(pane, h('article', { class: 'meeting' },
-      h('header', { class: 'card-head' },
-        h('h2', null, get(m, 'event_title') || 'Meeting'),
-        h('div', { class: 'row-meta' },
-          get(m, 'live') ? badge('Live', 'hot') : null,
-          recapBadge(recap),
-          h('span', { class: 'muted' }, 'Started ' + fmtDate(get(m, 'started_at'))),
-          ended ? h('span', { class: 'muted' }, duration(get(m, 'started_at'), ended)) : null)),
-      body,
-      h('div', { class: 'actions' }, button('Open a thread about this', () => openThreadAbout('meeting', id)))));
-  }
-
   // ---------- counts, recent threads, boot ----------
 
   const RECENT = 6;
@@ -1195,14 +793,55 @@
     render();
     refreshCounts();
     refreshRecent();
+    // view_workspaces.js registers this to populate the sidebar's
+    // Workspaces disclosure; it is loaded by the time boot runs (see the
+    // file header comment), but the guard keeps boot() safe even if a
+    // future build ever ships without that file.
+    if (typeof window.views._workspaceNav === 'function') window.views._workspaceNav();
     setInterval(() => { refreshCounts(); refreshRecent(); }, 60000);
     // For the native shell: open a view (a tapped notification, the HUD's
     // Edit), or refresh after a held-mic voice turn finished.
     window.water = Object.freeze({
-      open: (view, param) => { if (VIEWS.includes(view)) go(view, param ? String(param) : ''); },
+      open: (view, param) => {
+        if (!VIEWS.includes(view)) return;
+        if (view === 'workspaces' && param) {
+          const parts = String(param).split('/');
+          goWorkspace(parts[0], parts[1] || DEFAULT_WORKSPACE_SUB);
+          return;
+        }
+        go(view, param ? String(param) : '');
+      },
       refresh: () => { barStatus(''); render(); refreshCounts(); refreshRecent(); },
     });
   }
 
-  boot();
+  // window.views is the per-view render-function registry: each view file
+  // (loaded after this one; see index.html) sets window.views[<hash view
+  // name>] to its own async renderer(container, param, gen). Initialized
+  // here (not left for the first view file to create) so render() above can
+  // always safely read from it.
+  window.views = window.views || {};
+
+  // window.appShared is every helper more than one view file needs. Every
+  // view file reads it, never the reverse: nothing in this file calls into
+  // window.views except through render()'s dispatch and boot()'s
+  // _workspaceNav hook above.
+  window.appShared = {
+    state, DEFAULT_WORKSPACE_SUB,
+    toast, errText, errorBox, badge, armed, button, header, empty, setCount, current,
+    isOutward, statusLabel, statusBadge, riskLabel, actionLabel, dueBadge, extGlyph,
+    decisionPriorityClass, deadlineDays, priorityClass, readinessLabel,
+    go, goWorkspace, render, openThreadAbout,
+    payloadFields, fieldsOf, kindOf, payloadInputs, editForm, decisionResult,
+    approvalRow, renderApprovalDetail, pendingDrafts,
+    messageEl, approvalNotice, updateBarTarget, renderRecent,
+    refreshCounts, refreshRecent,
+  };
+
+  // boot() needs every view file's window.views[...] entry to already be
+  // registered. defer guarantees every script here runs before
+  // DOMContentLoaded fires, so waiting for that event (rather than calling
+  // boot() straight away, as this file used to when it held every view
+  // itself) is what makes the load order in index.html safe.
+  document.addEventListener('DOMContentLoaded', boot);
 })();

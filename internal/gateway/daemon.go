@@ -23,6 +23,7 @@ import (
 	"water/internal/audit"
 	"water/internal/backend"
 	"water/internal/connectors"
+	"water/internal/dashboards"
 	"water/internal/decisions"
 	"water/internal/gate"
 	"water/internal/meetings"
@@ -34,6 +35,7 @@ import (
 	"water/internal/twinlink"
 	"water/internal/twins"
 	"water/internal/webui"
+	"water/internal/workspaces"
 )
 
 // UIPrefix is where the daemon serves the embedded workspace UI
@@ -104,6 +106,13 @@ type Config struct {
 	// that doesn't exercise it) makes GET /v1/today report an empty
 	// needs_you list rather than erroring.
 	NeedsYou *needsyou.Service
+	// Workspaces and Dashboards are the loaded twins/<id>/workspaces/*.yaml
+	// and twins/<id>/dashboards/*.yaml registries (docs/slices/UI.md Phase
+	// 1a, internal/cli's twinDeps), read by GET /v1/workspaces and GET
+	// /v1/dashboards (Phase 2). Optional: nil answers an empty list rather
+	// than erroring, the same posture NeedsYou and Decisions already have.
+	Workspaces *workspaces.Registry
+	Dashboards *dashboards.Registry
 	// StyleBlock is the twin's style.yaml prompt block
 	// (render.Style.PromptBlock()), appended to every main-path system
 	// prompt through baseEnv. internal/cli's daemonPrewarmer must warm with
@@ -357,6 +366,10 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/threads/{id}/messages", d.auth(d.handlePostThreadMessage))
 	mux.Handle("GET /v1/meetings", d.auth(d.handleListMeetings))
 	mux.Handle("GET /v1/meetings/{id}", d.auth(d.handleGetMeeting))
+	// Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
+	// disclosure, read-only from the registries Phase 1a already loaded.
+	mux.Handle("GET /v1/workspaces", d.auth(d.handleListWorkspaces))
+	mux.Handle("GET /v1/dashboards", d.auth(d.handleListDashboards))
 	// V-notify: native-only (never in api.js or the water:// allowlist).
 	mux.Handle("GET /v1/notifications", d.auth(d.handleListNotifications))
 	mux.Handle("POST /v1/notifications/{id}/delivered", d.auth(d.handleMarkNotificationDelivered))

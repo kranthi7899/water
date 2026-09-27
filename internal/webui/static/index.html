@@ -10,7 +10,20 @@
 <link rel="stylesheet" href="app.css">
 <script src="dom.js" defer></script>
 <script src="api.js" defer></script>
+<!-- app.js is the router/shared glue: it defines window.appShared and
+     window.views (the per-view registry below fills in), then boots once
+     every deferred script below has run (it waits for DOMContentLoaded
+     rather than calling boot() itself, so load order here does not
+     matter beyond "after api.js/dom.js, before nothing in particular"). -->
 <script src="app.js" defer></script>
+<script src="view_today.js" defer></script>
+<script src="view_decisions.js" defer></script>
+<script src="view_approvals.js" defer></script>
+<script src="view_drafts.js" defer></script>
+<script src="view_meetings.js" defer></script>
+<script src="view_threads.js" defer></script>
+<script src="view_dashboards.js" defer></script>
+<script src="view_workspaces.js" defer></script>
 </head>
 <body>
 <div class="shell">
@@ -18,10 +31,16 @@
     <div class="brand">Water</div>
     <button type="button" class="nav" data-view="today"><span class="nav-label">Today</span><span class="count" data-count="today"></span></button>
     <button type="button" class="nav" data-view="decisions"><span class="nav-label">Decisions</span><span class="count" data-count="decisions"></span></button>
-    <button type="button" class="nav" data-view="drafts"><span class="nav-label">Drafts</span><span class="count" data-count="drafts"></span></button>
     <button type="button" class="nav" data-view="approvals"><span class="nav-label">Approvals</span><span class="count" data-count="approvals"></span></button>
-    <button type="button" class="nav" data-view="threads"><span class="nav-label">Threads</span></button>
+    <button type="button" class="nav" data-view="drafts"><span class="nav-label">Drafts</span><span class="count" data-count="drafts"></span></button>
     <button type="button" class="nav" data-view="meetings"><span class="nav-label">Meetings</span></button>
+    <button type="button" class="nav" data-view="threads"><span class="nav-label">Threads</span></button>
+    <hr class="nav-divider">
+    <button type="button" class="nav" data-view="dashboards"><span class="nav-label">Dashboards</span></button>
+    <details class="nav-group" id="workspaces-group">
+      <summary class="nav" data-view="workspaces"><span class="nav-label">Workspaces</span></summary>
+      <ul class="nav-sub" id="workspaces-nav-list"></ul>
+    </details>
     <section class="recent" aria-label="Recent threads">
       <h2 class="recent-head">Recent threads</h2>
       <ul class="recent-list" id="recent-threads"></ul>

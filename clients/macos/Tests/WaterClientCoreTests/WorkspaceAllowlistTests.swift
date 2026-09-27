@@ -46,6 +46,9 @@ import Testing
             ("GET", "water://app/v1/meetings?limit=30", "/v1/meetings?limit=30"),
             ("GET", "water://app/v1/meetings", "/v1/meetings"),
             ("GET", "water://app/v1/meetings/ms_77", "/v1/meetings/ms_77"),
+            // Slice UI Phase 2.
+            ("GET", "water://app/v1/workspaces", "/v1/workspaces"),
+            ("GET", "water://app/v1/dashboards", "/v1/dashboards"),
         ]
         for (m, url, want) in cases {
             #expect(allowed(m, url) == want, "\(m) \(url)")
@@ -99,6 +102,8 @@ import Testing
         #expect(!decide("HEAD", "water://app/ui/").isAllowed)
         #expect(!decide("POST", "water://app/ui/index.html").isAllowed)
         #expect(!decide("get", "water://app/v1/today").isAllowed)
+        #expect(!decide("POST", "water://app/v1/workspaces").isAllowed)
+        #expect(!decide("POST", "water://app/v1/dashboards").isAllowed)
     }
 
     @Test func wrongOriginIsDenied() {
@@ -199,6 +204,8 @@ import Testing
         #expect(!decide("GET", "water://app/ui/app.js?v=1").isAllowed)
         #expect(!decide("POST", "water://app/v1/threads/thr_1/messages?x=y").isAllowed)
         #expect(!decide("GET", "water://app/v1/approvals/env_1?status=all").isAllowed)
+        #expect(!decide("GET", "water://app/v1/workspaces?x=1").isAllowed)
+        #expect(!decide("GET", "water://app/v1/dashboards?x=1").isAllowed)
     }
 
     @Test func queryTricksAreDenied() {
@@ -328,6 +335,34 @@ import Testing
         // No id opens the view's list (a tapped "and N more" banner opens Today).
         #expect(WorkspaceAllowlist.isOpenTarget(view: "today", id: nil))
         #expect(!WorkspaceAllowlist.isOpenTarget(view: "settings", id: nil))
+        // Slice UI Phase 2: the two new page views.
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "dashboards", id: nil))
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "dashboards", id: "finance"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "dashboards", id: "../x"))
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: nil))
+    }
+
+    /// Slice UI Phase 2: a "workspaces" open target is either a bare
+    /// workspace id, or exactly two slash-separated segments ("<id>/<sub>",
+    /// the page's own hash-route shape) each independently checked with
+    /// `isID` — never the joined string, which always fails `isID` once it
+    /// contains a "/". A bad segment is denied regardless of which of the
+    /// two positions it is in.
+    @Test func workspacesOpenTargetsAreValidatedSegmentBySegment() {
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "finance"))
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "finance/overview"))
+        #expect(WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "water-team_1/sub-page_2"))
+        // A bad first segment (each still exactly two segments).
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "../overview"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "fin ance/overview"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "/overview"))
+        // A bad second segment (each still exactly two segments).
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "finance/.."))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "finance/"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "finance/sub page"))
+        // More than two segments, or an empty compound id, is denied too.
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: "finance/overview/extra"))
+        #expect(!WorkspaceAllowlist.isOpenTarget(view: "workspaces", id: ""))
     }
 
     /// V-notify's routes are native-only: the page can never list or mark

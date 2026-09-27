@@ -95,5 +95,9 @@
     cancelTask: (id) => request('POST', '/v1/tasks/' + enc(id) + '/cancel'),
     meetings: (limit) => request('GET', '/v1/meetings?limit=' + enc(limit || 30)),
     meeting: (id) => request('GET', '/v1/meetings/' + enc(id)),
+    // Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
+    // disclosure ({id, name, template, source} / {id, name, source}).
+    workspaces: () => request('GET', '/v1/workspaces'),
+    dashboards: () => request('GET', '/v1/dashboards'),
   };
 })();

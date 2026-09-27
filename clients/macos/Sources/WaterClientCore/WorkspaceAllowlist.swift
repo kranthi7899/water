@@ -84,6 +84,10 @@ public enum WorkspaceAllowlist {
         route("POST", "/v1/tasks/{id}/cancel"),
         route("GET", "/v1/meetings", query: ["limit"]),
         route("GET", "/v1/meetings/{id}"),
+        // Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
+        // disclosure. Both are read-only lists with no id segment.
+        route("GET", "/v1/workspaces"),
+        route("GET", "/v1/dashboards"),
     ]
 
     /// Judges a URL the web view asked for.
@@ -152,16 +156,32 @@ public enum WorkspaceAllowlist {
     }
 
     /// The page's views (`app.js` VIEWS), for `window.water.open(view, id)`
-    /// calls made natively.
-    public static let pageViews: Set<String> = ["today", "decisions", "drafts", "approvals", "threads", "meetings"]
+    /// calls made natively. Slice UI Phase 2 adds "dashboards" and
+    /// "workspaces".
+    public static let pageViews: Set<String> = ["today", "decisions", "drafts", "approvals", "threads", "meetings", "dashboards", "workspaces"]
 
     /// Whether native code may ask the page to open `view` at `id` (the
     /// Activity HUD's Edit, a tapped notification). Both travel as
     /// `callAsyncJavaScript` arguments, never string-built JS; this keeps
     /// them to known views and daemon ids anyway. A nil id opens the view's
     /// list (a tapped "and N more" notification opens Today).
+    ///
+    /// "workspaces" is the one view whose id can carry a second segment
+    /// (the page's own "<id>/<sub>" hash-route shape, docs/slices/UI.md
+    /// Phase 2): `id` there is either a bare workspace id, or exactly two
+    /// slash-separated segments, each independently checked with `isID` —
+    /// never the whole compound string, which `isID` would always reject
+    /// once it contains a "/".
     public static func isOpenTarget(view: String, id: String?) -> Bool {
-        pageViews.contains(view) && (id.map(isID) ?? true)
+        guard pageViews.contains(view) else { return false }
+        guard let id else { return true }
+        guard view == "workspaces" else { return isID(id) }
+        let parts = id.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        switch parts.count {
+        case 1: return isID(parts[0])
+        case 2: return isID(parts[0]) && isID(parts[1])
+        default: return false
+        }
     }
 
     /// Every id the daemon hands the UI: `env_…`, `thr_…`, `card-…`, task ids.

@@ -107,6 +107,40 @@ body {
 
 .sidebar-foot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; }
 
+/* ---------- nav divider and the Workspaces disclosure (Slice UI Phase 2) ---------- */
+
+.nav-divider { height: 1px; margin: 6px 4px; background: var(--border); border: 0; }
+
+/* <details class="nav-group">: a native disclosure, so opening/closing it
+   needs no JavaScript. Its <summary> reuses .nav's own look and the same
+   active-highlight rule (render() matches any .nav element by data-view). */
+.nav-group { border-radius: 6px; }
+.nav-group > summary.nav { list-style: none; cursor: pointer; }
+.nav-group > summary.nav::-webkit-details-marker { display: none; }
+.nav-group > summary.nav::after { content: '›'; transform: rotate(90deg); transition: transform 0.1s; color: var(--muted); }
+.nav-group[open] > summary.nav::after { transform: rotate(270deg); }
+
+.nav-sub { list-style: none; margin: 2px 0 4px; padding: 0 0 0 8px; display: flex; flex-direction: column; gap: 1px; }
+.nav-sub-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.nav-sub-item:hover { background: var(--border); }
+.nav-sub-item.active { background: var(--accent); color: var(--accent-text); }
+.nav-sub-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
 /* ---------- recent threads (under the section nav) ---------- */
 
 .recent { margin-top: 16px; min-height: 0; overflow: auto; }
@@ -195,6 +229,10 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 }
 .row:hover { border-color: var(--accent); }
 .row.selected { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+/* A non-interactive row (Dashboards, Phase 2: no per-dashboard detail
+   route yet) reuses .row's box but not its pointer cursor or hover. */
+.row.row-static { cursor: default; }
+.row.row-static:hover { border-color: var(--border); }
 
 .row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .row-title { font-weight: 600; overflow-wrap: anywhere; }

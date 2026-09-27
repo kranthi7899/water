@@ -233,20 +233,36 @@ func TestCSPIsStrict(t *testing.T) {
 }
 
 // TestNoRawPills is docs/slices/UI.md Phase 0b's "no raw pills" acceptance
-// item: app.js must no longer contain the literal old pill strings it used
-// to render a raw "Severity N" badge, an "External content" badge, a
+// item: no shipped .js file may contain the literal old pill strings once
+// used to render a raw "Severity N" badge, an "External content" badge, a
 // readiness badge shown even when ready, or a raw "Origin p0" label. Phase
 // 0b replaced these with plain-language text, a titled glyph, and a
 // priority-based row/card border class instead.
+//
+// Phase 2 split the code that used to render these (Today, the decision
+// card) out of app.js into view_today.js/view_decisions.js, so this test
+// scans every shipped .js file (webui.Files(), not a single hardcoded
+// name) — otherwise it would trivially "pass" on an app.js that no longer
+// contains the relevant code at all, rather than actually proving the
+// pills are gone from wherever that code now lives.
 func TestNoRawPills(t *testing.T) {
-	b, err := ReadFile("app.js")
+	files, err := Files()
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := string(b)
-	for _, pill := range []string{"'Severity '", "'External content'", "ready: 'Ready'", "'Origin '"} {
-		if strings.Contains(src, pill) {
-			t.Errorf("app.js still contains the raw pill %s", pill)
+	for _, f := range files {
+		if path.Ext(f) != ".js" {
+			continue
+		}
+		b, err := ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src := string(b)
+		for _, pill := range []string{"'Severity '", "'External content'", "ready: 'Ready'", "'Origin '"} {
+			if strings.Contains(src, pill) {
+				t.Errorf("%s still contains the raw pill %s", f, pill)
+			}
 		}
 	}
 }
