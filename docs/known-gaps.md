@@ -122,19 +122,23 @@ handler returns, restoring the invariant `internal/nervous/actions.go`'s
 write-intent path already upheld correctly. Regression test:
 `TestAnswerQuickRecordsIntentOrigin` (`internal/nervous/promotion_test.go`).
 
-## Slice R: `TestQuickInvokeTaintedResultEscalatesSession` is time-of-day flaky
+## Slice R: `TestQuickInvokeTaintedResultEscalatesSession` was time-of-day flaky (FIXED)
 
-Found while building R-22 (pre-existing: reproduces identically on
-R-21's tick commit, `29dc2b9`, before this task's changes). The test
-(`internal/gateway/quick_test.go`) upserts an event at `time.Now().Add(time.Hour)`
-and expects `quick.calendar`'s default "when" range to include it and mark
-the session tainted. Whenever the test runs late enough in the local day
-that `+1h` crosses local midnight, the event falls outside `quick.calendar`'s
-default range and the assertion fails with "session taint after = clean,
-want tainted". Not fixed here: root cause is in the fixture's fixed
-`+1h` offset versus `store.calendar_events`'s actual default window, not
-anything R-22 touches (`internal/nervous/promote`, `mainpath.go`'s
-BeginMain/EndMain wiring, or the new `/v1/route/candidates` endpoint).
+Found while building R-22 (pre-existing: reproduced identically on
+R-21's tick commit, `29dc2b9`, before that task's changes). The test
+(`internal/gateway/quick_test.go`) upserted an event at `time.Now().Add(time.Hour)`
+and expected `quick.calendar`'s default "when" range to include it and mark
+the session tainted; whenever the test ran late enough in the local day
+that `+1h` crossed local midnight, the event fell outside the default
+range and the assertion failed with "session taint after = clean, want
+tainted". Left unfixed across two later rediscoveries (Slice UI Phase
+3d independently reproduced it via `git stash`, then it surfaced again
+while otherwise blocked on Phase 7's real prerequisites) before finally
+being fixed: the event is now anchored to noon of `todayBounds(now)`'s
+own day rather than to `now` directly, always inside today's window
+regardless of the current wall-clock hour. Same root cause and fix
+applied to `TestGetTodayReturnsNeedsYouAndSchedule`, which had an
+identical `now.Add(time.Hour)` pattern.
 Whoever next touches `quick_test.go` or the `store.calendar_events`
 handler should pin the fixture's event time to a fixed, mid-day instant
 (the way `internal/nervous/promote/candidates_test.go`'s `day1`/`day2`
@@ -731,18 +735,9 @@ any daemon started from this binary unless a real send is intended.
 
 ## Found in Slice UI, Phase 3d (2026-09-26)
 
-- **A real, pre-existing test flake near local midnight**, independently
-  reproduced (not just reported by a build): `internal/gateway`'s
-  `TestQuickInvokeTaintedResultEscalatesSession` and
-  `TestGetTodayReturnsNeedsYouAndSchedule` both compute "today" from
-  `time.Now()`'s local-day bounds and seed a fixture event an hour or so
-  ahead of "now" — late at night (confirmed failing at ~23:00 PDT) that
-  pushes the fixture past local midnight into "tomorrow", outside the
-  test's own `[start,end)` window. Fix: seed relative to a fixed,
-  injected clock (or anchor the fixture to the start of the test's own
-  "today" rather than `time.Now()` directly) instead of wall-clock
-  `time.Now()` plus a fixed offset. Low priority — it only fails for
-  roughly the hour or so before local midnight.
+- ~~A real, pre-existing test flake near local midnight~~ — **fixed
+  2026-09-27**; see the updated "Slice R" entry above for the full
+  history and fix.
 
 ## Found in Slice UI, Phase 4 (2026-09-27)
 
