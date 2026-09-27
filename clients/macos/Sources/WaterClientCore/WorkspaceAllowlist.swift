@@ -91,6 +91,13 @@ public enum WorkspaceAllowlist {
         // disclosure. Both are read-only lists with no id segment.
         route("GET", "/v1/workspaces"),
         route("GET", "/v1/dashboards"),
+        // Phase 3b: the per-action stage route (two dynamic segments; the
+        // route() helper only recognises the literal "{id}" token, so it is
+        // repeated) and the related-data panel behind "View related data
+        // (N)". The old, function-keyed decisions/{id}/stage route above is
+        // kept for one release, unchanged.
+        route("POST", "/v1/decisions/{id}/actions/{id}/stage"),
+        route("GET", "/v1/decisions/{id}/related"),
     ]
 
     /// Judges a URL the web view asked for.
@@ -192,6 +199,38 @@ public enum WorkspaceAllowlist {
         !s.isEmpty && s.count <= 128 && s.unicodeScalars.allSatisfy { isAlnum($0) || $0 == "_" || $0 == "-" }
     }
 
+    /// U16's fixed allowlist for `open-external`: the only hosts the native
+    /// side will ever hand to `NSWorkspace`. Exact match only — no
+    /// subdomain rule of any kind, the most conservative reading of "keep
+    /// it conservative": a real subdomain that legitimately needs opening
+    /// would have to be added here by hand, as its own owner decision,
+    /// never inferred from one of these five.
+    public static let externalHostAllowlist: Set<String> = [
+        "linear.app", "mail.google.com", "calendar.google.com", "docs.google.com", "github.com",
+    ]
+
+    /// Resolves an `open-external` `WorkspaceMessage`'s own `url` field to
+    /// something safe to open, or `nil` to open nothing. `source` and `id`
+    /// are not used here at all — see `WorkspaceMessage`'s own doc comment
+    /// for why the message carries a server-resolved `url` rather than
+    /// making the native side re-derive one from `source`/`id` alone. This
+    /// is the only check standing between the workspace page and
+    /// `NSWorkspace`, so it is deliberately strict:
+    ///   - `urlString` must parse as an absolute URL at all (a malformed or
+    ///     non-URL string is refused, never crashes anything);
+    ///   - its scheme must be exactly `https`;
+    ///   - it must carry no userinfo (`user:pass@host`), which could hide
+    ///     the real host from a casual read of the URL;
+    ///   - its host must be an exact match in `externalHostAllowlist`.
+    public static func resolvedExternalURL(source: String, id: String, urlString: String) -> URL? {
+        guard let url = URL(string: urlString) else { return nil }
+        guard url.scheme?.lowercased() == "https" else { return nil }
+        guard url.user == nil, url.password == nil else { return nil }
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        guard externalHostAllowlist.contains(host) else { return nil }
+        return url
+    }
+
     /// `name.html`, `name.css` or `name.js`, name from `[A-Za-z0-9_-]` — the
     /// only file types internal/webui serves.
     private static func isAssetName(_ s: String) -> Bool {
@@ -234,8 +273,27 @@ public enum WorkspaceMessage: Equatable {
     /// The bar's mic was released: stop listening and send. Exactly
     /// `{type: "mic-up"}`.
     case micUp
+    /// "View related data"'s per-source open affordance (docs/slices/UI.md
+    /// U16). Exactly `{type: "open-external", source, id, url}`.
+    ///
+    /// `url` is exactly what the daemon's own `GET
+    /// /v1/decisions/{id}/related` already resolved server-side from the
+    /// store record `source`/`id` refer to (a Linear/GitHub issue's own API
+    /// URL, a Google Doc's own Drive URL, ...) — never page text, never
+    /// anything a model wrote, and never re-derived here: the native side's
+    /// only job for this case is `WorkspaceAllowlist.resolvedExternalURL`'s
+    /// allowlist check, then handing the result to `NSWorkspace`. `source`
+    /// and `id` travel alongside it only as the same opaque, shape-checked
+    /// identifiers the related-data response itself carries (for logging or
+    /// future use); they play no part in deciding what may be opened.
+    case openExternal(source: String, id: String, url: String)
 
     public static let handlerName = "water"
+
+    /// The longest `url` string this case accepts (comfortably above any
+    /// real Linear/Drive/GitHub URL); a longer string is refused outright
+    /// rather than parsed.
+    private static let maxExternalURLLength = 2048
 
     /// `body` is what WebKit hands over (a JSON-like Foundation value).
     public static func parse(_ body: Any) -> WorkspaceMessage? {
@@ -247,6 +305,14 @@ public enum WorkspaceMessage: Equatable {
         case "mic-up":
             guard dict.count == 1 else { return nil }
             return .micUp
+        case "open-external":
+            guard dict.count == 4,
+                  let source = dict["source"] as? String, WorkspaceAllowlist.isID(source),
+                  let id = dict["id"] as? String, WorkspaceAllowlist.isID(id),
+                  let urlString = dict["url"] as? String, urlString.utf8.count <= maxExternalURLLength,
+                  URL(string: urlString) != nil
+            else { return nil }
+            return .openExternal(source: source, id: id, url: urlString)
         default:
             return nil
         }

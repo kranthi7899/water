@@ -673,6 +673,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.voice.state == .listening { self.hud.holdEnded() }
             self.voice.endHold()
         }
+        // U16: "View related data"'s open affordance. The page already
+        // handed over the real, server-resolved URL (see
+        // WorkspaceMessage.openExternal's own doc comment); this closure's
+        // only job is the host allowlist check, then NSWorkspace. A denied
+        // or malformed URL opens nothing at all.
+        workspace.onOpenExternal = { source, id, urlString in
+            guard let url = WorkspaceAllowlist.resolvedExternalURL(source: source, id: id, urlString: urlString) else { return }
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// V-notify. Its own client, so a poll never waits behind a turn or a

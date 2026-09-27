@@ -80,6 +80,11 @@
     decisions: () => request('GET', '/v1/decisions'),
     stageDecision: (id, fn, payload) => request('POST', '/v1/decisions/' + enc(id) + '/stage', { function: fn, payload }),
     dismissDecision: (id, reason) => request('POST', '/v1/decisions/' + enc(id) + '/dismiss', { reason }),
+    // Phase 3b: the per-action stage route (docs/slices/UI.md), keyed by a
+    // decision card's own Suggestion.ID rather than a function name, so two
+    // suggestions on the same card stage into two independent envelopes.
+    stageDecisionAction: (id, actionId, payload) => request('POST', '/v1/decisions/' + enc(id) + '/actions/' + enc(actionId) + '/stage', { payload }),
+    relatedDecision: (id) => request('GET', '/v1/decisions/' + enc(id) + '/related'),
     approvals: (status, limit, kind) => request('GET', '/v1/approvals?status=' + enc(status) + '&limit=' + enc(limit || 100) + (kind ? '&kind=' + enc(kind) : '')),
     approval: (id) => request('GET', '/v1/approvals/' + enc(id)),
     decideApproval: (id, payloadHash, reply) => request('POST', '/v1/approvals/' + enc(id) + '/decision', { payload_hash: payloadHash, reply }),

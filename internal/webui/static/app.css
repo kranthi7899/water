@@ -313,6 +313,31 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 
 .not-granted { font-size: 12px; align-self: center; }
 
+/* ---------- decision card redesign (docs/slices/UI.md Phase 3b) ---------- */
+
+.card-columns { display: flex; gap: 20px; margin: 12px 0; flex-wrap: wrap; }
+.card-col { flex: 1 1 220px; min-width: 200px; }
+.card-col h3 { margin: 0 0 6px; font-size: 13px; color: var(--muted); }
+.card-col ul { list-style: none; margin: 0; padding: 0; }
+.evidence-col li { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; overflow-wrap: anywhere; }
+.ev-icon { flex: none; }
+.team-signal li { display: flex; gap: 8px; align-items: center; margin: 6px 0; overflow-wrap: anywhere; }
+.team-signal .avatar { width: 24px; height: 24px; font-size: 11px; }
+
+.recommendation { margin: 12px 0 0; overflow-wrap: anywhere; }
+.missing-info { margin: 4px 0 0; }
+
+.suggestions { margin: 12px 0; }
+.suggestion-row { margin: 8px 0; padding: 8px 0; border-top: 1px solid var(--border); }
+.suggestion-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sugg-icon { flex: none; }
+.suggestion-line .sugg-sentence { flex: 1 1 auto; }
+
+.full-width { display: block; width: 100%; margin: 10px 0; }
+.related-area { margin: 4px 0 10px; }
+.related-list { list-style: none; margin: 0; padding: 0; }
+.related-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 4px 0; overflow-wrap: anywhere; }
+
 /* ---------- quoted / untrusted blocks ---------- */
 
 figure { margin: 12px 0; }

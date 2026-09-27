@@ -360,6 +360,12 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("POST /v1/approvals/{id}/request-changes", d.auth(d.handleRequestChanges))
 	mux.Handle("POST /v1/decisions/{id}/stage", d.auth(d.handleStageDecision))
 	mux.Handle("POST /v1/decisions/{id}/dismiss", d.auth(d.handleDismissDecision))
+	// Slice UI Phase 3b: the per-action stage endpoint replaces the
+	// function-keyed route above for the redesigned decision card's
+	// suggestion rows (the old route is kept, unchanged, for one release),
+	// and the related-data panel behind "View related data (N)".
+	mux.Handle("POST /v1/decisions/{id}/actions/{action_id}/stage", d.auth(d.handleStageDecisionAction))
+	mux.Handle("GET /v1/decisions/{id}/related", d.auth(d.handleRelatedDecision))
 	mux.Handle("GET /v1/threads", d.auth(d.handleListThreads))
 	mux.Handle("POST /v1/threads", d.auth(d.handleCreateThread))
 	mux.Handle("POST /v1/threads/anchor", d.auth(d.handleAnchorThread))

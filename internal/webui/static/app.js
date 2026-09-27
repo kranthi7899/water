@@ -312,9 +312,35 @@
     }
   }
 
+  // openExternal posts {type: 'open-external', source, id, url} to the
+  // native side (docs/slices/UI.md U16, "View related data"'s per-source
+  // open affordance). url is exactly what api.relatedDecision already
+  // resolved server-side from the record's own stored field -- this page
+  // never edits, guesses at or otherwise fabricates it, and it never
+  // navigates anywhere by itself (there is no other way out of this page:
+  // every outbound link goes through this one message). The native side is
+  // the only thing that decides whether to actually hand the URL off
+  // (checking a fixed host allowlist first), so a page not running inside
+  // the native shell (no water message handler present) simply can't do
+  // this at all -- the caller should only offer the affordance when a
+  // source actually carries a url.
+  function openExternal(source, id, url) {
+    const wk = window.webkit;
+    const handler = wk && wk.messageHandlers && wk.messageHandlers.water;
+    if (!handler || typeof handler.postMessage !== 'function') {
+      toast('Opening external links needs the Water app.', 'warn');
+      return;
+    }
+    try {
+      handler.postMessage({ type: 'open-external', source: String(source || ''), id: String(id || ''), url: String(url || '') });
+    } catch (err) {
+      toast('Could not open that: ' + errText(err), 'bad');
+    }
+  }
+
   // ---------- payload forms (staging and editing) ----------
   //
-  // Shared by view_decisions.js (stageForm) and view_approvals.js /
+  // Shared by view_decisions.js (stageActionForm) and view_approvals.js /
   // view_drafts.js (renderApprovalDetail's Edit button), so they live here
   // rather than in either view file.
 
@@ -950,7 +976,7 @@
     toast, errText, errorBox, badge, armed, button, header, empty, setCount, current,
     isOutward, statusLabel, statusBadge, riskLabel, actionLabel, dueBadge, extGlyph, kindGlyph,
     decisionPriorityClass, deadlineDays, priorityClass, readinessLabel,
-    go, goWorkspace, render, openThreadAbout,
+    go, goWorkspace, render, openThreadAbout, openExternal,
     payloadFields, fieldsOf, kindOf, payloadInputs, editForm, decisionResult,
     approvalRow, renderApprovalDetail, pendingDrafts,
     messageEl, approvalNotice, updateBarTarget, renderRecent,

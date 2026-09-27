@@ -149,6 +149,11 @@ final class WorkspaceWindowController: NSObject, WKNavigationDelegate, WKUIDeleg
     /// (`{type: "mic-down", thread}`), and released (`{type: "mic-up"}`).
     var onMicDown: ((String) -> Void)?
     var onMicUp: (() -> Void)?
+    /// "View related data"'s open affordance (U16): already shape-checked
+    /// by `WorkspaceMessage.parse`, but not yet allowlist-checked — the
+    /// caller (AppDelegate) is expected to run the URL through
+    /// `WorkspaceAllowlist.resolvedExternalURL` before opening anything.
+    var onOpenExternal: ((_ source: String, _ id: String, _ url: String) -> Void)?
 
     private let schemeHandler: WorkspaceSchemeHandler
     private var window: NSWindow?
@@ -296,6 +301,7 @@ final class WorkspaceWindowController: NSObject, WKNavigationDelegate, WKUIDeleg
         switch WorkspaceMessage.parse(message.body) {
         case .micDown(let thread)?: onMicDown?(thread)
         case .micUp?: onMicUp?()
+        case .openExternal(let source, let id, let url)?: onOpenExternal?(source, id, url)
         case nil: break // anything else, a malformed thread id included, is ignored
         }
     }

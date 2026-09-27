@@ -63,6 +63,12 @@ func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
 		if cs, ok := staged[c.ID]; ok {
 			v.CardState = &cs
 		}
+		actionStates, err := d.cardActionStateViews(r.Context(), c.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		v.ActionStates = actionStates
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -76,6 +82,14 @@ func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
 type decisionCardView struct {
 	*decisions.Card
 	CardState *cardStateView `json:"card_state,omitempty"`
+	// ActionStates is Phase 3b's per-suggestion sibling of CardState, keyed
+	// by decisions.Suggestion.ID: it lets the Decisions view show a
+	// suggestion row as already staged (and load its read-back) without
+	// the CEO clicking Review again, exactly as CardState already does for
+	// the whole, function-keyed card. Two entries on the same card are
+	// entirely independent (store.CardActionStates, docs/slices/UI.md
+	// Phase 1c): staging one never touches the other's row.
+	ActionStates map[string]cardActionStateView `json:"action_states,omitempty"`
 }
 
 // cardStateView is a staged card's record: the envelope it waits on and
@@ -194,6 +208,41 @@ func (d *Daemon) handleEmailDecisionReport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "approval_id": env.ID})
+}
+
+// cardActionStateView is one staged action's record, the per-action
+// analogue of cardStateView: the envelope it waits on and that envelope's
+// current status (pending until answered). approval_status is empty when
+// the envelope can't be read.
+type cardActionStateView struct {
+	Status         string `json:"status"`
+	ApprovalID     string `json:"approval_id"`
+	ApprovalStatus string `json:"approval_status,omitempty"`
+}
+
+// cardActionStateViews reads every one of cardID's staged actions
+// (store.CardActionStates) and each one's envelope status now (stale
+// envelopes are expired first, exactly as stagedCardViews does for the
+// single card_states row, so a lapsed one never reads as pending).
+func (d *Daemon) cardActionStateViews(ctx context.Context, cardID string) (map[string]cardActionStateView, error) {
+	states, err := d.cfg.Store.CardActionStates(ctx, cardID)
+	if err != nil || len(states) == 0 {
+		return nil, err
+	}
+	if err := d.cfg.Approvals.ExpireStale(ctx); err != nil {
+		return nil, err
+	}
+	out := make(map[string]cardActionStateView, len(states))
+	for _, s := range states {
+		v := cardActionStateView{Status: s.Status, ApprovalID: s.ApprovalID}
+		if s.ApprovalID != "" {
+			if env, err := d.cfg.Approvals.Get(ctx, s.ApprovalID); err == nil {
+				v.ApprovalStatus = string(env.Status)
+			}
+		}
+		out[s.ActionID] = v
+	}
+	return out, nil
 }
 
 // mergeWithRecords is decisions.MergeFromStore over this daemon's store

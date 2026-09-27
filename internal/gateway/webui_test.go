@@ -89,7 +89,13 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		t.Errorf("api.js has %d '/edit' suffixes and %d %s; want exactly the one approval edit route", n, m, editRoute)
 	}
 	// Every other quoted path suffix api.js appends to an id is one of these.
-	suffixes := map[string]bool{"'/stage'": true, "'/dismiss'": true, "'/decision'": true, "'/edit'": true, "'/messages'": true, "'/cancel'": true, "'/request-changes'": true}
+	suffixes := map[string]bool{
+		"'/stage'": true, "'/dismiss'": true, "'/decision'": true, "'/edit'": true, "'/messages'": true,
+		"'/cancel'": true, "'/request-changes'": true,
+		// Phase 3b: the per-action stage route's middle segment and the
+		// related-data route.
+		"'/actions/'": true, "'/related'": true,
+	}
 	for _, m := range regexp.MustCompile(`\+ '(/[^']*)'`).FindAllStringSubmatch(src, -1) {
 		if lit := "'" + m[1] + "'"; !suffixes[lit] {
 			t.Errorf("api.js appends %s to a path, which is not on the UI's allowlist", lit)
@@ -150,5 +156,86 @@ func TestApprovalsViewRendersWarnings(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "warnings") {
 		t.Error("view_approvals.js must reference an envelope's warnings (finding 23's amber box)")
+	}
+}
+
+// TestDecisionsViewMapsEveryEvidenceKindToAnIcon is docs/slices/UI.md
+// Phase 3b: the left column's evidence lines carry an icon from
+// decisions.EvidenceKind's closed set, and never inline source text.
+func TestDecisionsViewMapsEveryEvidenceKindToAnIcon(t *testing.T) {
+	b, err := webui.ReadFile("view_decisions.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, kind := range []string{"money", "customer", "issue", "mail", "calendar", "research"} {
+		if !strings.Contains(src, "'"+kind+"'") && !strings.Contains(src, kind+":") {
+			t.Errorf("view_decisions.js has no icon mapping for evidence kind %q", kind)
+		}
+	}
+	if strings.Contains(src, "'ev-source'") || strings.Contains(src, "\"ev-source\"") {
+		t.Error("view_decisions.js still renders an evidence line's inline source (Phase 3b: source is reachable only through 'View related data')")
+	}
+}
+
+// TestDecisionsViewRendersMissingInfoOnlyWhenGapsExist pins U12's exact
+// wording: a muted "Missing info: ..." line under the recommendation, never
+// rendered as an unconditional empty line.
+func TestDecisionsViewRendersMissingInfoOnlyWhenGapsExist(t *testing.T) {
+	b, err := webui.ReadFile("view_decisions.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "Missing info: ") {
+		t.Error(`view_decisions.js must render the literal "Missing info: " line (U12)`)
+	}
+	if !strings.Contains(src, "missing-info") {
+		t.Error("view_decisions.js must mark the missing-info line as muted (class missing-info)")
+	}
+	if !regexp.MustCompile(`if\s*\(\s*gaps\.length\s*\)\s*\{`).MatchString(src) {
+		t.Error(`view_decisions.js must gate the missing-info line on "gaps.length" (shown only when gaps exist)`)
+	}
+}
+
+// TestDecisionsViewRendersTeamSignalSimulatedSuffix pins U8's rule as
+// rendered on the card: a team signal line reads "(simulated)" only when
+// Signal.Simulated is set.
+func TestDecisionsViewRendersTeamSignalSimulatedSuffix(t *testing.T) {
+	b, err := webui.ReadFile("view_decisions.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "(simulated)") {
+		t.Error(`view_decisions.js must append "(simulated)" to a simulated team signal`)
+	}
+	if !strings.Contains(src, "TeamSignal") && !strings.Contains(src, "team_signal") {
+		t.Error("view_decisions.js must render Card.TeamSignal")
+	}
+}
+
+// TestDecisionsViewRelatedCountAndReview pins the "View related data (N)"
+// count formula and the per-action Review flow's endpoint calls.
+func TestDecisionsViewRelatedCountAndReview(t *testing.T) {
+	b, err := webui.ReadFile("view_decisions.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	if !strings.Contains(src, "View related data (") {
+		t.Error(`view_decisions.js must render the literal "View related data (N)" button`)
+	}
+	if !strings.Contains(src, "SourceItemIDs") && !strings.Contains(src, "source_item_ids") {
+		t.Error("view_decisions.js's related-data count must be drawn from SourceItemIDs")
+	}
+	if !strings.Contains(src, "evidence.length") {
+		t.Error("view_decisions.js's related-data count must add the evidence sources' length")
+	}
+	if !strings.Contains(src, "stageDecisionAction") {
+		t.Error("view_decisions.js's suggestion Review flow must call api.stageDecisionAction")
+	}
+	if !strings.Contains(src, "relatedDecision") {
+		t.Error("view_decisions.js's related-data panel must call api.relatedDecision")
 	}
 }

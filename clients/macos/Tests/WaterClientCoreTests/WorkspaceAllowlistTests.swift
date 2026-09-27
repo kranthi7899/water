@@ -50,6 +50,10 @@ import Testing
             // Slice UI Phase 2.
             ("GET", "water://app/v1/workspaces", "/v1/workspaces"),
             ("GET", "water://app/v1/dashboards", "/v1/dashboards"),
+            // Slice UI Phase 3b.
+            ("POST", "water://app/v1/decisions/card-0123abcd/actions/sugg-0123abcd/stage",
+             "/v1/decisions/card-0123abcd/actions/sugg-0123abcd/stage"),
+            ("GET", "water://app/v1/decisions/card-0123abcd/related", "/v1/decisions/card-0123abcd/related"),
         ]
         for (m, url, want) in cases {
             #expect(allowed(m, url) == want, "\(m) \(url)")
@@ -105,6 +109,9 @@ import Testing
         #expect(!decide("get", "water://app/v1/today").isAllowed)
         #expect(!decide("POST", "water://app/v1/workspaces").isAllowed)
         #expect(!decide("POST", "water://app/v1/dashboards").isAllowed)
+        #expect(!decide("GET", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)
+        #expect(!decide("POST", "water://app/v1/decisions/card-1/related").isAllowed)
+        #expect(!decide("PUT", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)
     }
 
     @Test func wrongOriginIsDenied() {
@@ -390,6 +397,70 @@ import Testing
         ]
         for (m, url) in cases {
             #expect(!decide(m, url).isAllowed, "\(m) \(url) must be denied")
+        }
+    }
+
+    // MARK: open-external (U16)
+
+    @Test func openExternalMessagesParseOnlyTheExactShape() {
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA-3", "url": "https://linear.app/water/issue/CRA-3"])
+                == .openExternal(source: "linear", id: "CRA-3", url: "https://linear.app/water/issue/CRA-3"))
+
+        // Missing or extra fields, bad shapes, and non-string values are all denied.
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA-3"]) == nil) // no url
+        #expect(WorkspaceMessage.parse(["type": "open-external", "id": "CRA-3", "url": "https://linear.app/x"]) == nil) // no source
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "url": "https://linear.app/x"]) == nil) // no id
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA-3", "url": "https://linear.app/x", "extra": "x"]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "lin ear", "id": "CRA-3", "url": "https://linear.app/x"]) == nil) // bad source shape
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA/3", "url": "https://linear.app/x"]) == nil) // bad id shape
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA-3", "url": 12]) == nil) // non-string url
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": 1, "id": "CRA-3", "url": "https://linear.app/x"]) == nil) // non-string source
+
+        // An empty or over-long url string does not crash parse and yields
+        // nil. parse() only shape-checks that url is URL(string:)-parseable
+        // at all and within length; it is deliberately not the place that
+        // decides scheme/host safety -- Foundation's URL(string:) is lenient
+        // enough to parse plenty of schemeless, host-less text as a
+        // "relative" URL (e.g. "not a url" parses fine), so a string like
+        // that DOES parse here and is left to resolvedExternalURL (tested
+        // below) to refuse for having no https scheme or allowlisted host.
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA-3", "url": ""]) == nil)
+        #expect(WorkspaceMessage.parse(["type": "open-external", "source": "linear", "id": "CRA-3", "url": String(repeating: "a", count: 3000)]) == nil) // too long
+
+        // The pre-existing "open"-with-"url" case (a naive design this one
+        // deliberately avoids) must still parse as nil: the type string
+        // itself, not merely the presence of a url field, decides.
+        #expect(WorkspaceMessage.parse(["type": "open", "url": "https://linear.app/x"]) == nil)
+    }
+
+    @Test func resolvedExternalURLAllowsExactlyTheFixedAllowlist() {
+        for host in ["linear.app", "mail.google.com", "calendar.google.com", "docs.google.com", "github.com"] {
+            let url = "https://" + host + "/some/path?x=1"
+            #expect(WorkspaceAllowlist.resolvedExternalURL(source: "s", id: "i", urlString: url)?.absoluteString == url,
+                    "\(host) should be allowed")
+        }
+    }
+
+    @Test func resolvedExternalURLDeniesEverythingElse() {
+        let denied = [
+            "https://evil.example/",
+            "https://linear.app.evil.example/", // host confusion via suffix
+            "https://evil.example/linear.app",
+            "https://sub.linear.app/", // no subdomain rule: exact host only
+            "http://linear.app/", // wrong scheme
+            "ftp://github.com/",
+            "https://user:pass@github.com/", // userinfo hides the real host
+        ]
+        for u in denied {
+            let result = WorkspaceAllowlist.resolvedExternalURL(source: "s", id: "i", urlString: u)
+            #expect(result == nil, "\(u) should be denied, got \(String(describing: result))")
+        }
+    }
+
+    @Test func resolvedExternalURLNeverCrashesOnGarbage() {
+        for bad in ["", " ", "not a url", "\u{0}", "https://", "://linear.app",
+                    String(repeating: "x", count: 5000)] {
+            #expect(WorkspaceAllowlist.resolvedExternalURL(source: "s", id: "i", urlString: bad) == nil, "\(bad.debugDescription) should be denied, not crash")
         }
     }
 }
