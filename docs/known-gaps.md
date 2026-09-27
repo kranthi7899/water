@@ -682,12 +682,12 @@ any daemon started from this binary unless a real send is intended.
 
 ## Found in the adversarial code-review pass (2026-09-26)
 
-- `internal/gateway`'s `Daemon.recaps` map never removes an entry once a
-  meeting's recap finishes — a resource leak of the same shape as the
-  turn-table one this pass fixed, but bounded by how many meetings are
-  ever stopped in a day, so not a practical problem at this app's scale
-  yet. A safe fix needs a retention timestamp plus care not to break
-  `meetingViewOf`'s fallback-to-store logic for skipped/failed recaps.
+- ~~`internal/gateway`'s `Daemon.recaps` map never removes an entry once a
+  meeting's recap finishes~~ — **fixed 2026-09-27**. A ready recap now
+  deletes its own entry immediately once its durable `store.Meeting`
+  write succeeds; a skipped/failed recap (no durable form) is evicted by
+  a new `sweepRecaps`/`RunRecapSweep` after 24h, mirroring the turn-table
+  sweep this same review already added.
 - Swift: a mid-`startCapture` audio-device change landing in the narrow
   synchronous window before `MeetingController`'s `state` is set to
   `.active` is silently dropped instead of tearing down/notifying — the
