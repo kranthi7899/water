@@ -471,6 +471,15 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// background loop here, so it stops with the rest of the daemon.
 	go turnTable.RunSweep(sigCtx, turn.DefaultSweepInterval)
 
+	// d.recaps otherwise only shrinks for a successful (ready) recap,
+	// which deletes itself immediately once its durable store.Meeting
+	// write lands (workspace_meetings.go's startRecapOnStop). A
+	// skipped/failed recap has no durable form, so without this its entry
+	// would linger for the daemon's whole life (found in an adversarial
+	// review, 2026-09-26). Same sigCtx-tied posture as the turn-table
+	// sweep just above.
+	go d.RunRecapSweep(sigCtx, gateway.RecapSweepInterval)
+
 	// briefEnv is a plain (non-per-turn) runtime.Env, just enough to compute
 	// and cache the morning brief from the background sync loop — the same
 	// ComputeAndCacheBrief the on-demand fast path calls, so the two share

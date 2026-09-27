@@ -37,6 +37,63 @@ const (
 type recapState struct {
 	Status string
 	Err    string
+	// At is when this state was last set, used only by sweepRecaps to
+	// decide when a terminal skipped/failed entry (the only states that
+	// ever linger — see startRecapOnStop's ready case, which deletes
+	// immediately instead of recording one) is old enough to evict.
+	At time.Time
+}
+
+// recapRetention bounds how long a skipped/failed recap's in-memory state
+// survives (found in an adversarial review, 2026-09-26: d.recaps grew
+// without bound, since nothing ever removed an entry). A ready recap needs
+// no retention at all -- startRecapOnStop deletes it the moment the
+// durable store.Meeting write it depends on succeeds, since
+// meetingViewOf's own !tracked fallback already reads that row correctly.
+// skipped/failed recaps have no durable form, so they still need to
+// survive long enough for a client to see the final status at least
+// once; 24h is generous for that while keeping the map's lifetime bounded
+// to roughly one day's worth of non-ready outcomes, not the app's whole
+// uptime.
+const recapRetention = 24 * time.Hour
+
+// RecapSweepInterval is how often RunRecapSweep calls sweepRecaps when the
+// daemon doesn't override it.
+const RecapSweepInterval = time.Hour
+
+// sweepRecaps evicts a skipped/failed recap entry once it is older than
+// recapRetention. Never touches a running entry (bounded by recapTimeout
+// anyway, and evicting one mid-flight would only cost a future set() call
+// its cheap map re-insert, never lose data) or a ready one (already
+// deleted immediately, see startRecapOnStop).
+func (d *Daemon) sweepRecaps(now time.Time) {
+	d.recapMu.Lock()
+	defer d.recapMu.Unlock()
+	for id, st := range d.recaps {
+		if (st.Status == recapSkipped || st.Status == recapFailed) && now.Sub(st.At) > recapRetention {
+			delete(d.recaps, id)
+		}
+	}
+}
+
+// RunRecapSweep calls sweepRecaps every interval until ctx is done,
+// mirroring internal/nervous/turn.Table.RunSweep's exact pattern (the
+// daemon runs both the same way, tied to its own shutdown context).
+// interval <= 0 means RecapSweepInterval.
+func (d *Daemon) RunRecapSweep(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = RecapSweepInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.sweepRecaps(time.Now())
+		}
+	}
 }
 
 // startRecapOnStop starts the after-meeting recap for a session this
@@ -70,12 +127,24 @@ func (d *Daemon) startRecapOnStop(ctx context.Context, sessionID string) string 
 		d.recapMu.Unlock()
 		return st.Status
 	}
-	d.recaps[sessionID] = recapState{Status: recapRunning}
+	d.recaps[sessionID] = recapState{Status: recapRunning, At: time.Now()}
 	d.recapMu.Unlock()
 
 	set := func(st recapState) {
+		st.At = time.Now()
 		d.recapMu.Lock()
 		d.recaps[sessionID] = st
+		d.recapMu.Unlock()
+	}
+	// clearReady deletes the entry outright instead of recording "ready":
+	// by the time this is called, meetings.Recap has already durably
+	// written the store.Meeting row, so meetingViewOf's own !tracked
+	// fallback reads it correctly with no in-memory state needed at all —
+	// the common, successful case leaves nothing in d.recaps to sweep or
+	// grow (see recapRetention's own doc comment).
+	clearReady := func() {
+		d.recapMu.Lock()
+		delete(d.recaps, sessionID)
 		d.recapMu.Unlock()
 	}
 	if d.cfg.Backend == nil {
@@ -109,7 +178,7 @@ func (d *Daemon) startRecapOnStop(ctx context.Context, sessionID string) string 
 			set(recapState{Status: recapFailed, Err: err.Error()})
 			return
 		}
-		set(recapState{Status: recapReady})
+		clearReady()
 	}()
 	return recapRunning
 }
