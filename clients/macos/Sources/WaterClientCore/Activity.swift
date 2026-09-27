@@ -84,8 +84,16 @@ public struct ActivityModel: Equatable {
         case searching
     }
 
-    /// Tools whose run shows as `searching`.
-    public static let searchTools: Set<String> = ["research.web"]
+    /// Tools whose run shows as `searching`: a web search, and -- reusing
+    /// the identical look as the globe's general "announcing tools" state
+    /// rather than inventing a second one (docs/slices/UI.md Phase 6,
+    /// U1-A) -- a Linear comment relay, whose result is what a `note`
+    /// artifact renders in the glass tab once it completes. As of Phase 6
+    /// no connector calls linear.create_comment yet (it's Phase 7/U4 work),
+    /// so this entry is inert in production today, exactly like
+    /// gateway/artifact.go's note-detection mechanism it's paired with:
+    /// both are real and ready, waiting for that connector to exist.
+    public static let searchTools: Set<String> = ["research.web", "linear.create_comment"]
 
     /// Seconds the HUD stays after an interaction ends with nothing pending.
     public static let dismissDelay: TimeInterval = 4

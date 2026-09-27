@@ -744,7 +744,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Turn on Water's global hotkeys"
         alert.informativeText = """
-        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice mode), \(HotKeyConfig.meeting.label) (meeting capture) and \(HotKeyConfig.workspace.label) (workspace), macOS needs you to allow it once:
+        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice mode, then hold Space to talk), \(HotKeyConfig.meeting.label) (meeting capture) and \(HotKeyConfig.workspace.label) (workspace), macOS needs you to allow it once:
 
         1. Open System Settings > Privacy & Security > Accessibility.
         2. Turn on the switch next to "Water". If Water isn't listed, click +, choose Water.app, and turn it on.

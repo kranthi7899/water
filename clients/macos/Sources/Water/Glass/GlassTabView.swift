@@ -144,11 +144,18 @@ final class GlassTabView: NSView {
             sub.append("saved as a draft, nothing sent")
         case .display:
             sub.append("Water is showing you this")
+        case .note(_, let source, _):
+            if !source.isEmpty { sub.append(source) }
+            sub.append("relayed")
         case .notice:
             sub.append("voice mode")
         }
         subtitle.stringValue = sub.joined(separator: "  ·  ")
-        badge.text = item.risk.map { "\($0.uppercased()) RISK" }
+        // A risk pill on an approval, or a "SIMULATED" pill on a note whose
+        // content the connector generated itself rather than relaying a
+        // real reply (docs/slices/UI.md Phase 6, U1-A) -- the same pill
+        // widget, never dropped silently.
+        badge.text = item.risk.map { "\($0.uppercased()) RISK" } ?? (item.isSimulatedNote ? "SIMULATED" : nil)
         badge.isHidden = badge.text == nil
         // Every item can be closed; on an approval that only hides the tab.
         closeX.isHidden = false

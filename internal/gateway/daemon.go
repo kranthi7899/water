@@ -878,7 +878,7 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	// A draft the CEO asked for, or what the model chose to put on screen
 	// (display.show), is shown to the client as an artifact event, only now
 	// that it ran cleanly, never on a denied, queued or errored call.
-	step.artifact(turnArtifact(body.Function, body.Args))
+	step.artifact(turnArtifact(body.Function, body.Args, res.Output))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
 }
 

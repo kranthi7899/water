@@ -487,6 +487,47 @@ func TestArtifactEventWireShape(t *testing.T) {
 	}
 }
 
+// TestNoteArtifactEventWireShape pins the note artifact event's wire shape
+// (docs/slices/UI.md Phase 6, U1-A): kind, step_id, tool and artifact{type,
+// title, body, source, simulated}, with Simulated surviving the Go -> JSON
+// round trip as a real JSON boolean, not a string or a dropped field, so the
+// Swift decoder's "(simulated)" badge is driven by exactly what the daemon
+// sent.
+func TestNoteArtifactEventWireShape(t *testing.T) {
+	e := runtime.Event{Kind: runtime.EventArtifact, StepID: "stp_1", Tool: "linear.create_comment", Artifact: &runtime.Artifact{
+		Type: runtime.ArtifactNote, Title: "CRA-3", Body: "(simulated) Relayed: Nina, via Slack: it's fixed", Source: "linear:CRA-3", Simulated: true}}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"kind":"artifact","step_id":"stp_1","tool":"linear.create_comment","artifact":{"type":"note","title":"CRA-3","body":"(simulated) Relayed: Nina, via Slack: it's fixed","source":"linear:CRA-3","simulated":true}}`
+	if string(b) != want {
+		t.Fatalf("wire = %s\nwant   %s", b, want)
+	}
+	// Round trip: unmarshal what was just marshaled, and Simulated must come
+	// back true, not silently dropped or coerced.
+	var back runtime.Event
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Artifact == nil || !back.Artifact.Simulated || back.Artifact.Type != runtime.ArtifactNote {
+		t.Fatalf("round trip = %+v", back.Artifact)
+	}
+	// A non-simulated note omits "simulated" entirely (omitempty): the field
+	// is absent, not false-as-a-string or any other stray shape, and an old
+	// or lenient decoder that never heard of "simulated" still gets a
+	// perfectly valid note.
+	e2 := runtime.Event{Kind: runtime.EventArtifact, StepID: "stp_2", Tool: "linear.create_comment", Artifact: &runtime.Artifact{
+		Type: runtime.ArtifactNote, Title: "CRA-3", Body: "Nina: fixed for real", Source: "linear:CRA-3"}}
+	b2, err := json.Marshal(e2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b2), "simulated") {
+		t.Fatalf("wire = %s, want no \"simulated\" key when false (omitempty)", b2)
+	}
+}
+
 // TestMainPathDraftStreamsArtifactInsideItsStep: a main-path turn whose
 // model drafts an email streams tool_start, artifact, tool_end (one shared
 // step id) before done, the artifact carrying the call's own arguments.

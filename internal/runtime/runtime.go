@@ -84,24 +84,38 @@ const (
 	EventArtifact EventKind = "artifact"
 )
 
-// Artifact Types: an email draft (to, cc, subject, body), and plain text
-// the model chose to show the CEO (display.show: title, body).
+// Artifact Types: an email draft (to, cc, subject, body), plain text the
+// model chose to show the CEO (display.show: title, body), and a note
+// (title, body, source, simulated): something a connector's own result
+// explicitly flagged relay: true (docs/slices/UI.md Phase 6, U1-A) -- e.g.
+// a Linear comment standing in for a reply from someone who isn't a Water
+// connector yet. gateway/artifact.go builds ArtifactNote only from a
+// result the connector itself marked this way; it is never inferred from
+// a function's name.
 const (
 	ArtifactEmailDraft = "email_draft"
 	ArtifactDisplay    = "display"
+	ArtifactNote       = "note"
 )
 
 // Artifact is the payload of an artifact event: what the draft call made,
 // copied from that call's own arguments (the CEO's own draft), with every
 // string and list capped by the daemon. Clients decode unknown Types with
-// just Type.
+// just Type. Source and Simulated are set only on an ArtifactNote: Source
+// names where it came from (an issue identifier, a thread), and Simulated
+// is true when the connector generated the content itself rather than
+// relaying a real reply -- a client must render this as a "(simulated)"
+// badge, never drop it silently (docs/slices/UI.md §4 invariant 8: gaps
+// are never hidden).
 type Artifact struct {
-	Type    string   `json:"type"`
-	Title   string   `json:"title,omitempty"`
-	To      []string `json:"to,omitempty"`
-	Cc      []string `json:"cc,omitempty"`
-	Subject string   `json:"subject,omitempty"`
-	Body    string   `json:"body,omitempty"`
+	Type      string   `json:"type"`
+	Title     string   `json:"title,omitempty"`
+	To        []string `json:"to,omitempty"`
+	Cc        []string `json:"cc,omitempty"`
+	Subject   string   `json:"subject,omitempty"`
+	Body      string   `json:"body,omitempty"`
+	Source    string   `json:"source,omitempty"`
+	Simulated bool     `json:"simulated,omitempty"`
 }
 
 // StepStatus is a tool_end event's outcome.

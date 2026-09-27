@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"strings"
 	"unicode/utf8"
 
@@ -22,13 +23,67 @@ const (
 const displayFunction = "display.show"
 
 // turnArtifact is the artifact event payload for a successful call to fn
-// with args: an email draft, a display, or nil for every other function.
-// It is the one builder handleToolInvoke uses after a clean call.
-func turnArtifact(fn string, args map[string]any) *runtime.Artifact {
+// with args, whose connector returned output: an email draft, a display, a
+// note, or nil for every other function. It is the one builder
+// handleToolInvoke uses after a clean call.
+//
+// A note is checked before the draft fallback and independently of fn: any
+// connector's result may flag itself relay: true (docs/slices/UI.md Phase
+// 6, U1-A), not only a specific function's, so a future connector can reuse
+// the same convention without a change here.
+func turnArtifact(fn string, args map[string]any, output json.RawMessage) *runtime.Artifact {
 	if fn == displayFunction {
 		return displayArtifact(args)
 	}
+	if a := noteArtifact(output); a != nil {
+		return a
+	}
 	return draftArtifact(fn, args)
+}
+
+// relayedCommentPrefix is the code-added prefix a relayed comment's body
+// must start with (docs/slices/UI.md U4: "a relayed comment must start
+// with a code-added '(simulated) Relayed:' prefix, enforced in the
+// connector, not the prompt"). noteArtifact derives Simulated from this
+// prefix directly, rather than trusting a connector-reported field, so a
+// connector bug can never under- or over-report the badge (the "gaps are
+// never hidden" posture docs/slices/UI.md §4 invariant 8 already keeps for
+// the decision card's own simulated signals).
+//
+// As of Phase 6 no connector sets relay: true yet -- Phase 7 (U4) is where
+// linear.create_comment is built to add it -- so this prefix and
+// noteArtifact are exercised today only by tests with a synthetic result;
+// the mechanism is real and connector-agnostic, waiting for a producer.
+const relayedCommentPrefix = "(simulated) Relayed:"
+
+// noteArtifact builds a note artifact from a tool result's own JSON output,
+// only when that result explicitly flags itself relay: true. Absent that
+// flag, an unparseable output, or a missing/blank title or body, this
+// returns nil: an ordinary tool result is never shown as a note.
+func noteArtifact(output json.RawMessage) *runtime.Artifact {
+	if len(output) == 0 {
+		return nil
+	}
+	var v struct {
+		Relay  bool   `json:"relay"`
+		Title  string `json:"title"`
+		Body   string `json:"body"`
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(output, &v); err != nil || !v.Relay {
+		return nil
+	}
+	title, body := capRunes(strings.TrimSpace(v.Title), display.MaxTitle), capBytes(strings.TrimSpace(v.Body), artifactMaxBytes)
+	if title == "" || body == "" {
+		return nil
+	}
+	return &runtime.Artifact{
+		Type:      runtime.ArtifactNote,
+		Title:     title,
+		Body:      body,
+		Source:    capBytes(strings.TrimSpace(v.Source), artifactMaxBytes),
+		Simulated: strings.HasPrefix(strings.TrimSpace(v.Body), relayedCommentPrefix),
+	}
 }
 
 // displayArtifact builds a display artifact from display.show's own

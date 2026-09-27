@@ -211,35 +211,50 @@ public struct TurnEvent: Decodable, Equatable {
 
 /// The `artifact` object of an `artifact` event, mirroring runtime.Artifact:
 /// an email draft `{"type": "email_draft", "to": [...], "cc": [...],
-/// "subject": "...", "body": "..."}`, or something the model chose to show
-/// (display.show) `{"type": "display", "title": "...", "body": "..."}`,
-/// plain text. The daemon copies the values from the call's own arguments
-/// and caps them (draft strings at 20000 bytes, lists at 50; a display's
-/// title at 120 characters and body at 4000). Every field but `type` may be
+/// "subject": "...", "body": "..."}`, something the model chose to show
+/// (display.show) `{"type": "display", "title": "...", "body": "..."}`, or
+/// a relayed comment or other tool result a connector explicitly flagged
+/// relay: true (docs/slices/UI.md Phase 6, U1-A) `{"type": "note", "title":
+/// "...", "body": "...", "source": "...", "simulated": true}`, plain text.
+/// The daemon copies the values from the call's own arguments (or, for a
+/// note, the connector's own result) and caps them (draft strings at 20000
+/// bytes, lists at 50; a display's title at 120 characters and body at
+/// 4000; a note's the same as a draft's). Every field but `type` may be
 /// missing (an unknown type decodes with just its type): lists then read as
-/// empty and strings as "". Entries of `to`/`cc` that aren't strings are
-/// skipped, and a single string reads as a list of one, so one odd value
-/// never loses the whole artifact.
+/// empty, strings as "" and `simulated` as false. Entries of `to`/`cc` that
+/// aren't strings are skipped, and a single string reads as a list of one,
+/// so one odd value never loses the whole artifact.
 public struct TurnArtifact: Decodable, Equatable {
     public static let emailDraftType = "email_draft"
     public static let displayType = "display"
+    public static let noteType = "note"
 
     public var type: String
-    /// A display's heading; "" for a draft (or when absent).
+    /// A display's or a note's heading; "" for a draft (or when absent).
     public var title: String
     public var to: [String]
     public var cc: [String]
     public var subject: String
     public var body: String
+    /// A note's own source (e.g. an issue identifier); "" for every other
+    /// type (or when absent).
+    public var source: String
+    /// A note's own flag: true when the connector generated the content
+    /// itself rather than relaying a real reply; false for every other type
+    /// (or when absent). Never inferred client-side -- the daemon is the
+    /// only source of truth for it.
+    public var simulated: Bool
 
     public init(type: String, title: String = "", to: [String] = [], cc: [String] = [],
-                subject: String = "", body: String = "") {
+                subject: String = "", body: String = "", source: String = "", simulated: Bool = false) {
         self.type = type
         self.title = title
         self.to = to
         self.cc = cc
         self.subject = subject
         self.body = body
+        self.source = source
+        self.simulated = simulated
     }
 
     /// True for an email draft (`type == "email_draft"`).
@@ -248,7 +263,11 @@ public struct TurnArtifact: Decodable, Equatable {
     /// True for something the model chose to show (`type == "display"`).
     public var isDisplay: Bool { type == Self.displayType }
 
-    private enum CodingKeys: String, CodingKey { case type, title, to, cc, subject, body }
+    /// True for a relayed comment or other flagged tool result
+    /// (`type == "note"`).
+    public var isNote: Bool { type == Self.noteType }
+
+    private enum CodingKeys: String, CodingKey { case type, title, to, cc, subject, body, source, simulated }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -258,6 +277,8 @@ public struct TurnArtifact: Decodable, Equatable {
         cc = Self.strings(c, .cc)
         subject = (try? c.decodeIfPresent(String.self, forKey: .subject)) ?? ""
         body = (try? c.decodeIfPresent(String.self, forKey: .body)) ?? ""
+        source = (try? c.decodeIfPresent(String.self, forKey: .source)) ?? ""
+        simulated = (try? c.decodeIfPresent(Bool.self, forKey: .simulated)) ?? false
     }
 
     private static func strings(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> [String] {

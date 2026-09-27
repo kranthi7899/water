@@ -212,6 +212,23 @@ import Testing
         #expect(m.phase == .responding)
     }
 
+    // docs/slices/UI.md Phase 6, U1-A: the globe's "announcing tools" look
+    // for a relay-producing call reuses the identical `.searching` state a
+    // web search already gets, driven by the same `searchTools` set --
+    // proven here against linear.create_comment specifically (the call
+    // whose successful result, flagged relay: true, streams as a `note`
+    // artifact once it completes).
+    @Test func aRelayCommentToolStartEntersSearchingUntilToolEnd() {
+        var m = ActivityModel()
+        let turn = m.turnSent(now: t0)
+        #expect(m.phase == .thinking)
+        m.event(ev(.toolStart, stepID: "s1", tool: "linear.create_comment"), turn: turn, now: t0)
+        #expect(m.phase == .searching)
+        #expect(m.isVisible)
+        m.event(ev(.toolEnd, stepID: "s1", tool: "linear.create_comment", status: "ok"), turn: turn, now: t0)
+        #expect(m.phase == .thinking)
+    }
+
     @Test func aSentenceEndsSearching() {
         var m = ActivityModel()
         let turn = m.turnSent(now: t0)

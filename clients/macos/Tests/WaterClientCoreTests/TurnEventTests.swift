@@ -87,6 +87,33 @@ struct TurnEventTests {
         #expect(e.artifact?.to == [] && e.artifact?.subject == "")
     }
 
+    // docs/slices/UI.md Phase 6, U1-A: a relayed comment or other flagged
+    // tool result's wire shape -- type "note", title, body, source and
+    // simulated. Simulated is the field the round-trip matters most for
+    // (it drives the "(simulated)" badge, GlassTabTests): it must decode as
+    // a real Bool, not silently coerced or dropped.
+    @Test func artifactDecodesNoteWithSourceAndSimulated() throws {
+        let e = try decode(#"{"kind":"artifact","step_id":"stp_5","tool":"linear.create_comment","artifact":{"type":"note","title":"CRA-3","body":"(simulated) Relayed: Nina, via Slack: it's fixed","source":"linear:CRA-3","simulated":true}}"#)
+        #expect(e == TurnEvent(kind: .artifact, stepID: "stp_5", tool: "linear.create_comment",
+                               artifact: TurnArtifact(type: "note", title: "CRA-3", body: "(simulated) Relayed: Nina, via Slack: it's fixed",
+                                                      source: "linear:CRA-3", simulated: true)))
+        #expect(e.artifact?.isNote == true && e.artifact?.isDisplay == false && e.artifact?.emailDraft == false)
+        #expect(e.artifact?.simulated == true)
+    }
+
+    @Test func artifactNoteSimulatedAndSourceDefaultFalseAndEmptyWhenAbsent() throws {
+        // A note with no simulated/source key (an older daemon, or a real,
+        // non-simulated relay): simulated reads false, source "" -- never
+        // an error, and never a stray true.
+        let e = try decode(#"{"kind":"artifact","artifact":{"type":"note","title":"CRA-3","body":"Nina: fixed for real"}}"#)
+        #expect(e.artifact == TurnArtifact(type: "note", title: "CRA-3", body: "Nina: fixed for real"))
+        #expect(e.artifact?.simulated == false && e.artifact?.source == "")
+        // A non-bool simulated value never loses the artifact; it just
+        // reads as the default, false.
+        let m = try decode(#"{"kind":"artifact","artifact":{"type":"note","title":"t","body":"b","simulated":"yes"}}"#)
+        #expect(m.artifact?.isNote == true && m.artifact?.simulated == false)
+    }
+
     @Test func artifactTitleAbsentOrMalformedReadsEmpty() throws {
         // An email draft has no title: absent decodes as "".
         let d = try decode(#"{"kind":"artifact","artifact":{"type":"email_draft","subject":"S","body":"B"}}"#)

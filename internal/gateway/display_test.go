@@ -155,7 +155,7 @@ func TestDisplayShowNoActiveTurn(t *testing.T) {
 // stray path can never flood a stream), and yields nothing when either is
 // missing or blank.
 func TestDisplayArtifactCaps(t *testing.T) {
-	a := turnArtifact("display.show", map[string]any{"title": " " + strings.Repeat("é", display.MaxTitle+5), "body": strings.Repeat("ü", display.MaxBody+5) + " "})
+	a := turnArtifact("display.show", map[string]any{"title": " " + strings.Repeat("é", display.MaxTitle+5), "body": strings.Repeat("ü", display.MaxBody+5) + " "}, nil)
 	if a == nil || a.Type != runtime.ArtifactDisplay {
 		t.Fatalf("artifact = %+v", a)
 	}
@@ -169,15 +169,15 @@ func TestDisplayArtifactCaps(t *testing.T) {
 		t.Fatalf("display artifact carries draft fields: %+v", a)
 	}
 	for _, args := range []map[string]any{nil, {"title": "t"}, {"body": "b"}, {"title": " ", "body": "b"}, {"title": 1, "body": "b"}} {
-		if a := turnArtifact("display.show", args); a != nil {
+		if a := turnArtifact("display.show", args, nil); a != nil {
 			t.Fatalf("args %v: artifact %+v, want none", args, a)
 		}
 	}
 	// Drafts still go through the same builder.
-	if a := turnArtifact("gmail.draft_message", map[string]any{"subject": "S"}); a == nil || a.Type != runtime.ArtifactEmailDraft {
+	if a := turnArtifact("gmail.draft_message", map[string]any{"subject": "S"}, nil); a == nil || a.Type != runtime.ArtifactEmailDraft {
 		t.Fatalf("draft artifact = %+v", a)
 	}
-	if turnArtifact("gcal.list_events", map[string]any{"title": "t", "body": "b"}) != nil {
+	if turnArtifact("gcal.list_events", map[string]any{"title": "t", "body": "b"}, nil) != nil {
 		t.Fatal("non-artifact function produced an artifact")
 	}
 }

@@ -292,6 +292,61 @@ import Testing
         #expect(!item.title.contains("second"))
     }
 
+    // MARK: note artifacts (docs/slices/UI.md Phase 6, U1-A)
+
+    @Test func noteArtifactOnVoiceIsTitleSourceAndSimulatedBadge() throws {
+        let line = #"{"kind":"artifact","step_id":"stp_3","tool":"linear.create_comment","artifact":{"type":"note","title":"CRA-3","body":"(simulated) Relayed: Nina, via Slack: it's fixed","source":"linear:CRA-3","simulated":true}}"#
+        let e = try #require(TurnEvent.decode(line: Data(line.utf8)))
+        let item = try #require(GlassItem.shouldShow(channel: .voice, event: e))
+        #expect(item.kind == .note(title: "CRA-3", source: "linear:CRA-3", simulated: true))
+        #expect(item.title == "CRA-3")
+        #expect(item.readBack == "(simulated) Relayed: Nina, via Slack: it's fixed")
+        #expect(item.isSimulatedNote)
+        #expect(item.email == nil && !item.isApproval && !item.canDecide)
+        #expect(item.action == "linear.create_comment")
+        for ch in [Channel.cli, .textBar] { #expect(GlassItem.shouldShow(channel: ch, event: e) == nil) }
+    }
+
+    @Test func noteArtifactNotSimulatedHasNoBadge() throws {
+        let item = try #require(GlassItem.decide(channel: .voice, kind: .artifact, artifactType: "note",
+                                                 title: "CRA-3", body: "Nina: fixed for real", source: "linear:CRA-3", simulated: false))
+        #expect(item.kind == .note(title: "CRA-3", source: "linear:CRA-3", simulated: false))
+        #expect(!item.isSimulatedNote)
+    }
+
+    @Test func noteNeedsSomethingToShow() throws {
+        #expect(GlassItem.decide(channel: .voice, kind: .artifact, artifactType: "note", title: "  ", body: "\n") == nil)
+        let bodyOnly = try #require(GlassItem.decide(channel: .voice, kind: .artifact, artifactType: "note", body: "x"))
+        #expect(bodyOnly.title == "Water")
+        let titleOnly = try #require(GlassItem.decide(channel: .voice, kind: .artifact, artifactType: "note", title: "Steps"))
+        #expect(titleOnly.readBack.isEmpty && titleOnly.title == "Steps")
+        // Only a real artifact event shows it.
+        #expect(GlassItem.decide(channel: .voice, kind: .delta, artifactType: "note", title: "t", body: "b") == nil)
+    }
+
+    @Test func noteTitleAndSourceAreOneCappedLine() throws {
+        let long = String(repeating: "t", count: 500)
+        let item = try #require(GlassItem.decide(channel: .voice, kind: .artifact, artifactType: "note",
+                                                 title: long + "\nsecond line", body: "b", source: long + "\nsecond line"))
+        #expect(item.title.count == GlassItem.maxTitle)
+        #expect(!item.title.contains("second"))
+        guard case .note(_, let source, _) = item.kind else { #expect(Bool(false), "not a note"); return }
+        #expect(source.count == GlassItem.maxTitle)
+        #expect(!source.contains("second"))
+    }
+
+    /// Only a `note` reports `isSimulatedNote`; every other kind (including
+    /// a non-simulated note, and an approval's own unrelated `risk`) is
+    /// false, so the badge is never mistakenly shown elsewhere.
+    @Test func isSimulatedNoteIsFalseForEveryOtherKind() throws {
+        let approval = try #require(GlassItem.decide(channel: .voice, kind: .approvalRequired, approvalID: "env_1",
+                                                     action: "gcal.create_event", risk: "high", readBack: "r", payloadHash: "h"))
+        #expect(!approval.isSimulatedNote)
+        let draft = try #require(GlassItem.decide(channel: .voice, kind: .artifact, tool: "gmail.draft_message", artifactType: "email_draft", email: Self.mail))
+        #expect(!draft.isSimulatedNote)
+        #expect(!GlassItem.notice("n").isSimulatedNote)
+    }
+
     @Test func noticeIsPlainAndLingers() {
         let t0 = Date(timeIntervalSince1970: 1000)
         let n = GlassItem.notice("  Hold Space to talk. Esc to leave voice mode. ")

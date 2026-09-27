@@ -10,11 +10,18 @@ import Foundation
 // - Only the voice channel shows it; a typed turn already has its text on
 //   screen, and its approval is a line in the text bar (and the workspace).
 // - Only these events produce an item: `approval_required`, an `artifact`
-//   whose type is `email_draft`, and an `artifact` whose type is `display`
+//   whose type is `email_draft`, an `artifact` whose type is `display`
 //   (the model called display.show because the CEO would benefit from
-//   SEEING something: a list, figures, steps). Everything else is nil. The
-//   app itself may also show a short `notice` (a voice-mode hint or error),
-//   since the text bar no longer pops up in voice mode.
+//   SEEING something: a list, figures, steps), and an `artifact` whose type
+//   is `note` (docs/slices/UI.md Phase 6, U1-A: a connector's own result
+//   explicitly flagged relay: true -- e.g. a Linear comment standing in for
+//   a reply from someone who isn't a Water connector yet). Everything else
+//   is nil. The app itself may also show a short `notice` (a voice-mode
+//   hint or error), since the text bar no longer pops up in voice mode.
+// - A note's `simulated` flag shows a "(simulated)" badge, never dropped
+//   silently (the daemon derives it from the relayed body's own code
+//   prefix, never trusted blind from the connector, so this is always
+//   accurate); read-only, like a draft or a display.
 // - An approval for an outward message (gmail.send_message,
 //   twinlink.send_message) is laid out as a message once GET
 //   /v1/approvals/{id} returns its payload — and only if that payload has
@@ -67,6 +74,13 @@ public struct GlassItem: Equatable {
         /// Something the model chose to show (a `display` artifact from
         /// display.show): a title and plain-text body; read-only.
         case display(title: String)
+        /// A relayed comment or other tool result a connector explicitly
+        /// flagged relay: true (a `note` artifact, docs/slices/UI.md Phase
+        /// 6 U1-A): a title, where it came from (`source`, e.g. an issue
+        /// identifier), and whether the connector generated the content
+        /// itself rather than relaying a real reply (`simulated`);
+        /// read-only.
+        case note(title: String, source: String, simulated: Bool)
         /// A short client-written note (voice-mode hint, error); read-only.
         case notice
     }
@@ -178,7 +192,7 @@ public struct GlassItem: Equatable {
     public var action: String? {
         switch kind {
         case .approval(_, let a, _, _, _): return a
-        case .draft, .display: return tool
+        case .draft, .display, .note: return tool
         case .notice: return nil
         }
     }
@@ -189,6 +203,15 @@ public struct GlassItem: Equatable {
     }
 
     public var isApproval: Bool { approvalID != nil }
+
+    /// True for a note whose content the connector generated itself rather
+    /// than relaying a real reply; false for every other kind, including a
+    /// non-simulated note. Never dropped silently: a client renders this as
+    /// a "(simulated)" badge whenever it's true.
+    public var isSimulatedNote: Bool {
+        if case .note(_, _, let simulated) = kind { return simulated }
+        return false
+    }
 
     /// The hint under an approval armed for a spoken two-step send:
     /// `Say “confirm send” or tap Approve`. Nil without a confirm phrase,
@@ -224,6 +247,8 @@ public struct GlassItem: Equatable {
             return tool == "gmail.draft_for_review" ? "Draft for your review" : "Email draft"
         case .display(let t):
             return t.isEmpty ? "Water" : t
+        case .note(let t, _, _):
+            return t.isEmpty ? "Water" : t
         case .notice:
             return "Water"
         }
@@ -238,13 +263,15 @@ public struct GlassItem: Equatable {
 
     /// `shouldShow(channel:event:)` from plain parameters: an item only for
     /// a voice turn's `approval_required` (with a valid id), or its
-    /// `artifact` of type `email_draft` or `display` (`title`/`body`).
+    /// `artifact` of type `email_draft`, `display` (`title`/`body`) or
+    /// `note` (`title`/`body`/`source`/`simulated`).
     public static func decide(channel: Channel, kind: TurnEvent.Kind,
                               approvalID: String? = nil, action: String? = nil, risk: String? = nil,
                               readBack: String? = nil, payloadHash: String? = nil,
                               tool: String? = nil, artifactType: String? = nil,
                               email: EmailFields? = nil,
                               title: String? = nil, body: String? = nil,
+                              source: String? = nil, simulated: Bool = false,
                               warnings: [String] = [], confirmPhrase: String? = nil) -> GlassItem? {
         guard channel == .voice else { return nil }
         switch kind {
@@ -261,6 +288,13 @@ public struct GlassItem: Equatable {
                 let b = body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !t.isEmpty || !b.isEmpty else { return nil }
                 return GlassItem(kind: .display(title: t), email: nil, readBack: b, tool: nonEmpty(tool))
+            }
+            if artifactType == TurnArtifact.noteType {
+                let t = capTitle(nonEmpty(title) ?? "")
+                let b = body?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !t.isEmpty || !b.isEmpty else { return nil }
+                return GlassItem(kind: .note(title: t, source: capTitle(nonEmpty(source) ?? ""), simulated: simulated),
+                                 email: nil, readBack: b, tool: nonEmpty(tool))
             }
             guard artifactType == TurnArtifact.emailDraftType, let email else { return nil }
             return GlassItem(kind: .draft, email: email, readBack: summary(email, draft: true), tool: nonEmpty(tool))
@@ -290,7 +324,7 @@ public struct GlassItem: Equatable {
                       risk: e.risk, readBack: e.readBack, payloadHash: e.payloadHash, tool: e.tool,
                       artifactType: a?.type,
                       email: a.map { EmailFields(to: $0.to, cc: $0.cc, subject: $0.subject, body: $0.body) },
-                      title: a?.title, body: a?.body,
+                      title: a?.title, body: a?.body, source: a?.source, simulated: a?.simulated ?? false,
                       warnings: e.warnings, confirmPhrase: e.confirmPhrase)
     }
 

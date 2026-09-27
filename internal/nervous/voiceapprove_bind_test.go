@@ -677,6 +677,66 @@ func TestVoiceIApproveTheMessageReachesStageOne(t *testing.T) {
 	}
 }
 
+// TestVoiceTwoStepConfirmAndClickApproveResolveTheSameWay (docs/slices/UI.md
+// Phase 6): the general "spoken yes and clicking Approve resolve the same
+// envelope" property, extended to Slice W's own two-step confirm
+// specifically on gmail.send_message. Production reaches a decision through
+// exactly one function either way -- internal/gateway's decideAndExecute
+// (its own doc comment: "the HTTP endpoint and a bound voice decision
+// (DecideBound, below) share one implementation") -- so DecideBound is
+// itself the click path's real underlying mechanism, not just voice's.
+// fakeApprover.DecideBound mirrors it faithfully (queueActionSink's own doc
+// comment): a click is a single, unbound "yes" straight to DecideBound,
+// skipping the two-step staging entirely, exactly like the HTTP handler
+// does (it never runs Nervous.Handle at all); a spoken decision on
+// gmail.send_message must go through the full two-step arm-then-confirm
+// dance first. Both must land on the identical terminal state.
+func TestVoiceTwoStepConfirmAndClickApproveResolveTheSameWay(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+
+	// The click path: propose an envelope and decide it directly with one
+	// "yes" -- no read-back binding, no two-step arm, exactly what a tap on
+	// the glass tab's Approve button does against POST
+	// /v1/approvals/{id}/decision.
+	clicked, err := h.env.Approvals.Propose(h.ctx, approvals.Envelope{Action: "gmail.send_message", Origin: "p0", Risk: "high", Payload: sendPayload()})
+	if err != nil {
+		t.Fatalf("Propose (click envelope): %v", err)
+	}
+	clickOut, err := h.approver.DecideBound(h.ctx, clicked.ID, clicked.PayloadHash, "yes")
+	if err != nil {
+		t.Fatalf("DecideBound (click): %v", err)
+	}
+
+	// The voice path: the same shape of envelope, decided through Slice W's
+	// full two-step spoken confirm (yes arms, "confirm send" within the
+	// window actually decides).
+	spoken := proposeSend(t, h, sendPayload())
+	h.turn(t, "yes", "stage1")
+	h.advance(2 * time.Second)
+	voiceEvents := h.turn(t, "confirm send", "stage2")
+
+	// Both reach Executed, through the one shared decision mechanism.
+	if clickOut.Status != string(approvals.Executed) || !clickOut.Executed {
+		t.Fatalf("click outcome = %+v, want executed", clickOut)
+	}
+	if statusOf(t, h, spoken.ID) != approvals.Executed {
+		t.Fatalf("spoken envelope status = %s, want executed", statusOf(t, h, spoken.ID))
+	}
+	if !strings.Contains(spokenText(voiceEvents), "Sent") {
+		t.Fatalf("voice stage two said %q, want Sent", spokenText(voiceEvents))
+	}
+	if h.approver.executedCount() != 2 {
+		t.Fatalf("executed = %d, want exactly 2 (one click, one voice)", h.approver.executedCount())
+	}
+	// Both calls landed on DecideBound with the same reply ("yes" is what
+	// the two-step's stage two ultimately decides with too, per
+	// TestVoiceConfirmSendYesThenConfirmSends): the click and the voice
+	// two-step are two different ways of reaching one identical call.
+	if h.approver.calls[0] != clicked.ID+":yes" || h.approver.calls[1] != spoken.ID+":yes" {
+		t.Fatalf("calls = %v, want [%s:yes %s:yes]", h.approver.calls, clicked.ID, spoken.ID)
+	}
+}
+
 func TestConfirmSendReadBackShape(t *testing.T) {
 	long := strings.Repeat("x", 120)
 	e := approvals.Envelope{Action: "gmail.send_message", Payload: map[string]any{
