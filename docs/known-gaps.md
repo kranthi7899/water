@@ -500,6 +500,42 @@ daemon predates both, and no agent reported touching `~/.water`.
 - Not verified live: needs a daemon rebuild and restart, plus
   `build.sh --install`.
 
+## Slice W: open gaps (2026-09-26)
+
+- **Parakeet vocabulary boosting is deferred.** It needs an extra CTC model
+  download. "at the rate" can still be misheard, and the normalizer hint plus
+  the spoken read-back cover it for now.
+- **Roster emails are empty** (`people.yaml`), and role.md still has five
+  `TODO(owner)` lines: what Renaissance sells and to whom, stage and funding,
+  co-founders and investors, strategy and priorities, and the company email
+  domain. The domain is also needed for `router.voice_approve.internal_domains`.
+- **Research latency.** `research.web` adds 13–17.5 s, so a live answer takes
+  about 20–25 s. It hasn't been measured on the live daemon. Research calls
+  aren't counted in the usage limits.
+- **Search-provider leak, narrowed but not closed.** The query guard refuses
+  `@`, URLs, schemeless host paths and long tokens. A plain-words query can
+  still carry data, for example "kranthi at gmail dot com".
+- **The spoken confirm spells only the first recipient** ("and N others").
+  A misheard cc on a valid domain could still go out by voice. Consider
+  making multi-recipient sends tap-only.
+- **Recipient checks cover gmail only**, not calendar attendees. Drafts check
+  public providers only; company-domain near-misses are caught at envelope
+  proposal once `internal_domains` is set.
+- **`policy-*.events.jsonl` keeps full tool arguments**, including research
+  queries and email bodies. General turns aren't redacted there.
+- **Company answers from the state summary are classed "general"** (e.g.
+  "calendar today" answered with no tool call). That's the safe direction,
+  but G's memory writer will skip those turns.
+- **The opt-in filler** (`router.voice_filler_ms` > 0) moves the globe out of
+  "thinking" while it plays. The demo twin's default style would still say
+  "One moment." if it's turned on.
+- **Warnings aren't shown** on the globe itself; they appear only on the
+  glass tab.
+- **Eval weak spots (haiku):** it names research sources about half the time;
+  1 of 3 runs answered "who's on Halcyon" from role.md's Environment list
+  instead of Linear; 2 of 3 showed a spelled address on screen instead of
+  saying it aloud.
+
 ## The needs-you ticker spends the CEO's gate rate caps (found live, 2026-09-25; fixed)
 
 `needsyou.Service.Tick` runs `decisions.Trigger.Run` every tick. That

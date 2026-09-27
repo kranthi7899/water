@@ -49,6 +49,59 @@ struct TurnEventTests {
         #expect(d == TurnEvent(kind: .delta, text: "hi"))
     }
 
+    @Test func artifactDecodesEmailDraft() throws {
+        let e = try decode(#"{"kind":"artifact","step_id":"stp_1","tool":"gmail.draft_message","artifact":{"type":"email_draft","to":["dana@acme.com","lee@acme.com"],"cc":["sam@acme.com"],"subject":"Q3","body":"Numbers attached."}}"#)
+        #expect(e == TurnEvent(kind: .artifact, stepID: "stp_1", tool: "gmail.draft_message",
+                               artifact: TurnArtifact(type: "email_draft", to: ["dana@acme.com", "lee@acme.com"],
+                                                      cc: ["sam@acme.com"], subject: "Q3", body: "Numbers attached.")))
+        #expect(e.artifact?.emailDraft == true)
+        #expect(e.label == nil && e.status == nil && e.text == nil)
+    }
+
+    @Test func artifactWithMissingFieldsAndUnknownType() throws {
+        // The daemon omits empty fields (no cc on a gmail draft).
+        let d = try decode(#"{"kind":"artifact","step_id":"stp_1","tool":"gmail.draft_for_review","artifact":{"type":"email_draft","to":["a@x.com"],"subject":"S"}}"#)
+        #expect(d.artifact == TurnArtifact(type: "email_draft", to: ["a@x.com"], subject: "S"))
+        // An unknown type decodes with just its type.
+        let u = try decode(#"{"kind":"artifact","step_id":"stp_2","artifact":{"type":"calendar_event","start":"2026-09-26"}}"#)
+        #expect(u.kind == .artifact && u.artifact == TurnArtifact(type: "calendar_event"))
+        #expect(u.artifact?.emailDraft == false)
+    }
+
+    @Test func artifactReadsLooseListsAndSurvivesAMalformedObject() throws {
+        let e = try decode(#"{"kind":"artifact","artifact":{"type":"email_draft","to":"a@x.com","cc":["",7,"b@x.com",null],"subject":5,"body":"B"}}"#)
+        #expect(e.artifact == TurnArtifact(type: "email_draft", to: ["a@x.com"], cc: ["b@x.com"], subject: "", body: "B"))
+        // No type, or not an object: the event still decodes, without an artifact.
+        for bad in [#"{"to":["a@x.com"]}"#, #""oops""#, "[1,2]"] {
+            let b = try decode(#"{"kind":"artifact","step_id":"stp_3","artifact":\#(bad)}"#)
+            #expect(b.kind == .artifact && b.stepID == "stp_3" && b.artifact == nil)
+        }
+    }
+
+    @Test func artifactDecodesDisplayWithTitle() throws {
+        // display.show's wire shape: type "display", title and plain-text body.
+        let e = try decode(#"{"kind":"artifact","step_id":"stp_4","tool":"display.show","artifact":{"type":"display","title":"Runway","body":"Cash: $4.2M\nRunway: 14 months"}}"#)
+        #expect(e == TurnEvent(kind: .artifact, stepID: "stp_4", tool: "display.show",
+                               artifact: TurnArtifact(type: "display", title: "Runway", body: "Cash: $4.2M\nRunway: 14 months")))
+        #expect(e.artifact?.isDisplay == true && e.artifact?.emailDraft == false)
+        #expect(e.artifact?.to == [] && e.artifact?.subject == "")
+    }
+
+    @Test func artifactTitleAbsentOrMalformedReadsEmpty() throws {
+        // An email draft has no title: absent decodes as "".
+        let d = try decode(#"{"kind":"artifact","artifact":{"type":"email_draft","subject":"S","body":"B"}}"#)
+        #expect(d.artifact?.title == "" && d.artifact?.isDisplay == false)
+        #expect(d.artifact == TurnArtifact(type: "email_draft", subject: "S", body: "B"))
+        // A non-string title never loses the artifact.
+        let m = try decode(#"{"kind":"artifact","artifact":{"type":"display","title":7,"body":"B"}}"#)
+        #expect(m.artifact == TurnArtifact(type: "display", title: "", body: "B"))
+    }
+
+    @Test func otherKindsHaveNoArtifact() throws {
+        #expect(try decode(#"{"kind":"tool_end","step_id":"stp_1","status":"ok"}"#).artifact == nil)
+        #expect(try decode(#"{"kind":"delta","text":"hi"}"#).artifact == nil)
+    }
+
     @Test func unknownKindsStillDecode() throws {
         #expect(try decode(#"{"kind":"tool_progress","step_id":"stp_1"}"#).kind == .unknown("tool_progress"))
     }

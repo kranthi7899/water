@@ -75,7 +75,9 @@ responses:
 voice:
   name: Water
   tone: "Calm, brief, plain. Facts first. No filler, no apologies, no hedging."
-  handoff: ["One moment.", "Let me check.", "On it."]
+  # Spoken only by the opt-in router.voice_filler_ms (Slice W, D3); the
+  # handoff itself is a silent ack. Validation needs at least one phrase.
+  handoff: ["Still checking."]
   errors:
     generic: "I can't answer that right now."
     timeout: "That's taking too long. Try again in a moment."

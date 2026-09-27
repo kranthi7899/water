@@ -26,6 +26,7 @@ import (
 	"water/internal/connectors"
 	"water/internal/connectors/google/gapi"
 	"water/internal/gate/permit"
+	"water/internal/spokenemail"
 	"water/internal/store"
 	"water/internal/twins"
 )
@@ -148,6 +149,8 @@ var writeMessageSchema = connectors.Schema{
 		"subject":         {Type: "string", Description: "subject line"},
 		"body":            {Type: "string", Description: "plain-text body"},
 		"html_attachment": {Type: "string", Description: "optional pre-rendered HTML alternative body"},
+		"confirm_unusual_recipient": {Type: "boolean", Description: "set true only after the CEO confirmed the spelled-out address, " +
+			"when an earlier call was refused because the domain looks like a misheard one (e.g. close to gmail.com); an approval then still needs a tap"},
 	},
 	Required: []string{"to", "subject", "body"},
 }
@@ -579,10 +582,25 @@ func (g *Gmail) readMessageArgs(args map[string]any) (to []string, subject, body
 // all three write functions. draft_for_review calls this directly (skipping
 // readMessageArgs' agent.mail_address check): it never sends as the agent,
 // so that config key is irrelevant to it.
+//
+// Every recipient must pass the pure recipient checks before anything is
+// built or any request is made (docs/slices/W.md D4c): a malformed address
+// is refused, and so is a domain that looks like a misheard public provider
+// ("therightgmail.com") unless confirm_unusual_recipient says the CEO
+// confirmed it. The same checks, plus company domains and an MX lookup, run
+// again when a send is proposed as an approval envelope. The confirm key is
+// never put into the built message.
 func (g *Gmail) readWriteArgs(args map[string]any) (to []string, subject, body, html string, err error) {
 	to = argStrings(args, "to")
 	if len(to) == 0 {
 		return nil, "", "", "", errors.New("gmail: to is required")
+	}
+	confirmed, _ := args["confirm_unusual_recipient"].(bool)
+	known := spokenemail.KnownProviders()
+	for _, a := range to {
+		if _, err := spokenemail.CheckRecipient(a, known, confirmed); err != nil {
+			return nil, "", "", "", fmt.Errorf("gmail: %w", err)
+		}
 	}
 	return to, gapi.ArgString(args, "subject"), gapi.ArgString(args, "body"), gapi.ArgString(args, "html_attachment"), nil
 }

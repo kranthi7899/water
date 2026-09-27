@@ -90,6 +90,13 @@ type RouterConfig struct {
 	// R-12's own tests lock in (docs/slices/R.md acceptance criterion 9),
 	// so a value at or above that budget could never actually be met.
 	AckMS int `yaml:"ack_ms"`
+	// VoiceFillerMS is router.voice_filler_ms (Slice W, D3;
+	// nervous.Config.VoiceFiller). The handoff is never spoken by default;
+	// when this is > 0, a voice turn escalated to the main model speaks one
+	// short filler (style.voice.handoff[0]) only if the model has produced
+	// no sentence by then. 0 (the default) is off; apply() bounds it to
+	// 0..10000.
+	VoiceFillerMS int `yaml:"voice_filler_ms"`
 }
 
 // RouterTier0Config configures Tier 0, the sous chef's deterministic
@@ -344,6 +351,7 @@ func defaults() map[string]string {
 		"router.possible_miss_window_seconds":   "60",
 		"router.log_retention_days":             "90",
 		"router.ack_ms":                         "250",
+		"router.voice_filler_ms":                "0",
 		"router.speculation.enabled":            "true",
 		"router.quick_tools.enabled":            "true",
 		"router.voice_approve.enabled":          "false",
@@ -493,6 +501,10 @@ func (r *Resolved) apply(flat map[string]string) error {
 	if r.Router.AckMS >= 300 && err == nil {
 		err = fmt.Errorf("router.ack_ms: %d is not < 300 (set by %s)", r.Router.AckMS, r.Provenance["router.ack_ms"])
 	}
+	r.Router.VoiceFillerMS = atoi("router.voice_filler_ms")
+	if (r.Router.VoiceFillerMS < 0 || r.Router.VoiceFillerMS > 10000) && err == nil {
+		err = fmt.Errorf("router.voice_filler_ms: %d is not in 0..10000 (set by %s)", r.Router.VoiceFillerMS, r.Provenance["router.voice_filler_ms"])
+	}
 	r.Router.Speculation.Enabled = abool("router.speculation.enabled")
 	r.Router.QuickTools.Enabled = abool("router.quick_tools.enabled")
 	r.Router.VoiceApprove.Enabled = abool("router.voice_approve.enabled")
@@ -537,6 +549,7 @@ var (
 		"router.possible_miss_window_seconds":   true,
 		"router.log_retention_days":             true,
 		"router.ack_ms":                         true,
+		"router.voice_filler_ms":                true,
 		"router.voice_approve.window_seconds":   true,
 		"router.promotion.min_repeats":          true,
 		"router.promotion.max_learned":          true,
@@ -588,6 +601,7 @@ func (r *Resolved) Flat() map[string]string {
 		"router.possible_miss_window_seconds":   strconv.Itoa(r.Router.PossibleMissWindowSeconds),
 		"router.log_retention_days":             strconv.Itoa(r.Router.LogRetentionDays),
 		"router.ack_ms":                         strconv.Itoa(r.Router.AckMS),
+		"router.voice_filler_ms":                strconv.Itoa(r.Router.VoiceFillerMS),
 		"router.speculation.enabled":            strconv.FormatBool(r.Router.Speculation.Enabled),
 		"router.quick_tools.enabled":            strconv.FormatBool(r.Router.QuickTools.Enabled),
 		"router.voice_approve.enabled":          strconv.FormatBool(r.Router.VoiceApprove.Enabled),

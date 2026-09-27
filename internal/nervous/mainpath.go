@@ -2,6 +2,7 @@ package nervous
 
 import (
 	"context"
+	"sync"
 
 	"water/internal/nervous/speak"
 	"water/internal/nervous/turn"
@@ -62,19 +63,57 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 	}()
 	// The handoff acknowledgement must be visible before any main-path
 	// output: stop the timer (it may already have fired) and fire it now
-	// if it hasn't, via the same sync.Once so it's never emitted twice.
+	// if it hasn't, via the same sync.Once so it's never emitted twice. It
+	// is a silent ack on every channel (Slice W, D3), so this never speaks.
 	ackTimer.Stop()
 	fireAck()
 	n.tier0Breaker.RecordSuccess() // no-op unless a half-open trial is in flight; reaching main is not itself a t0 failure
 	rec.beginTier("main")
+
+	// outMu guards mainOutput/firstSentenceOnce, which the model's stream
+	// callback and the opt-in filler timer (another goroutine) both touch,
+	// and serializes their emissions so the filler can never land after
+	// the model's first delta or after the turn's done/error.
+	var outMu sync.Mutex
 	firstSentenceOnce := false
-	emitMain := speakableFilter(t.Channel, n.turns.Emitter(id, turn.OwnerMain, func(ev runtime.Event) {
+	mainOutput := false
+	mainEmitter := n.turns.Emitter(id, turn.OwnerMain, emit)
+	emitMain := speakableFilter(t.Channel, func(ev runtime.Event) {
+		outMu.Lock()
+		defer outMu.Unlock()
+		switch ev.Kind {
+		case runtime.EventDelta, runtime.EventSentence, runtime.EventDone, runtime.EventError:
+			mainOutput = true
+		}
 		if !firstSentenceOnce && (ev.Kind == runtime.EventDelta || ev.Kind == runtime.EventSentence) {
 			firstSentenceOnce = true
 			rec.recordFirstSentence(n.cfg.Clock.Now())
 		}
-		emit(ev)
-	}))
+		mainEmitter(ev)
+	})
+
+	// The opt-in voice filler (router.voice_filler_ms, default off): one
+	// short phrase, spoken only if the model has produced nothing by then.
+	// It goes through main's own emitter (the router may no longer emit
+	// once main owns the turn) and is never counted as the first sentence.
+	if t.Channel == runtime.ChannelVoice && n.cfg.VoiceFiller > 0 {
+		phrase := speak.Speakable(n.fillerPhrase(), speak.Options{})
+		fillerTimer := n.cfg.Clock.AfterFunc(n.cfg.VoiceFiller, func() {
+			outMu.Lock()
+			defer outMu.Unlock()
+			if mainOutput {
+				return
+			}
+			mainOutput = true // at most once
+			mainEmitter(runtime.Event{Kind: runtime.EventSentence, Text: phrase})
+		})
+		defer func() {
+			fillerTimer.Stop()
+			outMu.Lock()
+			mainOutput = true // a timer already running must not emit after return
+			outMu.Unlock()
+		}()
+	}
 
 	if briefCacheMiss {
 		text, err := runtime.ComputeAndCacheBrief(ctx, env)
@@ -105,7 +144,7 @@ func (n *Nervous) answerMain(ctx context.Context, id string, t Turn, env runtime
 	if ring := n.ring.prompt(n.cfg.Clock.Now()); ring != "" {
 		prompt += "\n\n" + ring
 	}
-	resp, err := runtime.ModelTurn(ctx, env, runtime.Turn{Channel: t.Channel, Prompt: prompt}, emitMain)
+	resp, err := runtime.ModelTurn(ctx, env, runtime.Turn{Channel: t.Channel, Prompt: prompt, Utterance: t.Text}, emitMain)
 	rec.endTier("main")
 	if err != nil {
 		rec.outcome = "error"

@@ -404,3 +404,39 @@ Right now `water daemon` only does anything while the Mac is awake (macOS suspen
   - **P0 reserve in the gate.** `rateLimitFor` in `internal/gate/gate.go` lets any origin but P0 use `backgroundRateSharePct` (75) percent of a function's cap, rounded down, at least 1 and never above the cap. P0 keeps the full cap. All origins count in one window, and usage caps, levels, approvals, taint and audit are unchanged. The denial now names the background origin and says the rest is reserved for P0.
   - **Tests, each proven by revert then restore:** `internal/decisions/card_cache_test.go` (reuse within the TTL, the earlier-clock rebuild, a zero TTL, the caller's own slice, no caching of a cancelled pass, an invalidate that lands mid-build, concurrent callers sharing one build under `-race`); `internal/gate/headroom_test.go` (the 3-of-4 share for P1 and P2, then P0's reserved call; P0 hits count toward the shared window; rounding with a floor of 1; checked on both the store-backed and the in-memory window); `TestCardStateIsNeverServedStaleFromTheCardCache` (gateway, cache on: staging shows at once, and a dismissed card disappears and can't be staged); `TestDecisionsCardTTL` (config); and a TTL assertion in `TestBuildDecisionsTriggerSourcesProviderFromResolvedConfig`.
   - **Gates:** `go vet`, `gofmt`, `go test -count=1 ./...` (50 packages) and `CGO_ENABLED=0 go build ./cmd/water` all green. No new dependencies. Not committed and not verified live yet: the next step is a daemon rebuild and restart, then a check that P0 tool questions still succeed while the ticker runs.
+- 2026-09-26: **Slice W: the general/specific boundary, live research, and voice fixes.** The owner reported after using voice mode: every question opened with "One moment."; general questions (weather, latest AI, business strategy, small talk) were refused as "not in my scope"; a dictated address ("K Kranti get a job at the rate gmail.com") couldn't be captured; and spoken approvals didn't work. The owner asked for research first; three read-only agents found the causes (reports in the job scratch dir, summarized in `docs/slices/W.md` §1). **Incident found in that research:** a `gmail.send_message` envelope for `kranthetjob@therightgmail.com` (Parakeet heard "at the rate" as "at the right") was tapped Approve and sent from the agent alias, and it bounced. The owner then decided: fix everything together, with a well-defined boundary between general and specific ("would a human be able to do these jobs without general knowledge?"). Planned (`docs/slices/W.md`), then built as a workflow: plan, five parallel streams, integration with a live eval, and an independent review. The coordinator re-ran every gate.
+  - **Boundary.** `twins/ceo/role.md`'s new "General knowledge and conversation" section:
+    - general, opinion, strategy and small-talk questions are answered directly from the model's own knowledge, never "out of scope";
+    - company facts come only from named tools, and the Environment list is orientation, not a source;
+    - live or recent facts go through `research.web`;
+    - general conversation is never recorded or proposed to memory.
+
+    The Environment stub is filled from repo data (roster, manifest, finance schema), with five `TODO(owner)` lines.
+  - **`research.web`** (level R, 20/h, never auto). The daemon runs a separate cold `claude --print`:
+    - web search only: `--tools WebSearch,WebFetch --strict-mcp-config`, no Water tools;
+    - subscription-login check, API-key variables stripped, empty working directory;
+    - 40 s limit, process group killed on timeout;
+    - a query guard refuses `@`, URLs, host paths and long tokens;
+    - results are untrusted, so session taint escalates.
+
+    The twin itself keeps `--tools ""`.
+  - **Filler removed.** The handoff is a silent ack on every channel, and the globe stays in "thinking" until the first real sentence. `router.voice_filler_ms` (default 0) optionally speaks "Still checking." after a delay.
+  - **Spoken email:**
+    - new `internal/spokenemail`: its normalizer adds a "Possible email addresses heard" hint on voice turns and never rewrites the utterance;
+    - a recipient check at `approvals.Queue.Propose` and the gmail connector refuses bad syntax, two addresses in one item, and near-misses of common providers (edit distance, a provider glued onto a prefix, a TLD typo; real look-alike providers are exempt). `confirm_unusual_recipient` downgrades a near-miss refusal to a warning. MX checks run on envelopes;
+    - warnings appear in the read-back, on `approval_required.warnings`, and as a banner on the glass tab;
+    - role.md: the model spells the address back and gets a yes before drafting; after `draft_for_review`, "send it" asks whether the CEO sends from Gmail or the agent sends.
+  - **Voice approvals:**
+    - `approvals.MatchPending` accepts natural phrasings ("I approve", "go ahead", "do it") only when exactly one envelope is pending;
+    - a two-step spoken send for `gmail.send_message`/`twinlink.send_message` on P0 with no warnings: "yes", then the recipient spelled out plus the subject, then "confirm send" within 30 s, bound to the same payload hash, with warnings re-checked just before sending;
+    - P2 and warned envelopes stay tap-only.
+  - **Noise.** Migration `0015` adds `route_log.class` (company or general, conservative). Promote mining excludes general turns, and `docs/slices/G.md` has an owner amendment so memory writes skip them.
+  - **Review fixed four confirmed issues** (fail-before/pass-after):
+    - a hidden second address in one recipient item bypassed the checks (security);
+    - real domains were refused as near-misses (protonmail.ch, yahoo.ca, email.cz and others);
+    - schemeless URLs got past the research guard;
+    - the spoken read-back garbled display names.
+
+    Integration fixed two more: warnings that appear between the two spoken steps now force a tap, and the normalizer now joins the owner's actual phrase.
+  - **Eval** (the real generated prompt, the claude CLI on the subscription, 58 answers): no "out of scope" replies; live questions called research.web 18/18; strategy got a concrete answer; no invented domains; the spoken address was confirmed before drafting. **Haiku kept.** Weak spots are in known-gaps.
+  - **Gates run by the coordinator:** Go vet, gofmt, `go test -count=1 ./...` (53 packages) and build; Swift 331 tests, build, codesign, `--voice-keys-selftest`; go.mod, go.sum and Package files unchanged.

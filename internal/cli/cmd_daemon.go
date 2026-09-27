@@ -22,6 +22,7 @@ import (
 	"water/internal/config"
 	"water/internal/connectors"
 	"water/internal/connectors/google/gapi"
+	"water/internal/connectors/research"
 	"water/internal/gate"
 	"water/internal/gateway"
 	"water/internal/needsyou"
@@ -182,6 +183,7 @@ func buildNervousConfig(cfg *config.Resolved) nervous.Config {
 	nvCfg.MissWindow = time.Duration(cfg.Router.PossibleMissWindowSeconds) * time.Second
 	nvCfg.Retention = time.Duration(cfg.Router.LogRetentionDays) * 24 * time.Hour
 	nvCfg.AckAfter = time.Duration(cfg.Router.AckMS) * time.Millisecond
+	nvCfg.VoiceFiller = time.Duration(cfg.Router.VoiceFillerMS) * time.Millisecond
 	nvCfg.Speculation = cfg.Router.Speculation.Enabled
 	nvCfg.VoiceApprove = nervous.VoiceApproveConfig{
 		Enabled:         cfg.Router.VoiceApprove.Enabled,
@@ -283,6 +285,10 @@ func (a *App) runDaemon(ctx context.Context) error {
 		return exitWith(ExitError, err)
 	}
 	defer deps.Close()
+	// research.web keeps one warm spare process (docs/slices/W.md §15): kill
+	// it, and remove its scratch dir, on the way out. Runs after the server
+	// has drained, so no in-flight call can start a new one afterwards.
+	defer research.Shutdown()
 
 	sel, err := a.selectBackend(ctx)
 	if err != nil {
@@ -301,6 +307,11 @@ func (a *App) runDaemon(ctx context.Context) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "water daemon: twin=%s socket=%s cli-token=%s\n", deps.manifest.ID, paths.SocketPath(), cliToken)
+
+	// Recipient checks for gmail writes (docs/slices/W.md D4c): the daemon's
+	// queue adds the company domains and an MX lookup (short timeout,
+	// cached) to the pure checks every queue runs.
+	deps.approvals.SetRecipientChecker(approvals.NewRecipientChecker(approvals.NetResolver(), voiceApproveDomains(cfg.Router.VoiceApprove.InternalDomains)))
 
 	// Defined early (moved ahead of its original single use, agentWatcher's
 	// Config.Logf, below) so nvCfg.Logf (R-23's auto-demotion bookkeeping

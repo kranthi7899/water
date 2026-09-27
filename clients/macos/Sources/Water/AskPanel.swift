@@ -10,12 +10,15 @@ final class AskPanel: NSPanel {
 
 /// The Spotlight-style pop-up: one text field, and the streamed reply below.
 /// Pure view: it knows nothing about the daemon; AppDelegate wires it up.
+/// It closes with its ✕ button or Esc (while it is the key window; in
+/// voice mode Esc belongs to voice mode, and voice turns never open it).
 final class AskPanelController: NSObject, NSTextFieldDelegate {
     private let panel: AskPanel
     private let input = NSTextField()
     private let output = NSTextView()
     private let scroll = NSScrollView()
     private let status = NSTextField(labelWithString: "")
+    private let closeButton = NSButton()
 
     private let width: CGFloat = 680
     private let compactHeight: CGFloat = 64
@@ -25,6 +28,8 @@ final class AskPanelController: NSObject, NSTextFieldDelegate {
     var onClose: (() -> Void)?
 
     var isVisible: Bool { panel.isVisible }
+    /// The panel's frame while it's on screen (the globe keeps clear of it).
+    var frameIfVisible: NSRect? { panel.isVisible ? panel.frame : nil }
 
     override init() {
         panel = AskPanel(contentRect: NSRect(x: 0, y: 0, width: 680, height: 64),
@@ -76,7 +81,22 @@ final class AskPanelController: NSObject, NSTextFieldDelegate {
         scroll.borderType = .noBorder
         scroll.isHidden = true
 
-        for v in [input, status, scroll] as [NSView] {
+        if let img = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close") {
+            closeButton.image = img
+            closeButton.imagePosition = .imageOnly
+        } else {
+            closeButton.title = "✕"
+        }
+        closeButton.isBordered = false
+        closeButton.bezelStyle = .regularSquare
+        closeButton.contentTintColor = .tertiaryLabelColor
+        closeButton.toolTip = "Close (Esc)"
+        closeButton.setAccessibilityLabel("Close")
+        closeButton.refusesFirstResponder = true
+        closeButton.target = self
+        closeButton.action = #selector(closeClicked)
+
+        for v in [input, status, closeButton, scroll] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             bg.addSubview(v)
         }
@@ -85,9 +105,13 @@ final class AskPanelController: NSObject, NSTextFieldDelegate {
             input.trailingAnchor.constraint(equalTo: status.leadingAnchor, constant: -8),
             input.topAnchor.constraint(equalTo: bg.topAnchor, constant: 16),
             input.heightAnchor.constraint(equalToConstant: 32),
-            status.trailingAnchor.constraint(equalTo: bg.trailingAnchor, constant: -16),
+            status.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -8),
             status.centerYAnchor.constraint(equalTo: input.centerYAnchor),
             status.widthAnchor.constraint(equalToConstant: 170),
+            closeButton.trailingAnchor.constraint(equalTo: bg.trailingAnchor, constant: -14),
+            closeButton.centerYAnchor.constraint(equalTo: input.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 20),
+            closeButton.heightAnchor.constraint(equalToConstant: 20),
             scroll.leadingAnchor.constraint(equalTo: bg.leadingAnchor, constant: 16),
             scroll.trailingAnchor.constraint(equalTo: bg.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10),
@@ -110,6 +134,8 @@ final class AskPanelController: NSObject, NSTextFieldDelegate {
         panel.orderOut(nil)
         onClose?()
     }
+
+    @objc private func closeClicked() { close() }
 
     private func position(height: CGFloat) {
         panel.setFrame(frame(height: height), display: true)

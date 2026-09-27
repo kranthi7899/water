@@ -14,6 +14,7 @@ import (
 	"water/internal/approvals"
 	"water/internal/backend"
 	"water/internal/decisions"
+	"water/internal/spokenemail"
 	"water/internal/store"
 	"water/internal/tools"
 	"water/internal/twins"
@@ -36,10 +37,15 @@ const (
 	ChannelTextBar Channel = "text-bar"
 )
 
-// Turn is one user request.
+// Turn is one user request. Prompt is what the model is sent (any carried
+// context plus the CEO's words). Utterance, when set, is the CEO's raw words
+// alone (the final transcript on voice): it is read only for hints, such as
+// the spoken email addresses TurnPrompt lists, and is never sent in place of
+// Prompt or rewritten.
 type Turn struct {
-	Channel Channel
-	Prompt  string
+	Channel   Channel
+	Prompt    string
+	Utterance string
 }
 
 // EventKind names one event streamed to a client over the turn's socket
@@ -67,7 +73,36 @@ const (
 	// clients that do not know them ignore them.
 	EventToolStart EventKind = "tool_start"
 	EventToolEnd   EventKind = "tool_end"
+	// EventArtifact carries something a level-D draft function just made
+	// during this turn (gmail.draft_message, gmail.draft_for_review), or
+	// what the model asked to put on screen (display.show), so a client can
+	// show it: StepID and Tool of the step that made it, plus
+	// Artifact. It is sent only after the call ran successfully, on the same
+	// stream as that call's tool_start/tool_end, between the two. It is
+	// informational and side-effect free: clients that do not know it
+	// ignore it.
+	EventArtifact EventKind = "artifact"
 )
+
+// Artifact Types: an email draft (to, cc, subject, body), and plain text
+// the model chose to show the CEO (display.show: title, body).
+const (
+	ArtifactEmailDraft = "email_draft"
+	ArtifactDisplay    = "display"
+)
+
+// Artifact is the payload of an artifact event: what the draft call made,
+// copied from that call's own arguments (the CEO's own draft), with every
+// string and list capped by the daemon. Clients decode unknown Types with
+// just Type.
+type Artifact struct {
+	Type    string   `json:"type"`
+	Title   string   `json:"title,omitempty"`
+	To      []string `json:"to,omitempty"`
+	Cc      []string `json:"cc,omitempty"`
+	Subject string   `json:"subject,omitempty"`
+	Body    string   `json:"body,omitempty"`
+}
 
 // StepStatus is a tool_end event's outcome.
 type StepStatus string
@@ -111,16 +146,29 @@ type Event struct {
 	Tool   string     `json:"tool,omitempty"`
 	Label  string     `json:"label,omitempty"`
 	Status StepStatus `json:"status,omitempty"`
+	// Artifact belongs to artifact events only (with StepID and Tool).
+	Artifact *Artifact `json:"artifact,omitempty"`
+	// Warnings and ConfirmPhrase belong to approval_required only.
+	// Warnings are the code-built recipient warnings of the envelope
+	// (approvals.Envelope.Warnings: an unusual or unverified mail domain),
+	// also folded into ReadBack; a client shows them prominently.
+	// ConfirmPhrase, when set, is the fixed phrase ("confirm send") the CEO
+	// can say to execute a send whose spoken yes has already been read back.
+	Warnings      []string `json:"warnings,omitempty"`
+	ConfirmPhrase string   `json:"confirm_phrase,omitempty"`
 }
 
 // ApprovalRequiredEvent is the one approval_required shape every path
 // emits (the model-queued tool call, a Tier-0 write intent, a spoken yes on
 // a tap-required envelope): the id, the action (repeated in Text for older
 // clients), risk and payload hash (what POST /v1/approvals/{id}/decision
-// needs), and the code-built read-back (approvals.ReadBack).
+// needs), the code-built read-back (approvals.ReadBack), and the envelope's
+// recipient warnings, if any. ConfirmPhrase is left empty: only the spoken
+// two-step send sets it, on the event it builds.
 func ApprovalRequiredEvent(env approvals.Envelope) Event {
 	return Event{Kind: EventApprovalRequired, ApprovalID: env.ID, Text: env.Action,
-		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash, ReadBack: approvals.ReadBack(env)}
+		Action: env.Action, Risk: env.Risk, PayloadHash: env.PayloadHash, ReadBack: approvals.ReadBack(env),
+		Warnings: append([]string(nil), env.Warnings...)}
 }
 
 // Env is everything one turn needs. The daemon builds one Env per twin and
@@ -225,7 +273,7 @@ func ModelTurn(ctx context.Context, env Env, turn Turn, emit func(Event)) (backe
 	}
 	req := backend.Request{
 		System:  RoleSystem(env),
-		Prompt:  TurnPrompt(env, turn.Channel, summary, turn.Prompt),
+		Prompt:  turnPrompt(env, turn.Channel, summary, turn.Prompt, turn.Utterance),
 		Model:   env.Manifest.ModelFor(twins.TierFast),
 		Timeout: env.timeout(),
 		Tools:   env.Tools,
@@ -354,19 +402,46 @@ func RoleSystem(env Env) string {
 // prompt, so the system prompt stays byte-identical across channels and the
 // warm session keeps its process.
 func TurnPrompt(env Env, ch Channel, summary, prompt string) string {
+	return turnPrompt(env, ch, summary, prompt, "")
+}
+
+// turnPrompt is TurnPrompt plus, on voice, the email-address hint read from
+// utterance (EmailHint), right after the channel hint. The CEO's words are
+// sent exactly as heard; the hint only sits next to them.
+func turnPrompt(env Env, ch Channel, summary, prompt, utterance string) string {
 	var b strings.Builder
 	b.WriteString("## Current state (as of " + env.now().Local().Format("15:04") + ")\n" + summary + "\n\n")
 	if h := ChannelHint(ch, env.MaxChars[ch]); h != "" {
+		b.WriteString(h + "\n\n")
+	}
+	if h := EmailHint(ch, utterance); h != "" {
 		b.WriteString(h + "\n\n")
 	}
 	b.WriteString("## CEO\n" + prompt)
 	return b.String()
 }
 
+// EmailHint is the line a voice turn gets when its transcript seems to
+// speak email addresses ("kranthi at the rate gmail dot com"): the
+// normalized candidates (spokenemail.Candidates), marked unverified, so
+// the model spells them back and confirms rather than building an address
+// from misheard words. "" on any other channel or when none are heard.
+func EmailHint(ch Channel, utterance string) string {
+	if ch != ChannelVoice {
+		return ""
+	}
+	c := spokenemail.Candidates(utterance)
+	if len(c) == 0 {
+		return ""
+	}
+	return "## Possible email addresses heard (from speech, unverified; spell back and confirm before use): " + strings.Join(c, ", ")
+}
+
 // ChannelHint is the channel line TurnPrompt adds: which channel the reply
 // goes to and style.yaml's character budget for it (maxChars <= 0 leaves
 // the number out). Only voice asks for short spoken sentences with no
-// lists or markdown. An empty channel gets no hint.
+// lists or markdown, and only voice offers display.show for anything the
+// CEO should see rather than hear. An empty channel gets no hint.
 func ChannelHint(ch Channel, maxChars int) string {
 	if ch == "" {
 		return ""
@@ -381,6 +456,10 @@ func ChannelHint(ch Channel, maxChars int) string {
 	h := "## Channel: " + string(ch)
 	if len(parts) > 0 {
 		h += " (" + strings.Join(parts, "; ") + ")"
+	}
+	if ch == ChannelVoice {
+		h += "\nWhen the CEO would benefit from seeing something (a list, figures, a draft, steps), you may call " +
+			"display.show (the display__show tool) with a short title and a plain-text body to put it on screen briefly; still answer briefly out loud."
 	}
 	return h
 }

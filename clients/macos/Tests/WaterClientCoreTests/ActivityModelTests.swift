@@ -427,4 +427,66 @@ import Testing
         m.event(ev(.unknown("future")), turn: turn, now: at(0.1))
         #expect(m == before)
     }
+
+    // MARK: Esc leaves voice mode (2026-09-26 fixes)
+
+    /// Esc cancels the turn (whose stream then never reports its end) and
+    /// the speech: the globe must go at once, not linger on a turn that
+    /// will never finish.
+    @Test func dismissNowHidesAtOnceMidTurnAndDropsItsLateEvents() {
+        var m = ActivityModel()
+        let turn = m.turnSent(now: at(0))
+        m.event(ev(.sentence, text: "Sure."), turn: turn, now: at(1))
+        m.speechStarted(now: at(1))
+        m.dismissNow(now: at(2))
+        #expect(!m.isVisible)
+        #expect(m.phase == .idle)
+        #expect(m.dismissAt == nil)
+        // A late event from the cancelled turn doesn't bring it back.
+        m.event(ev(.delta, text: "more"), turn: turn, now: at(2.1))
+        m.event(ev(.done), turn: turn, now: at(2.2))
+        #expect(!m.isVisible)
+    }
+
+    @Test func dismissNowKeepsAPinnedApproval() {
+        var m = ActivityModel()
+        let turn = m.turnSent(now: at(0))
+        m.event(approval("env_1"), turn: turn, now: at(1))
+        m.dismissNow(now: at(2))
+        #expect(m.isVisible && m.isPinned)
+        #expect(m.phase == .needsYou)
+        #expect(m.approvals.map(\.id) == ["env_1"])
+    }
+
+    /// The glass tab's close button on an approval only hides it here: the
+    /// envelope stays pending in the workspace, but the globe stops pinning.
+    @Test func approvalDismissedUnpinsWithoutDeciding() {
+        var m = ActivityModel()
+        let turn = m.turnSent(now: at(0))
+        m.event(approval("env_1"), turn: turn, now: at(1))
+        m.event(ev(.done), turn: turn, now: at(1.5))
+        m.approvalResolved("env_1", now: at(2))
+        #expect(!m.isPinned)
+        m.tick(now: at(2 + ActivityModel.dismissDelay))
+        #expect(!m.isVisible)
+    }
+
+    /// A hold released while the speech models load keeps the globe
+    /// thinking past the usual stall guard, until the late transcript.
+    @Test func warmingUpTranscriptKeepsThinkingPastTheStallGuard() {
+        var m = ActivityModel()
+        m.holdStarted(now: at(0))
+        m.holdEnded(now: at(1))
+        m.transcriptWarmingUp(now: at(1))
+        m.tick(now: at(1 + ActivityModel.stallTimeout + 5))
+        #expect(m.phase == .thinking && m.isVisible)
+        _ = m.turnSent(now: at(30))
+        #expect(m.phase == .thinking)
+        // Without it, the usual guard applies.
+        var n = ActivityModel()
+        n.holdStarted(now: at(0))
+        n.holdEnded(now: at(1))
+        n.tick(now: at(1 + ActivityModel.stallTimeout))
+        #expect(n.phase == .idle)
+    }
 }

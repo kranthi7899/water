@@ -433,3 +433,171 @@ Real accounts stay read-only throughout. Every write demo uses fake connectors o
 ### 7.7 What happens next
 
 Stop. Nothing in §7.4 starts until the owner approves this plan, or edits it, and answers D1–D7. V-0 is docs only and can go first on approval. After that, one sub-slice per session, in the order above, each ending with its own `docs/EVOLUTION_PLAN.md` update by the coordinator.
+
+## 8. Globe and glass tab (2026-09-26, owner brief)
+
+The owner dropped the Activity HUD's "what the agent is doing" view. Built, not yet committed.
+
+**What replaced what**
+- The HUD panel next to the text bar is gone: its blob, its live step list and its approval cards. `ActivityHUD.swift` and `ActivityView.swift` are deleted.
+- `tool_start`/`tool_end` still stream from the daemon. `ActivityModel` still records them as `steps`, but nothing draws them.
+- `ActivityModel` stays as the state machine. It decides when something is visible, the phase, the level and the approval pinning, and `ActivityModelTests` still cover it.
+- **The globe** (`Sources/Water/GlobeHUD.swift`, `Sources/Water/Globe/`, `WaterClientCore/GlobeModel.swift`):
+  - A 72pt liquid-glass orb in a borderless, clear panel of about 106pt square, to leave room for the glow.
+  - The panel is click-through (`ignoresMouseEvents`), at `.statusBar` level, on all Spaces and next to full-screen apps.
+  - It sits top-right on the screen with the menu bar, just under the menu bar.
+  - It is drawn by a Metal shader compiled at runtime from a source string, with a `CAGradientLayer` fallback.
+  - `GlobeState(phase:)` and the model's `displayLevel` drive it:
+    - listening: live mic amplitude;
+    - thinking: a time-driven breath;
+    - responding: the TTS output level;
+    - idle, or an approval waiting: a calm orb.
+  - `GlobeSmoother` smooths every change.
+- **The glass tab** (`Sources/Water/Glass/`, `WaterClientCore/GlassTab.swift`):
+  - A separate, translucent, non-activating panel in the blue liquid-chrome theme, placed just below the globe.
+  - An email shows as To / Cc / Subject / Body. Anything else shows the envelope's exact read-back.
+  - An approval gets Approve / Edit / Reject:
+    - Approve and Reject post `POST /v1/approvals/{id}/decision` with the payload_hash the text came with.
+    - Edit opens the workspace at `approvals/{id}`.
+  - A draft gets Close.
+
+**Triggers**
+- The globe shows from hotkey-down or text submit until the reply ends, plus `ActivityModel.dismissDelay` (4s). It also stays while a voice approval is open.
+- A typed turn's `approval_required` doesn't pin the globe. It stays a line in the text bar, as before, because the glass tab only shows voice items.
+- The glass tab is decided by `GlassItem.shouldShow(channel:event:)`: a voice turn's `approval_required`, or an `artifact` of type `email_draft`. Nothing else shows it.
+- For an outward message (`gmail.send_message`, `twinlink.send_message`), the tab reads `GET /v1/approvals/{id}` and lays the payload out as a message. It does this only when the payload has no field the layout would hide.
+- An approval stays until it resolves. It is re-read on turn end, after a click, and when the globe's re-read resolves something. A draft closes on Close or after 25s.
+
+**The artifact event**
+- `runtime.EventArtifact` is `{"kind":"artifact","step_id":…,"tool":…,"artifact":{"type":"email_draft","to":[…],"cc":[…],"subject":…,"body":…}}`.
+- The daemon's tool-invoke handler emits it for `gmail.draft_message` and `gmail.draft_for_review`, only after the call succeeds and only while a turn is active. It arrives between that step's `tool_start` and `tool_end`.
+- Strings are capped at 20000 bytes and lists at 50.
+- Old clients ignore it (`TestOldClientsStillParseNewEvents`).
+
+**Render flags** (these exit before any app or daemon setup, with no network or UserDefaults)
+- `Water --render-globe <out.png> [--state idle|listening|thinking|responding] [--level 0..1] [--time s] [--size px]`
+- `Water --render-glass <out.png> --sample email|readback|draft`
+
+## 9. Voice mode (2026-09-26)
+
+Owner's ask: ⌃⌥V opens a voice session, holding Space listens, releasing Space processes and talks back.
+
+**Behaviour**
+- ⌃⌥V (or the menu's "Voice Mode" item, which shows a check while on) toggles voice mode. It is no longer hold-to-talk itself; its release does nothing.
+- While on, the globe stays up (idle while waiting). Holding Space starts the same `VoiceSession` hold the old ⌃⌥V hold did; releasing it ends audio and the turn goes out and is spoken exactly as before (voice channel, same V-8 trace starting at the release). Auto-repeat while held is ignored.
+- Esc leaves voice mode; Esc while listening cancels the hold (nothing is sent). Esc during a reply leaves the turn running.
+- It also leaves after 60s of true idleness: no hold, no turn in flight, nothing speaking, no approval pinning the globe. The count restarts on each Space press/release and when the last busy thing ends. It never exits mid-turn or while an approval is pinned.
+- On leaving, the globe fades out (unless a turn or approval still holds it by `ActivityModel`'s own rules).
+- First entry only: a one-line hint in the text bar, "Hold Space to talk. Esc to leave voice mode." (`didExplainVoiceMode`).
+
+**Design**
+- `WaterClientCore/VoiceMode.swift`: a pure struct (states off / armed / holding / processing). Inputs: toggle, spaceDown, spaceUp, esc, turnStarted/turnFinished/turnsCancelled, speechStarted/speechIdle, setApprovalPinned, tick, captureUnavailable, shutdown. It returns effects (registerCaptureKeys, unregisterCaptureKeys, startHold, endHold, cancelHold, showGlobe, hideGlobe, exited(reason)), which AppDelegate carries out. 25 tests in `VoiceModeTests`.
+- Space and Esc are captured by `CaptureKeys` (HotKeys.swift): Carbon `RegisterEventHotKey` with no modifiers, pressed and released events. A Carbon hot key swallows the key system-wide (a global NSEvent monitor can only watch), and it needs no Accessibility grant. ⌃⌥Space, ⇧Space, ⌘Esc and the rest still pass through.
+- The keys are registered only on entry. Every exit path emits `unregisterCaptureKeys` (toggle, Esc, timeout, failed registration, `applicationWillTerminate`, which also unregisters unconditionally). The OS drops a dead process's hot keys, so a crash can't leave Space captured. If Space can't be registered because another app holds it, voice mode exits at once with an error line.
+- `GlobeHUD.keepVisible` keeps the globe up during voice mode, on top of `ActivityModel`'s rules.
+- A Space hold only ends or cancels a capture it started itself (`spaceOwnsHold`), so the workspace mic's hold is never cut by Space or Esc.
+
+## 10. Voice UX fixes (2026-09-26)
+
+The owner tried voice mode and reported four problems: the "Ask Water" bar popped up and couldn't be closed, the globe was in the corner, Space only worked some of the time, and Esc lagged or did nothing. Built, not yet committed.
+
+**Diagnosis**
+- **Space and Esc did nothing: the handlers were never connected.** `CaptureKeys` reported keys through two optional closures, `onPress` and `onRelease`, and nothing assigned them. A grep of `Sources` found no assignment. So in voice mode the Carbon hot keys swallowed Space and Esc system-wide and dropped them. You couldn't talk, couldn't type a space in other apps, and couldn't leave. Voice mode only ended at its 60s idle timeout, which looked like Esc "lagging", and after that Space worked again ("now it's working"). The Ask Water bar couldn't be closed because it has no button and Esc never reached it.
+- **The first hold after launch lost its audio.** A hold released while Parakeet was still loading hit `VoiceSession`'s 1.5s backstop. The user saw "Didn't catch anything" and the queued audio was cancelled. Measured with `Water --asr-selftest`: the first hold after a build took 24.5s (48s on a later fresh build) to reach its final result, the first in a warm process took 1.15s, and the ones after that took 70–84ms.
+- **Esc left work running.** Before, Esc cancelled only a key still held. A capture still finishing after release would send its transcript after voice mode closed. A turn in flight kept running and was spoken. A cancelled stream never reports its end, so the globe waited on it.
+
+**Fixes**
+- `CaptureKeys(onKey:)` takes its handler as a required `init` parameter, so the keys can't be registered with nobody listening. AppDelegate sends each event through the new pure router `VoiceMode.key(_:pressed:now:)`.
+- `Water --voice-keys-selftest` sends synthetic Carbon hot-key events through the event dispatcher to that handler. It registers no real key. Space down/up and Esc each reach `VoiceMode` with the right effects, within about 11ms.
+- `SpeechCapture.isWarmingUp` is new. `ParakeetCapture` reports it until its models are loaded; Apple's capture has no warm-up. If a hold started or ended while the capture was warming up, `VoiceSession` waits up to `warmupBackstop` (90s) for the final result instead of 1.5s, and fires `onWarmingUp`. The tab then shows a short "warming up" notice. While that Space capture is still finishing, voice mode counts as busy (`VoiceMode.setCapturePending`, reported by AppDelegate every tick), so the 60s idle timeout can't switch voice mode off under a 90s warm-up (review fix).
+- Esc is a hard stop from any state. It cancels the Space capture (held, or still finishing), cancels the voice turn in flight (a typed turn keeps running), stops speech, unregisters Space and Esc, and hides the globe at once (`ActivityModel.dismissNow`). It never closes or decides an approval: the approval stays in the glass tab and the workspace, and it keeps the globe up. ⌃⌥V and the idle timeout behave as before.
+- The globe is centred on the menu-bar screen with its orb 22% down from the top. It moves above the text bar (or below it) when it would cover it. The glass tab is centred 12pt below the orb and clamped on screen. All of this is in `WaterClientCore/OverlayLayout.swift`.
+- Voice mode never opens the Ask Water bar: not while listening, not for a failure, not for the first-use hint. Those go to the glass tab as a short plain-text `notice`. Voice-turn errors and "approved but failed" notes do the same.
+- The Ask Water bar has a ✕ button. Esc closes it while it is the key window and voice mode is off.
+- The glass tab shows only:
+  - approvals, which stay until resolved or closed;
+  - `email_draft` artifacts;
+  - `display` artifacts, from the new level-R `display.show` (title and body, plain text; the backend stream built it);
+  - the app's own notices.
+
+  Everything except an approval hides after 10s. The count pauses while the pointer is over the tab and resumes with at least 3s when it leaves. Every item has a ✕. On an approval, ✕ only hides the tab: nothing is decided, it stays pending in the workspace, and the globe stops pinning on it. Closing the tab never ends voice mode.
+
+**Tests**
+- `VoiceUXRegressionTests` reproduces the bugs using only APIs that existed before the fix: the warm-up drop, Esc after release, and a display artifact. It failed on the old code and passes now. It also covers the edges of the warm-up wait.
+- New tests in `VoiceModeTests`: Esc from every state, key routing, and other exits leaving the turn alone.
+- New tests in `ActivityModelTests`: `dismissNow` and hiding an approval.
+- New tests in `GlassTabTests`: display items, notices, the 10s linger, hover pause, and closing an approval.
+- New suite `OverlayLayoutTests`.
+- `Water --render-glass --sample display|notice` renders the new items.
+
+## 11. Globe interaction (2026-09-26)
+
+The owner asked for a globe they can touch without losing the keyboard: hover brightens it, click-and-drag moves it like a file, pushing it up docks it in the menu bar, and a double-click opens a small menu (transparent mode, go to panel, quit). They also wanted it lower on the screen. Built, not yet committed.
+
+**Mouse without focus**
+- The panel is no longer permanently click-through. Only the orb's circle (radius = orb/2 + 2pt, `OverlayLayout.orbContains`) takes the mouse. The glow margin and the window's corners stay click-through.
+- How: while the floating globe is up, GlobeHUD polls the pointer at 60Hz. On the circle it clears `ignoresMouseEvents` and sets the hover look; anywhere else the panel ignores the mouse again. A tracking area can't do this, because a window that ignores mouse events gets no tracking events either. The content view (`OrbHitView`) also hit-tests the circle. A button already held when the pointer arrives (another app's drag or text selection) keeps it click-through.
+- The panel is still `.nonactivatingPanel`, `canBecomeKey`/`canBecomeMain` false. The orb view never becomes first responder and accepts the first click, so a click never activates Water or takes keys from the app you're in. Space and Esc stay voice mode's Carbon hot keys.
+
+**Gestures** (`WaterClientCore/GlobeInteraction.swift`, `GlobeDrag`)
+- Hover: a smooth brightness lift (`GlobeLook.hover`: energy and glow +0.14, and a 30% lift in the shader), eased by `GlobeSmoother`.
+- A press that travels at least 3pt becomes a drag. The window follows the pointer, clamped so the orb stays on the screen (above the Dock, and it may enter the menu bar). Dragging onto another screen clamps to that screen. On release the orb settles `margin` inside the visible frame, with a short ease, and its spot is saved. A click without movement does nothing.
+- Dock: when the orb's centre reaches the menu bar during a drag (above the visible frame's top, or the screen's top 24pt when the menu bar is hidden: `OverlayLayout.isInDockZone`), it docks at once and the gesture ends.
+- Double-click: an `NSMenu` next to the orb with **Transparent mode** (checkmark, saved), **Go to panel** (dock) and **Quit voice mode**. Quit runs exactly the Esc path, `voiceMode.key(.escape, pressed: true)`, and is disabled while voice mode is off.
+
+**Docked** (`Sources/Water/GlobeDockItem.swift`)
+- The floating globe hides and a separate `NSStatusItem` (28pt wide) shows a live mini orb.
+  - The mini orb is a 22pt `GlobeView` with a bigger sphere radius (0.82 clip units, so the orb is about 18pt), running at 30fps.
+  - It follows the same state and level (idle, listening, thinking, responding, searching) and the transparent look.
+- Clicking it undocks: the globe comes back at its remembered spot.
+- Docked state is saved. The item exists only while docked and the globe would be showing: voice mode on, or a turn or approval holding it. It goes away with the globe, at once on Esc. The app's drop icon and menu are a different item and are unchanged.
+- The glass tab hangs under the mini orb while docked.
+
+**Placement** (`OverlayLayout`)
+- Default: centred horizontally on the menu-bar screen, with the orb's centre `globeCenterAboveBottom` = 216pt (3 inches) above the visible frame's bottom. It still moves clear of an open text bar.
+- The glass tab now opens above the orb: centred on it, `glassGap` 12pt above the orb's top edge. It flips below when it doesn't fit, takes the roomier side when neither fits, and is clamped `margin` 8pt inside the visible frame. It follows the globe while it's dragged, docked or undocked (`GlassTabController.reposition`).
+
+**Persistence** (`GlobePrefs`, UserDefaults; tests and the self-test use `MemoryPrefsStore`)
+- `globeOrigin`: per screen (display UUID), the orb's centre as an offset from that screen's visible-frame origin, stored as `[screenID: [dx, dy]]`.
+- `globeScreen`: the screen the orb was last left on. It's used if still connected, otherwise the menu-bar screen.
+- `globeDocked`, `globeTransparent`: Bools.
+- Malformed values are ignored.
+
+**Transparent mode**
+- `GlobeUniforms.saturation` is 0 and `opacity` is 0.62.
+- In the Metal shader, a new fourth float4 `d = (saturation, opacity, 0, 0)` turns the orb and glow black and white and fades them (premultiplied).
+- The gradient fallback greys every layer colour and fades the view.
+- State and hover reactions are unchanged.
+
+**Searching**
+- A `tool_start` whose `tool` is `research.web` (`ActivityModel.searchTools`), arriving while the turn is open, puts `ActivityModel` in phase `.searching`.
+- It lasts until the next `tool_end`, which returns to thinking, or to responding if a reply is still being spoken. A `sentence`/`delta`, the turn's end, or Esc also ends it.
+- `GlobeState.searching` looks distinct: a cooler teal-cyan orb, a bright arc with a tail orbiting the rim, a soft spot circling inside and a matching flare in the glow. The shader draws these from `b.w = search` and wall-clock time.
+- The fallback draws a spark orbiting inside the rim.
+- `SliceWClientTests.ackAndHandoffKeepTheGlobeThinkingUntilTheFirstSentence` now expects `.searching` for its `research.web` step. The rule it pins, never responding before the first sentence, is unchanged.
+
+**Tests and tools**
+- `GlobeInteractionTests` (22 tests) covers:
+  - the drag gesture: a click, jitter, delta, clamp, a second screen, dock-at-once, double-click to menu, settling;
+  - the prefs round trip, per screen and relative to the visible frame, and garbage input;
+  - the hover and transparent looks and their easing;
+  - the searching transitions.
+- `OverlayLayoutTests` (19 tests) was rewritten for the bottom placement, the tab above with its flip, the docked anchor, remembered spots, hit-testing, drag clamping, the dock zone and settling.
+- `Water --globe-selftest` drives a real, never-shown GlobeHUD with synthetic mouse events and a fake pointer. It checks:
+  - the default spot, and that the panel never takes key, main or first responder;
+  - that only the circle is hit;
+  - that a click doesn't move it;
+  - that a drag moves it and is remembered and restored;
+  - that a push into the menu bar docks it;
+  - undocking, and that transparent mode is saved.
+- New render flags:
+  - `Water --render-globe … --state searching`;
+  - `--hover`, `--transparent`;
+  - `--mini`, the docked orb's geometry (use `--size 44`);
+  - `--fallback`, which forces the gradient orb.
+
+**Not verified live:** the gestures in the owner's running Water.app (this build wasn't installed), and `NSMenu` pop-up and status-button behaviour on a notched menu bar.
+
+## Superseded by the interface brief (2026-09-26)
+
+The owner's interface brief, "Water interface build: one ordered plan, demo population last", replaces the remaining Slice V and Slice D plans. Its plan is `docs/slices/UI.md`. What V has built stays as it is, and so do the owner decisions made after the brief's source prompts: §8–§10 (the globe, the glass tab, voice mode), Kokoro via FluidAudio, and Slice W. Where the brief conflicts with those decisions, UI.md flags it and asks the owner rather than resolving it (UI.md §1.1, U1). In particular, the step-list HUD is not restored without an explicit owner decision. Nothing further gets built from this file's V-* sub-slices; any open V work continues as UI phases.

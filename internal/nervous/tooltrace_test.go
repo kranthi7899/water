@@ -79,3 +79,54 @@ func TestQuickOnlySignature(t *testing.T) {
 		t.Fatalf("empty input must report (false, \"\"), got (%v, %q)", quickOnly, sig)
 	}
 }
+
+// Slice W, D6: attempts are tracked separately from executed uses, parked
+// by EndMain and popped once by TakeAttempts.
+func TestToolTraceRecordsAttemptsIncludingQueued(t *testing.T) {
+	tt := NewToolTracer()
+	tt.BeginMain("turn-1")
+	tt.RecordAttempt("gmail.send_message") // queued for approval: never RecordUse'd
+	used, attributed := tt.EndMain("turn-1")
+	if len(used) != 0 || !attributed {
+		t.Fatalf("used=%v attributed=%v, want none executed and attributed", used, attributed)
+	}
+	if got := tt.TakeAttempts("turn-1"); len(got) != 1 || got[0] != "gmail.send_message" {
+		t.Fatalf("TakeAttempts = %v, want [gmail.send_message]", got)
+	}
+	if got := tt.TakeAttempts("turn-1"); got != nil {
+		t.Fatalf("second TakeAttempts = %v, want nil (popped once)", got)
+	}
+}
+
+func TestToolTraceAttemptAmbiguityUnattributes(t *testing.T) {
+	tt := NewToolTracer()
+	tt.BeginMain("a")
+	tt.BeginMain("b")
+	tt.RecordAttempt("research.web")
+	_, attrA := tt.EndMain("a")
+	_, attrB := tt.EndMain("b")
+	if attrA || attrB {
+		t.Fatalf("an attempt with two turns in flight must unattribute both: a=%v b=%v", attrA, attrB)
+	}
+}
+
+func TestToolTraceAttemptWithNothingInFlightIsDropped(t *testing.T) {
+	tt := NewToolTracer()
+	tt.RecordAttempt("gmail.send_message")
+	if got := tt.TakeAttempts("ghost"); got != nil {
+		t.Fatalf("TakeAttempts = %v, want nil", got)
+	}
+}
+
+func TestToolTraceEndedIsBounded(t *testing.T) {
+	tt := NewToolTracer()
+	for i := 0; i < maxEndedTraces*3; i++ {
+		id := string(rune('a'+i%26)) + string(rune('0'+i%10)) + string(rune(i))
+		tt.BeginMain(id)
+		tt.RecordAttempt("x.y")
+		tt.EndMain(id)
+	}
+	if len(tt.ended) > maxEndedTraces {
+		t.Fatalf("ended grew to %d, want <= %d", len(tt.ended), maxEndedTraces)
+	}
+}

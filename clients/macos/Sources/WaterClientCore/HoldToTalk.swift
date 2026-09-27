@@ -28,6 +28,16 @@ public protocol SpeechCapture: AnyObject {
     func endAudio()
     /// Stops everything now.
     func cancel()
+    /// True while the recognizer itself isn't ready yet (Parakeet's models
+    /// still loading): audio is being queued, and a final result will come,
+    /// just later than usual. VoiceSession then waits for it (up to
+    /// `warmupBackstop`) instead of giving up at `backstop`. Main thread.
+    var isWarmingUp: Bool { get }
+}
+
+extension SpeechCapture {
+    /// Apple's recognizer has no warm-up to wait out.
+    public var isWarmingUp: Bool { false }
 }
 
 /// Runs `work` on the main thread after `seconds`.
@@ -67,6 +77,12 @@ public final class VoiceSession {
     /// result has arrived. endAudio() leaves only buffered audio to decode,
     /// so isFinal normally lands well inside this.
     public var backstop: TimeInterval = 1.5
+    /// The same, for a hold whose capture was still warming up at its start
+    /// or its release (`SpeechCapture.isWarmingUp`): its audio is queued
+    /// behind the model load (measured at 24–48s on the first run after
+    /// a build), and the final result will still come, so wait for it
+    /// rather than drop the audio as "didn't catch anything".
+    public var warmupBackstop: TimeInterval = 90
     /// Reported (through onFailure) when the key came up before the mic
     /// opened — e.g. the user let go to answer a permission prompt.
     public var releasedEarlyMessage = "Hold the voice hotkey while you talk, and release it to send."
@@ -77,6 +93,9 @@ public final class VoiceSession {
     public var onTranscript: ((String) -> Void)?
     /// A user-facing failure; the session is back to idle.
     public var onFailure: ((String) -> Void)?
+    /// The key came up while the recognizer is still warming up: the
+    /// transcript is coming, later than usual (a brief "warming up" state).
+    public var onWarmingUp: (() -> Void)?
 
     private let permissions: VoicePermissionGate
     private let capture: SpeechCapture
@@ -85,6 +104,8 @@ public final class VoiceSession {
     private var releasedWhileStarting = false
     private var transcript = ""
     private var delivered = false
+    /// The capture reported warming up when this hold's mic opened.
+    private var startedWarm = false
 
     public init(permissions: VoicePermissionGate, capture: SpeechCapture, scheduler: VoiceScheduler) {
         self.permissions = permissions
@@ -154,6 +175,7 @@ public final class VoiceSession {
         let gen = generation
         transcript = ""
         delivered = false
+        startedWarm = capture.isWarmingUp
         do {
             try capture.start { [weak self] result in
                 guard let self, self.generation == gen else { return }
@@ -188,9 +210,11 @@ public final class VoiceSession {
 
     private func finish() {
         state = .finishing
+        let warming = startedWarm || capture.isWarmingUp
         capture.endAudio()
         let gen = generation
-        scheduler.after(backstop) { [weak self] in
+        if warming { onWarmingUp?() }
+        scheduler.after(warming ? warmupBackstop : backstop) { [weak self] in
             guard let self, self.generation == gen else { return }
             self.deliver()
         }

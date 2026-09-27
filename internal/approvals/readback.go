@@ -12,9 +12,30 @@ import (
 // code from the structured payload, the same payload the hash binds, so
 // what is read back is exactly what would execute. No model writes it.
 // Every payload key is shown, in full (whitespace and control characters
-// collapsed): nothing the approval binds is hidden from the approver.
+// collapsed): nothing the approval binds is hidden from the approver. The
+// envelope's recipient warnings, if any, come between the summary and the
+// question, so they are heard before the yes or no.
 func ReadBack(e Envelope) string {
-	return summary(e, true) + " " + prompt(e.Action)
+	s := summary(e, true)
+	if w := warningLine(e.Warnings); w != "" {
+		s += " " + w
+	}
+	return s + " " + prompt(e.Action)
+}
+
+// warningLine renders warnings as one "Warning: a. b." sentence, each
+// collapsed so none can inject a line; "" when there are none.
+func warningLine(ws []string) string {
+	var parts []string
+	for _, w := range ws {
+		if w = strings.TrimRight(clip(w, -1), ". "); w != "" {
+			parts = append(parts, w+".")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "Warning: " + strings.Join(parts, " ")
 }
 
 // Summary is the one-line list form of e (long values shortened, with a

@@ -1,9 +1,11 @@
 import Foundation
 
-// The Activity HUD's one state machine (docs/slices/V.md §7.4 V-hud), kept
+// The globe's one state machine (docs/slices/V.md §7.4 V-hud, §8), kept
 // free of AppKit so every rule is testable on a fake clock
-// (ActivityModelTests). Sources/Water/ActivityView.swift draws it and
-// Sources/Water/ActivityHUD.swift feeds it; neither decides anything.
+// (ActivityModelTests). Sources/Water/GlobeHUD.swift feeds it and shows the
+// globe from its visibility, phase and level; it decides nothing itself.
+// `steps` is still tracked but no longer drawn (owner brief 2026-09-26), and
+// `isExpanded` is kept only for the tests that pin that bookkeeping.
 //
 // Rules:
 // - It is visible only during an interaction (from hold or text submit
@@ -15,6 +17,10 @@ import Foundation
 // - After the turn ends (done/error, and any speech has drained) with no
 //   approvals, it collapses and hides at end + `dismissDelay`.
 // - Events from any turn but the latest are ignored.
+// - A `tool_start` for a web search (`searchTools`) while the turn is open
+//   shows `searching` (2026-09-26) until the next `tool_end`, sentence or
+//   delta, or the turn's end; after a `tool_end` it goes back to thinking,
+//   or to responding if a reply is still being spoken.
 
 /// One tool call the model made during the current turn, as the daemon
 /// labelled it (code-built text, never the call's arguments).
@@ -74,13 +80,21 @@ public struct ApprovalCard: Equatable {
 public struct ActivityModel: Equatable {
     public enum Phase: Equatable {
         case idle, listening, thinking, responding, needsYou
+        /// A web search is running (the globe's searching look).
+        case searching
     }
+
+    /// Tools whose run shows as `searching`.
+    public static let searchTools: Set<String> = ["research.web"]
 
     /// Seconds the HUD stays after an interaction ends with nothing pending.
     public static let dismissDelay: TimeInterval = 4
     /// A hold that ended but never produced a turn or a failure stops
     /// "thinking" after this long.
     public static let stallTimeout: TimeInterval = 15
+    /// The same while the speech models are still warming up: the
+    /// transcript is queued behind the load (VoiceSession.warmupBackstop).
+    public static let warmupStallTimeout: TimeInterval = 95
     /// Shown for a step whose label came through empty.
     public static let genericStepLabel = "Working"
     /// How fast an amplitude fades when it stops being updated (seconds
@@ -89,7 +103,7 @@ public struct ActivityModel: Equatable {
     /// The thinking pulse's period.
     static let pulsePeriod: TimeInterval = 1.4
 
-    private enum Activity: Equatable { case idle, listening, thinking, responding }
+    private enum Activity: Equatable { case idle, listening, thinking, responding, searching }
 
     public private(set) var isVisible = false
     public private(set) var steps: [ActivityStep] = []
@@ -107,6 +121,8 @@ public struct ActivityModel: Equatable {
     private var thinkingSince: Date?
     /// Set at `holdEnded`, cleared once a turn is sent: the stall guard.
     private var holdEndedAt: Date?
+    /// Set by `transcriptWarmingUp`: the stall guard waits longer.
+    private var warmingUp = false
 
     public init() {}
 
@@ -116,6 +132,7 @@ public struct ActivityModel: Equatable {
         case .listening: return .listening
         case .thinking: return .thinking
         case .responding: return .responding
+        case .searching: return .searching
         }
     }
 
@@ -135,6 +152,15 @@ public struct ActivityModel: Equatable {
         activity = .listening
         steps = []
         holdEndedAt = nil
+        warmingUp = false
+    }
+
+    /// The hold ended while the recognizer is still loading: stay
+    /// "thinking" until the (late) transcript arrives, up to
+    /// `warmupStallTimeout` instead of `stallTimeout`.
+    public mutating func transcriptWarmingUp(now: Date) {
+        guard activity == .thinking, !turnOpen else { return }
+        warmingUp = true
     }
 
     /// The hotkey came up; the transcript is on its way.
@@ -149,6 +175,7 @@ public struct ActivityModel: Equatable {
     /// or mic failure).
     public mutating func cancelled(now: Date) {
         holdEndedAt = nil
+        warmingUp = false
         guard !turnOpen else { return }
         activity = .idle
         speaking = false
@@ -165,6 +192,7 @@ public struct ActivityModel: Equatable {
         activity = .thinking
         thinkingSince = now
         holdEndedAt = nil
+        warmingUp = false
         turnOpen = true
         speaking = false
         steps = []
@@ -183,6 +211,10 @@ public struct ActivityModel: Equatable {
                 steps.append(ActivityStep(id: id, label: Self.label(e.label), state: .running))
             }
             isVisible = true
+            if turnOpen, activity == .thinking || activity == .responding,
+               let tool = Self.nonEmpty(e.tool), Self.searchTools.contains(tool) {
+                activity = .searching
+            }
         case .toolEnd:
             guard let id = Self.nonEmpty(e.stepID) else { return }
             let state = ActivityStep.State(status: e.status)
@@ -192,6 +224,10 @@ public struct ActivityModel: Equatable {
                 steps.append(ActivityStep(id: id, label: Self.label(e.label), state: state))
             }
             isVisible = true
+            if activity == .searching {
+                activity = speaking ? .responding : .thinking
+                if activity == .thinking { thinkingSince = now }
+            }
         case .approvalRequired:
             guard let id = Self.nonEmpty(e.approvalID) else { return }
             let card = ApprovalCard(id: id, action: e.approvalAction, risk: Self.nonEmpty(e.risk),
@@ -205,7 +241,7 @@ public struct ActivityModel: Equatable {
             dismissAt = nil
         case .done, .error:
             end(now: now)
-        case .ack, .queued, .handoff, .unknown:
+        case .ack, .queued, .handoff, .artifact, .unknown:
             break
         }
     }
@@ -275,11 +311,31 @@ public struct ActivityModel: Equatable {
         approvals[i].submitting = false
     }
 
+    /// Esc left voice mode (2026-09-26 fixes): the app cancelled the turn in
+    /// flight (its stream never reports an end) and silenced the speech, so
+    /// hide now instead of waiting on either, and treat anything still
+    /// arriving for that turn as stale. An approval still pinned stays: Esc
+    /// never closes one.
+    public mutating func dismissNow(now: Date) {
+        turn += 1
+        turnOpen = false
+        speaking = false
+        holdEndedAt = nil
+        warmingUp = false
+        activity = .idle
+        steps = []
+        level = 0
+        levelAt = nil
+        dismissAt = nil
+        if approvals.isEmpty { isVisible = false }
+    }
+
     /// The clock: runs the auto-dismiss and the stall guard.
     public mutating func tick(now: Date) {
         if activity == .thinking, !turnOpen, let ended = holdEndedAt,
-           now.timeIntervalSince(ended) >= Self.stallTimeout {
+           now.timeIntervalSince(ended) >= (warmingUp ? Self.warmupStallTimeout : Self.stallTimeout) {
             holdEndedAt = nil
+            warmingUp = false
             activity = .idle
             settle(now: now)
         }
@@ -299,7 +355,7 @@ public struct ActivityModel: Equatable {
         switch activity {
         case .idle:
             return 0
-        case .thinking:
+        case .thinking, .searching:
             return Self.thinkingPulse(elapsed: now.timeIntervalSince(thinkingSince ?? now))
         case .listening, .responding:
             guard let at = levelAt else { return 0 }

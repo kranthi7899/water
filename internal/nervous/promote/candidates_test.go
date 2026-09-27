@@ -345,3 +345,27 @@ func TestCandidatesMaxRowsBoundsTheScan(t *testing.T) {
 		t.Fatalf("got %d candidates with maxRows=0, want 1 (unlimited must still see both days)", len(unbounded))
 	}
 }
+
+// Slice W, D6: general-class rows never contribute to a candidate, both at
+// the store filter and in qualifies itself.
+func TestCandidatesGeneralRowsExcluded(t *testing.T) {
+	s := openTemp(t)
+	var rows []store.RouteRow
+	rows = append(rows, rowsOnDay("d1", day1, 3, func(i int, r *store.RouteRow) { r.Class = store.RouteClassGeneral })...)
+	rows = append(rows, rowsOnDay("d2", day2, 3, func(i int, r *store.RouteRow) { r.Class = store.RouteClassGeneral })...)
+	insertAll(t, s, rows)
+
+	got, err := Candidates(context.Background(), s, intents.Shared{}, day1.Add(-time.Hour), 5, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d candidates from general-only rows, want 0: %+v", len(got), got)
+	}
+
+	r := baseRow("direct", day1)
+	r.Class = store.RouteClassGeneral
+	if qualifies(r, intents.Shared{}, nil, nil) {
+		t.Fatal("qualifies accepted a general-class row")
+	}
+}

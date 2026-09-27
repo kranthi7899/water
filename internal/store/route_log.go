@@ -43,6 +43,24 @@ type RouteRow struct {
 	Action                map[string]string
 	PossibleMiss          bool
 	Confirmed             bool
+	// Class is RouteClassCompany or RouteClassGeneral (migration 0015,
+	// Slice W). Empty is written as company: the conservative default.
+	Class string
+}
+
+// Route classes (route_log.class). A general turn is the twin's own
+// knowledge, small talk or public web research; it is never promotion or
+// memory input.
+const (
+	RouteClassCompany = "company"
+	RouteClassGeneral = "general"
+)
+
+func routeClass(c string) string {
+	if c == RouteClassGeneral {
+		return RouteClassGeneral
+	}
+	return RouteClassCompany
 }
 
 func marshalJSON(v any) (string, error) {
@@ -100,14 +118,14 @@ func (s *Store) InsertRoute(ctx context.Context, r RouteRow) (int64, error) {
 		escalation_reason, latency_ms, total_ms, outcome, warnings, voice,
 		partials, first_partial_lead_ms, speculation, speculation_model_calls,
 		ack_ms, first_sentence_ms, tools_used, tools_attributed, quick_only,
-		tool_signature, action, possible_miss, confirmed
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		tool_signature, action, possible_miss, confirmed, class
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.TurnID, r.ClientTurnID, at.UnixNano(), r.Channel, r.Utterance, tiers,
 		r.Owner, r.AnsweredBy, r.Intent, r.IntentKind, r.IntentOrigin, slots,
 		r.EscalationReason, latency, r.TotalMS, r.Outcome, warnings, boolToInt(r.Voice),
 		r.Partials, nullableInt64(r.FirstPartialLeadMS), speculation, r.SpeculationModelCalls,
 		nullableInt64(r.AckMS), nullableInt64(r.FirstSentenceMS), toolsUsed, boolToInt(r.ToolsAttributed), boolToInt(r.QuickOnly),
-		r.ToolSignature, action, boolToInt(r.PossibleMiss), boolToInt(r.Confirmed))
+		r.ToolSignature, action, boolToInt(r.PossibleMiss), boolToInt(r.Confirmed), routeClass(r.Class))
 	if err != nil {
 		return 0, err
 	}
@@ -161,7 +179,7 @@ const routeRowColumns = `id, turn_id, client_turn_id, at, channel, utterance, ti
 	escalation_reason, latency_ms, total_ms, outcome, warnings, voice,
 	partials, first_partial_lead_ms, speculation, speculation_model_calls,
 	ack_ms, first_sentence_ms, tools_used, tools_attributed, quick_only,
-	tool_signature, action, possible_miss, confirmed`
+	tool_signature, action, possible_miss, confirmed, class`
 
 func scanRouteRow(scan func(...any) error) (RouteRow, error) {
 	var r RouteRow
@@ -175,7 +193,7 @@ func scanRouteRow(scan func(...any) error) (RouteRow, error) {
 		&r.EscalationReason, &latency, &totalMS, &r.Outcome, &warnings, &voice,
 		&r.Partials, &firstPartialLeadMS, &speculation, &r.SpeculationModelCalls,
 		&ackMS, &firstSentenceMS, &toolsUsed, &toolsAttributed, &quickOnly,
-		&r.ToolSignature, &action, &possibleMiss, &confirmed,
+		&r.ToolSignature, &action, &possibleMiss, &confirmed, &r.Class,
 	); err != nil {
 		return RouteRow{}, err
 	}
@@ -248,12 +266,13 @@ func (s *Store) ListRoutes(ctx context.Context, since time.Time, limit int) ([]R
 
 // QuickOnlyRoutes returns rows at or after since whose main-path answer used
 // only quick tools and was cleanly attributed (the promotion loop's
-// candidate pool), newest first. limit <= 0 means unlimited, exactly like
+// candidate pool), newest first. General-class turns are never in the pool
+// (Slice W, D6), whatever their quick_only flag says. limit <= 0 means unlimited, exactly like
 // ListRoutes; a caller scanning an unbounded lookback window should pass a
 // real cap so DB I/O and unmarshal cost don't grow without bound alongside
 // route_log itself.
 func (s *Store) QuickOnlyRoutes(ctx context.Context, since time.Time, limit int) ([]RouteRow, error) {
-	q := `SELECT ` + routeRowColumns + ` FROM route_log WHERE at >= ? AND quick_only = 1 ORDER BY at DESC, id DESC`
+	q := `SELECT ` + routeRowColumns + ` FROM route_log WHERE at >= ? AND quick_only = 1 AND class != 'general' ORDER BY at DESC, id DESC`
 	args := []any{since.UnixNano()}
 	if limit > 0 {
 		q += ` LIMIT ?`

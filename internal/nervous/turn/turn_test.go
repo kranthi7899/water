@@ -210,9 +210,10 @@ func TestEmitterRouterHandoffWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Router may still emit its handoff acknowledgement before main's
-	// first event.
-	routerEmit(runtime.Event{Kind: runtime.EventSentence, Text: "One moment."})
+	// Router may still emit before main's first event. (This tests the
+	// Emitter's window, not the handoff itself: since Slice W the nervous
+	// handoff is a silent ack, never a spoken sentence.)
+	routerEmit(runtime.Event{Kind: runtime.EventSentence, Text: "A neutral router line."})
 	if len(delivered) != 2 {
 		t.Fatalf("router handoff before main's first event should be delivered, got %+v", delivered)
 	}

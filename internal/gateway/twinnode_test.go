@@ -18,6 +18,7 @@ import (
 	"water/internal/audit"
 	"water/internal/backend"
 	"water/internal/connectors"
+	"water/internal/connectors/display"
 	"water/internal/connectors/github"
 	"water/internal/connectors/google/gcal"
 	"water/internal/connectors/google/gdrive"
@@ -25,6 +26,7 @@ import (
 	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
+	"water/internal/connectors/research"
 	"water/internal/gate"
 	"water/internal/store"
 	"water/internal/twinlink"
@@ -79,7 +81,8 @@ func newTwinNode(t *testing.T, id string) *twinNode {
 	// The same connector set the CLI builds for every twin; each manifest
 	// decides which of them its twin may actually use.
 	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
-		twinlink.NewSender(id, st), twinlink.NewInbox(st), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New())
+		twinlink.NewSender(id, st), twinlink.NewInbox(st), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New(), display.New(),
+		research.New(nil)) // research.web: never invoked here (a nil runner refuses)
 	if err != nil {
 		t.Fatal(err)
 	}

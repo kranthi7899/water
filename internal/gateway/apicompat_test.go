@@ -457,6 +457,8 @@ func TestOldClientsStillParseNewEvents(t *testing.T) {
 		{Kind: runtime.EventToolStart, StepID: "stp_1", Tool: "gcal.list_events", Label: "Checking your calendar"},
 		{Kind: runtime.EventToolEnd, StepID: "stp_1", Tool: "gcal.list_events", Label: "Checking your calendar", Status: runtime.StepQueued},
 		runtime.ApprovalRequiredEvent(approvals.Envelope{ID: "env_1", Action: "gcal.create_event", Risk: "medium", PayloadHash: "h"}),
+		{Kind: runtime.EventArtifact, StepID: "stp_2", Tool: "gmail.draft_message", Artifact: &runtime.Artifact{
+			Type: runtime.ArtifactEmailDraft, To: []string{"dana@acme.com"}, Cc: []string{"sam@acme.com"}, Subject: "Hi", Body: "Hello"}},
 	} {
 		b, err := json.Marshal(e)
 		if err != nil {
@@ -467,4 +469,124 @@ func TestOldClientsStillParseNewEvents(t *testing.T) {
 			t.Fatalf("old client decode of %s = %+v, %v", b, old, err)
 		}
 	}
+}
+
+// TestArtifactEventWireShape pins the artifact event a client builds
+// against: exactly kind, step_id, tool and artifact{type,to,cc,subject,
+// body}, and none of the other event fields.
+func TestArtifactEventWireShape(t *testing.T) {
+	e := runtime.Event{Kind: runtime.EventArtifact, StepID: "stp_1", Tool: "gmail.draft_message", Artifact: &runtime.Artifact{
+		Type: runtime.ArtifactEmailDraft, To: []string{"dana@acme.com"}, Cc: []string{"sam@acme.com"}, Subject: "Hi", Body: "Hello"}}
+	b, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"kind":"artifact","step_id":"stp_1","tool":"gmail.draft_message","artifact":{"type":"email_draft","to":["dana@acme.com"],"cc":["sam@acme.com"],"subject":"Hi","body":"Hello"}}`
+	if string(b) != want {
+		t.Fatalf("wire = %s\nwant   %s", b, want)
+	}
+}
+
+// TestMainPathDraftStreamsArtifactInsideItsStep: a main-path turn whose
+// model drafts an email streams tool_start, artifact, tool_end (one shared
+// step id) before done, the artifact carrying the call's own arguments.
+func TestMainPathDraftStreamsArtifactInsideItsStep(t *testing.T) {
+	h, _ := newDraftHarness(t)
+	h.fake.Reply = func(req backend.Request) string {
+		body, _ := json.Marshal(map[string]any{"function": "gmail.draft_message",
+			"args": map[string]any{"to": []any{"dana@acme.com"}, "subject": "Q3", "body": "Numbers attached."}})
+		r, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/v1/tools/invoke", bytes.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+req.Tools.TwinToken)
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Error(err)
+			return "failed"
+		}
+		resp.Body.Close()
+		return "Drafted it."
+	}
+	events := readEvents(t, h.post(t, "/v1/turns", `{"channel":"voice","prompt":"draft dana a note about q3"}`, h.token))
+	var order []runtime.EventKind
+	var art runtime.Event
+	for _, e := range events {
+		switch e.Kind {
+		case runtime.EventToolStart, runtime.EventArtifact, runtime.EventToolEnd, runtime.EventDone:
+			order = append(order, e.Kind)
+		}
+		if e.Kind == runtime.EventArtifact {
+			art = e
+		}
+	}
+	want := []runtime.EventKind{runtime.EventToolStart, runtime.EventArtifact, runtime.EventToolEnd, runtime.EventDone}
+	if len(order) != len(want) {
+		t.Fatalf("event order = %v, want %v (all %+v)", order, want, events)
+	}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("event order = %v, want %v (all %+v)", order, want, events)
+		}
+	}
+	steps := stepEvents(events)
+	if art.StepID == "" || art.StepID != steps[0].StepID || art.Tool != "gmail.draft_message" {
+		t.Fatalf("artifact %+v does not belong to step %+v", art, steps[0])
+	}
+	a := art.Artifact
+	if a == nil || a.Type != runtime.ArtifactEmailDraft || len(a.To) != 1 || a.To[0] != "dana@acme.com" ||
+		a.Subject != "Q3" || a.Body != "Numbers attached." || len(a.Cc) != 0 {
+		t.Fatalf("artifact = %+v", a)
+	}
+}
+
+// TestApprovalRequiredWarningsWireShape (docs/slices/W.md §4.1): the new
+// approval_required fields, warnings and confirm_phrase, are omitted when
+// empty, so every existing approval_required is byte-identical to before,
+// and an older client decodes an event that carries them without error.
+func TestApprovalRequiredWarningsWireShape(t *testing.T) {
+	env := approvals.Envelope{ID: "env_1", Action: "gcal.create_event", Risk: "medium", PayloadHash: "h"}
+	b, err := json.Marshal(runtime.ApprovalRequiredEvent(env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"kind":"approval_required","text":"gcal.create_event","approval_id":"env_1","action":"gcal.create_event","risk":"medium","payload_hash":"h","read_back":` +
+		string(mustJSON(t, approvals.ReadBack(env))) + `}`
+	if string(b) != want {
+		t.Fatalf("wire = %s\nwant   %s", b, want)
+	}
+
+	env = approvals.Envelope{ID: "env_2", Action: "gmail.send_message", Risk: "high", PayloadHash: "h2",
+		Payload:  map[string]any{"to": []any{"dana@no-mail.io"}, "subject": "Hi", "body": "b"},
+		Warnings: []string{"no-mail.io has no mail server; the message would bounce"}}
+	e := runtime.ApprovalRequiredEvent(env)
+	e.ConfirmPhrase = "confirm send"
+	b, err = json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"warnings":["no-mail.io has no mail server; the message would bounce"],"confirm_phrase":"confirm send"`) {
+		t.Fatalf("wire = %s", b)
+	}
+	var old struct {
+		Kind       string `json:"kind"`
+		ApprovalID string `json:"approval_id"`
+		ReadBack   string `json:"read_back"`
+	}
+	if err := json.Unmarshal(b, &old); err != nil || old.Kind != "approval_required" || old.ApprovalID != "env_2" ||
+		!strings.Contains(old.ReadBack, "Warning: no-mail.io has no mail server") {
+		t.Fatalf("old client decode = %+v, %v", old, err)
+	}
+	// An event from before these fields decodes into today's Event.
+	var cur runtime.Event
+	if err := json.Unmarshal([]byte(`{"kind":"approval_required","approval_id":"env_3","payload_hash":"x"}`), &cur); err != nil ||
+		cur.Warnings != nil || cur.ConfirmPhrase != "" {
+		t.Fatalf("decode of an old event = %+v, %v", cur, err)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

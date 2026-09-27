@@ -15,6 +15,7 @@ import (
 	"water/internal/backend"
 	"water/internal/config"
 	"water/internal/connectors"
+	"water/internal/connectors/display"
 	"water/internal/connectors/fake"
 	"water/internal/connectors/github"
 	"water/internal/connectors/google/gcal"
@@ -23,6 +24,7 @@ import (
 	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
+	"water/internal/connectors/research"
 	"water/internal/decider"
 	"water/internal/decisions"
 	"water/internal/gate"
@@ -191,11 +193,29 @@ func loadRoleMD(id string) string {
 // the same shared water.google/ceo credential as gcal/gmail/gdrive — an
 // owner connected before this scope existed needs one `water connect
 // google` re-run to pick it up (see docs/google-setup.md).
+//
+// display (display.show) is registered for every CEO twin, real and demo:
+// it has no network, credential or side effect beyond the UI (see
+// internal/connectors/display).
+//
+// research (research.web) is registered for every CEO twin, real and demo:
+// it runs a separate, cold `claude --print` process on the Claude
+// subscription with only WebSearch/WebFetch (internal/connectors/research),
+// no credential and no API key. buildCEORegistry registers it with the
+// CLI's default model; callers that run the twin use buildCEORegistryModel
+// with the manifest's fast model. Validation-only callers never invoke it.
 func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName, githubRepo string) (*connectors.Registry, error) {
+	return buildCEORegistryModel(id, st, mailAddress, signatureName, githubRepo, "")
+}
+
+// buildCEORegistryModel is buildCEORegistry with the model research.web's
+// subprocess runs on (the twin's fast tier, m.ModelFor(twins.TierFast)).
+func buildCEORegistryModel(id string, st *store.Store, mailAddress, signatureName, githubRepo, researchModel string) (*connectors.Registry, error) {
 	gm := gmail.New(mailAddress)
 	gm.SetSignatureName(signatureName)
 	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress),
-		twinlink.NewSender(id, st), twinlink.NewInbox(st)}
+		twinlink.NewSender(id, st), twinlink.NewInbox(st), display.New(),
+		research.New(research.CLIRunner{Model: researchModel})}
 	if id == demoTwinID {
 		cs = append(cs,
 			fake.NewGitHub(fake.DefaultGitHubPRs(), fake.DefaultGitHubIssues()),
@@ -311,7 +331,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 		st.Close()
 		return nil, fmt.Errorf("roster: %w", err)
 	}
-	reg, err := buildCEORegistry(id, st, mailAddress, signatureName, githubRepo)
+	reg, err := buildCEORegistryModel(id, st, mailAddress, signatureName, githubRepo, m.ModelFor(twins.TierFast))
 	if err != nil {
 		st.Close()
 		return nil, err

@@ -79,6 +79,13 @@ type Config struct {
 	// AckAfter bounds how long an unrouted turn waits before Handle emits a
 	// handoff acknowledgement on its own (Design §17: default 250ms).
 	AckAfter time.Duration
+	// VoiceFiller is router.voice_filler_ms (Slice W, D3). The handoff is
+	// never spoken by default: an escalated voice turn gets a silent ack so
+	// the client's globe stays in THINKING until the model's first real
+	// sentence. When VoiceFiller > 0, a voice main-path turn that has
+	// produced no delta or sentence by then speaks ONE short filler
+	// (style.voice.handoff[0]). Zero (the default) is off.
+	VoiceFiller time.Duration
 	// Clock is realClock{} unless a test supplies a fake one.
 	Clock Clock
 
@@ -232,6 +239,9 @@ func New(cfg Config) (*Nervous, error) {
 	}
 	if cfg.AckAfter <= 0 {
 		cfg.AckAfter = DefaultAckAfter
+	}
+	if cfg.VoiceFiller < 0 {
+		cfg.VoiceFiller = 0
 	}
 	if cfg.SenderLimit <= 0 {
 		cfg.SenderLimit = 500
@@ -467,7 +477,7 @@ func (n *Nervous) Handle(ctx context.Context, env runtime.Env, t Turn, emit func
 	fireAck := func() {
 		ackOnce.Do(func() {
 			rec.recordAck(n.cfg.Clock.Now())
-			n.emitHandoff(t.Channel, emitRouter)
+			n.emitHandoff(emitRouter) // silent on every channel (D3)
 		})
 	}
 	ackTimer := n.cfg.Clock.AfterFunc(n.cfg.AckAfter, fireAck)
@@ -652,22 +662,24 @@ func doneOrCancelled(ctx context.Context) turn.State {
 	return turn.StateDone
 }
 
-// emitHandoff sends a short handoff acknowledgement as the router. On the
-// voice channel it's a sentence event (so it's actually spoken); on other
-// channels runtime.EventKind has no dedicated "handoff" kind yet (that's a
-// later task's client-facing addition, Design §11.4 step 6) so this uses a
-// zero-text ack-shaped delta a client can already render as a typing/status
-// indicator without breaking on an unknown event kind.
-func (n *Nervous) emitHandoff(ch runtime.Channel, emit func(runtime.Event)) {
-	phrase := "One moment."
-	if v := n.cfg.Style.Voice(); len(v.Handoff) > 0 {
-		phrase = v.Handoff[0]
-	}
-	if ch == runtime.ChannelVoice {
-		emit(runtime.Event{Kind: runtime.EventSentence, Text: phrase})
-		return
-	}
+// emitHandoff sends the router's handoff acknowledgement: a silent
+// EventAck on every channel, voice included (Slice W, D3). It used to speak
+// style.voice.handoff[0] ("One moment.") as a voice sentence at ~5ms on
+// every escalated turn, which also flipped the client's globe out of its
+// THINKING state for the whole real wait. The client already treats ack as
+// "still thinking", so the silent ack is the non-verbal handoff. The only
+// spoken filler left is the opt-in Config.VoiceFiller (answerMain).
+func (n *Nervous) emitHandoff(emit func(runtime.Event)) {
 	emit(runtime.Event{Kind: runtime.EventAck})
+}
+
+// fillerPhrase is the one short phrase the opt-in voice filler speaks:
+// style.voice.handoff[0], or "Still checking." if the style has none.
+func (n *Nervous) fillerPhrase() string {
+	if v := n.cfg.Style.Voice(); len(v.Handoff) > 0 && v.Handoff[0] != "" {
+		return v.Handoff[0]
+	}
+	return "Still checking."
 }
 
 // trySpeculationReuse reports whether a cached speculative read answer for

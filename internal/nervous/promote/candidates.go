@@ -152,6 +152,13 @@ func qualifies(row store.RouteRow, sh intents.Shared, skip map[string]bool, lear
 	if row.Owner != "main" || !row.QuickOnly || !row.ToolsAttributed {
 		return false
 	}
+	// A general turn (the twin's own knowledge, small talk, public web
+	// research) is never promotion input (Slice W, D6). store.QuickOnlyRoutes
+	// already filters these out; this keeps the rule true for any other
+	// row source too.
+	if row.Class == store.RouteClassGeneral {
+		return false
+	}
 	if row.Outcome != "answered" || row.PossibleMiss {
 		return false
 	}

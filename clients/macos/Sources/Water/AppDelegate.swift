@@ -30,9 +30,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The workspace window (Slice V-ui): the daemon's web UI in a
     /// WKWebView, reached only through the `water://` scheme handler.
     private var workspace: WorkspaceWindowController!
-    /// The Activity HUD (V-hud): the blob, live steps and approval cards,
-    /// in its own floating panel next to the text bar.
-    private var hud: ActivityHUD!
+    /// The globe (owner brief 2026-09-26): a small orb, by default centred
+    /// about three inches above the bottom of the screen (OverlayLayout),
+    /// during an interaction, all through voice mode, or while a voice
+    /// approval waits. Only its circle takes the mouse (hover, drag, dock
+    /// into the menu bar, double-click menu); it never takes key focus.
+    /// Replaces the Activity HUD's blob, steps and cards.
+    private var hud: GlobeHUD!
+    /// The glass tab (owner brief 2026-09-26): a floating translucent panel
+    /// for what a voice request produced — an email draft, or an approval
+    /// with Approve / Edit / Reject.
+    private var glass: GlassTabController!
     /// Native notifications (V-notify): polls the daemon's needs-you
     /// notifications and opens a tapped one's thread in the workspace. Nil
     /// when not running as a bundled app.
@@ -54,11 +62,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The workspace thread the next voice transcript goes to (V-ui2):
     /// set only by the page's mic-down, cleared by any other capture.
     private var workspaceVoice = WorkspaceVoiceTarget()
+    /// Voice mode (owner brief 2026-09-26): ⌃⌥V on/off, Space held to talk,
+    /// Esc or a minute of true idleness to leave. The rules are
+    /// WaterClientCore's `VoiceMode`; this carries out its effects.
+    private var voiceMode = VoiceMode()
+    /// Space and Esc as Carbon hot keys, registered only while voice mode
+    /// is on. Every press and release goes through `VoiceMode.key`.
+    private lazy var captureKeys = CaptureKeys { [weak self] key, pressed in
+        guard let self else { return }
+        self.applyVoiceMode(self.voiceMode.key(key, pressed: pressed, now: Date()))
+    }
+    /// Voice mode's clock (idle timeout, approval pinning); runs only while on.
+    private var voiceModeTimer: Timer?
+    /// True while Space is down on a capture it started in voice mode, so
+    /// Space's release never ends a hold the workspace mic owns.
+    private var spaceOwnsHold = false
+    /// True from a Space-started capture's start until it delivers, fails
+    /// or is cancelled — including while it finishes after release — so Esc
+    /// cancels exactly the captures voice mode started.
+    private var spaceCaptureActive = false
+    /// The globe's id for the voice turn in flight (nil when none), so Esc
+    /// cancels a voice turn and never a typed one.
+    private var activeVoiceTurn: Int?
+    private var voiceModeItem: NSMenuItem!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         setUpStatusItem()
         setUpEngine()
-        setUpActivityHUD()
+        setUpGlobeAndGlass()
 
         panel.onSubmit = { [weak self] text in self?.send(text, channel: .textBar) }
         panel.onClose = { [weak self] in
@@ -82,27 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case HotKeyConfig.meeting: self.meeting.toggle()
             case HotKeyConfig.workspace: self.workspace.toggle()
             case HotKeyConfig.voice:
-                // Key went down: start recording, the HUD shows at
-                // onListening. A hotkey question is never a thread message.
-                self.workspaceVoice.clear()
-                self.voice.startHold()
+                // Voice mode on/off. The hold itself is Space (CaptureKeys),
+                // so ⌃⌥V's release means nothing now (no onVoiceKeyUp).
+                self.toggleVoiceMode()
             default: break
             }
-        }
-        // Voice is push-to-talk by holding, so "stop" is the key going back
-        // up, not a second press — a separate signal from the keyDown above.
-        hotkeys.onVoiceKeyUp = { [weak self] in
-            guard let self else { return }
-            // Key-up is this trace's start (V-8) — a fresh trace per hold,
-            // discarding any older one that never reached done/error (e.g.
-            // a second hold started before the first turn's daemon reply
-            // finished): diagnostic instrumentation, not correctness, so
-            // losing that stale trace's log line is an acceptable trade for
-            // never mixing two holds' checkpoints together.
-            self.voiceTrace = VoiceTurnTrace()
-            self.voiceTrace?.mark(.keyUp)
-            if self.voice.state == .listening { self.hud.holdEnded() }
-            self.voice.endHold()
         }
         hotkeys.onTrustChange = { [weak self] _ in self?.refreshAccessibilityItem() }
         hotkeys.start()
@@ -122,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        applyVoiceMode(voiceMode.shutdown())
+        captureKeys.unregister() // belt and braces: never leave Space captured
         meeting.shutdown()
     }
 
@@ -141,9 +158,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ask = NSMenuItem(title: "Ask Water  (\(HotKeyConfig.textBar.label))", action: #selector(askFromMenu), keyEquivalent: "")
         ask.target = self
         menu.addItem(ask)
-        let talk = NSMenuItem(title: "Talk to Water  (\(HotKeyConfig.voice.label))", action: #selector(talkFromMenu), keyEquivalent: "")
-        talk.target = self
-        menu.addItem(talk)
+        voiceModeItem = NSMenuItem(title: "Voice Mode  (\(HotKeyConfig.voice.label))", action: #selector(talkFromMenu), keyEquivalent: "")
+        voiceModeItem.target = self
+        menu.addItem(voiceModeItem)
         meetingItem = NSMenuItem(title: "", action: #selector(meetingFromMenu), keyEquivalent: "")
         meetingItem.target = self
         menu.addItem(meetingItem)
@@ -171,15 +188,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func askFromMenu() { panel.show() }
 
-    @objc private func talkFromMenu() { toggleVoice() }
-
-    /// The menu's "Talk to Water" and the workspace mic: a click can't be
-    /// held, so it toggles; the second click is the HUD's "hold ended".
-    private func toggleVoice() {
-        if voice.state == .listening { hud.holdEnded() }
-        if voice.state == .idle { workspaceVoice.clear() }
-        voice.toggle()
-    }
+    /// The menu's "Voice Mode" does what ⌃⌥V does. Space and Esc are Carbon
+    /// hot keys, so this works even before the Accessibility grant.
+    @objc private func talkFromMenu() { toggleVoiceMode() }
 
     @objc private func meetingFromMenu() { meeting.toggle() }
 
@@ -203,6 +214,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         interruptSpeech() // runner.run cancels the old stream; this silences it
         let turn = speakingTurn
         let hudTurn = hud.turnSent()
+        voiceMode.turnStarted(hudTurn, now: Date())
+        activeVoiceTurn = channel == .voice ? hudTurn : nil
         // V-8: this is the only voice turn `voiceTrace` (started at
         // key-up) ever attaches to — a text-bar/CLI turn, or a
         // toggle-started voice turn with no key-up trace, just leaves it
@@ -220,7 +233,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let meetingID = meeting.state == .active && threadID == nil ? meeting.session?.id : nil
         runner.run(channel: channel, prompt: text, meetingID: meetingID, turnID: turnID, threadID: threadID, onEvent: { [weak self] e in
             guard let self else { return }
-            self.hud.event(e, turn: hudTurn)
+            // An approval pins the globe only when the glass tab can show
+            // it (a voice turn); a typed turn's approval is a line in the
+            // text bar, as before, and never leaves the orb stuck on screen.
+            if e.kind != .approvalRequired || channel == .voice { self.hud.event(e, turn: hudTurn) }
+            self.glass.event(e, channel: channel)
+            // Only a voice turn's real `sentence` is spoken: an `ack` (the
+            // daemon's silent handoff, Slice W D3) never queues a filler, so
+            // the globe keeps THINKING until the model's first sentence.
+            if let spoken = e.spokenText(channel: channel), turn == self.speakingTurn {
+                if turn == self.voiceTraceTurn { self.voiceTrace?.mark(.firstSentence) }
+                self.speechQueue.enqueue(spoken)
+            }
             switch e.kind {
             case .ack:
                 if channel == .voice, turn == self.voiceTraceTurn { self.voiceTrace?.mark(.ack) }
@@ -228,19 +252,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.clearStatus()
                 self.panel.appendReply(e.text ?? "")
             case .sentence:
-                if channel == .voice, turn == self.speakingTurn {
-                    if turn == self.voiceTraceTurn { self.voiceTrace?.mark(.firstSentence) }
-                    self.speechQueue.enqueue(e.text ?? "")
-                }
+                break // spoken above (`spokenText`)
             case .approvalRequired:
                 self.panel.appendApproval(id: e.approvalID, action: e.approvalAction, risk: e.risk)
             case .handoff:
-                // Safe-decode only for now (R-27): no code path emits this
-                // kind yet (the daemon still sends a zero-text `ack` for the
-                // same moment, see Events.swift's doc comment on
-                // TurnEvent.Kind.handoff), and it isn't clear the plan wants
-                // dedicated UI beyond that existing "Thinking…" status line
-                // once it does. Flagged as a follow-up rather than guessed.
+                // Safe-decode only (R-27): no code path emits this kind (the
+                // daemon sends a silent `ack` for the same moment, Slice W
+                // D3). Like `ack`, it is never spoken and keeps "Thinking…".
                 break
             case .done:
                 // Terminal: nothing follows done or error on a turn stream.
@@ -252,12 +270,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .error:
                 self.clearStatus()
                 self.panel.appendError(e.error ?? "the daemon reported an error")
+                // In voice mode the text bar stays closed: say it on the tab.
+                if channel == .voice, self.voiceMode.isOn {
+                    self.glass.notice("Water couldn't answer that: \(e.error ?? "the daemon reported an error")")
+                }
                 // No `.done` mark here: the log line just ends at whatever
                 // checkpoint this turn actually reached before it errored.
                 self.finishVoiceTrace(turn: turn, mark: nil)
-            case .queued, .toolStart, .toolEnd:
-                // The Activity HUD shows steps (hud.event above); the
-                // panel's transcript stays text only.
+            case .queued, .toolStart, .toolEnd, .artifact:
+                // Steps are not drawn anywhere (owner brief 2026-09-26); a
+                // voice draft's artifact shows in the glass tab (above).
+                // The panel's transcript stays text only.
                 break
             case .unknown:
                 break
@@ -267,9 +290,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }, onFinish: { [weak self] err in
             guard let self else { return }
             self.hud.turnEnded(turn: hudTurn)
+            self.voiceMode.turnFinished(hudTurn, now: Date())
+            if self.activeVoiceTurn == hudTurn { self.activeVoiceTurn = nil }
             self.clearStatus()
             if let err {
                 self.panel.appendError(err.localizedDescription)
+                if channel == .voice, self.voiceMode.isOn {
+                    self.glass.notice("Water couldn't answer that: \(err.localizedDescription)")
+                }
             }
             // Also on a failed or refused thread turn, so the page drops its
             // "sent by voice" line and shows what was (or wasn't) stored.
@@ -306,10 +334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The same instance the download flow loaded (if it ran this
             // launch); otherwise load it now, so the first hold is fast.
             EngineSelector.parakeet.prewarm()
-            voice = VoiceController(holdLabel: HotKeyConfig.voice.label, capture: EngineSelector.parakeet)
+            voice = VoiceController(holdLabel: "Space", capture: EngineSelector.parakeet)
         case .appleSpeech:
             speechOutput = AppleSpeechOutput()
-            voice = VoiceController(holdLabel: HotKeyConfig.voice.label)
+            voice = VoiceController(holdLabel: "Space")
         }
         speechQueue = SentenceSpeechQueue(output: speechOutput)
         // V-8: "first audio" is hand-off to whichever engine setUpEngine
@@ -319,28 +347,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speechQueue.onWillPlay = { [weak self] in
             self?.voiceTrace?.mark(.firstAudio)
             self?.hud?.speechStarted()
+            self?.voiceMode.speechStarted(now: Date())
         }
-        speechQueue.onIdle = { [weak self] in self?.hud?.speechIdle() }
+        speechQueue.onIdle = { [weak self] in
+            self?.hud?.speechIdle()
+            self?.voiceMode.speechIdle(now: Date())
+        }
     }
 
-    /// The Activity HUD (V-hud), fed from here: hotkey and capture
+    /// The globe and the glass tab, fed from here: hotkey and capture
     /// (`holdStarted`/`holdEnded`/`cancelled`, mic level), every turn's
     /// events (`send`), and the speech queue (started, idle, output level).
-    /// Its own socket client, so a click never waits behind a turn stream.
-    private func setUpActivityHUD() {
-        let client = UnixSocketClient(socketPath: runner.client.socketPath)
+    /// Each has its own socket client, so a click or a re-read never waits
+    /// behind a turn stream.
+    private func setUpGlobeAndGlass() {
+        let hudClient = UnixSocketClient(socketPath: runner.client.socketPath)
+        hudClient.readTimeout = 30
+        hud = GlobeHUD(client: hudClient, tokens: runner.tokens)
+
+        let glassClient = UnixSocketClient(socketPath: runner.client.socketPath)
         // An approved action runs inside the decision request (a send can
         // take a while); a timeout here is reported as "didn't go through"
         // and the re-read that follows shows what actually happened.
-        client.readTimeout = 120
-        hud = ActivityHUD(client: client, tokens: runner.tokens)
-        hud.anchorFrame = { [weak self] in self?.panel.anchorFrame ?? .zero }
-        hud.onEdit = { [weak self] id in self?.workspace.open(view: "approvals", id: id) }
-        hud.onNote = { [weak self] note in
+        glassClient.readTimeout = 120
+        glass = GlassTabController(client: glassClient, tokens: runner.tokens)
+        // The globe where the owner left it (or low and centred, clear of an
+        // open text bar); the tab above it, following it when it moves or
+        // docks (OverlayLayout).
+        hud.avoidFrame = { [weak self] in self?.panel.frameIfVisible }
+        glass.placement = { [weak self] size in self?.hud.glassOrigin(for: size) ?? GlobeHUD.glassOrigin(for: size) }
+        hud.onMoved = { [weak self] in self?.glass.reposition() }
+        // The globe's menu: "Quit voice mode" is exactly Esc (the same
+        // router call CaptureKeys makes for an Esc press).
+        hud.isVoiceModeOn = { [weak self] in self?.voiceMode.isOn ?? false }
+        hud.onQuitVoiceMode = { [weak self] in
             guard let self else { return }
+            self.applyVoiceMode(self.voiceMode.key(.escape, pressed: true, now: Date()))
+        }
+        glass.onEdit = { [weak self] id in self?.workspace.open(view: "approvals", id: id) }
+        glass.onNote = { [weak self] note in
+            guard let self else { return }
+            // Voice mode never pops the text bar (it takes focus and Esc).
+            if self.voiceMode.isOn { return self.glass.notice(note) }
             self.panel.show()
             self.panel.appendNote(note)
         }
+        // The ✕ on an approval only hides the tab: the globe stops pinning
+        // on it, and it stays pending in the workspace.
+        glass.onApprovalHidden = { [weak self] id in self?.hud.approvalHidden(id) }
+        // A click in the tab decided it: re-read what pins the globe.
+        glass.onDecided = { [weak self] _ in self?.hud.refreshOpenApprovals() }
+        // A re-read found an approval decided elsewhere: the tab re-reads too.
+        hud.onApprovalsResolved = { [weak self] in self?.glass.refresh() }
+
         (speechOutput as? SpeechLevelSource)?.onLevel = { [weak self] v in self?.hud.ttsLevel(v) }
         voice.onLevel = { [weak self] v in self?.hud.micLevel(v) }
     }
@@ -355,10 +414,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         voice.onListening = { [weak self] in
             guard let self else { return }
             self.runner.cancel()
+            // A cancelled stream never reports its finish.
+            self.voiceMode.turnsCancelled(now: Date())
+            self.activeVoiceTurn = nil
             self.interruptSpeech()
             self.hud.holdStarted()
             self.panel.setInput("")
-            self.panel.show(placeholder: "Listening… release \(HotKeyConfig.voice.label) to send")
+            // In voice mode the globe is the listening indicator: the text
+            // bar would take focus (and Esc) from the app the CEO is in.
+            if !self.voiceMode.isOn {
+                self.panel.show(placeholder: "Listening… release \(self.voice.holdLabel) to send")
+            }
             self.panel.setStatus("● Listening")
             // A fresh turn id for this capture (R-27): SFSpeechRecognizer's
             // partial results stream to the daemon under it as they arrive,
@@ -371,8 +437,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.panel.setInput(text)
             self?.partialStreamer?.post(text)
         }
+        voice.onWarmingUp = { [weak self] in
+            guard let self else { return }
+            // The first hold after launch waits for the speech models to
+            // load (can be many seconds): its audio is queued, not lost.
+            self.hud.transcriptWarmingUp()
+            let hint = "Speech recognition is warming up — what you said is queued, one moment…"
+            if self.voiceMode.isOn { self.glass.notice(hint) } else { self.panel.setStatus("Warming up…") }
+        }
         voice.onTranscript = { [weak self] text in
             guard let self else { return }
+            self.spaceCaptureActive = false
             self.voiceTrace?.mark(.sttFinal)
             self.panel.setInput(text)
             let turnID = self.partialStreamer?.turnID
@@ -381,10 +456,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         voice.onFailure = { [weak self] message in
             guard let self else { return }
+            let fromSpace = self.spaceCaptureActive
+            self.spaceCaptureActive = false
             self.hud.cancelled()
             if self.workspaceVoice.take() != nil { self.workspace.refresh() }
             self.partialStreamer = nil
             self.clearStatus()
+            if self.voiceMode.isOn || fromSpace {
+                // Briefly on the tab; voice mode stays on.
+                self.glass.notice(message)
+                return
+            }
             self.panel.show()
             self.panel.beginReply()
             self.panel.appendError(message)
@@ -419,6 +501,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: voice mode
+
+    private func toggleVoiceMode() {
+        let entering = !voiceMode.isOn
+        applyVoiceMode(voiceMode.toggle(now: Date()))
+        if entering, voiceMode.isOn { explainVoiceModeOnce() }
+    }
+
+    /// Carries out `VoiceMode`'s effects, in order.
+    private func applyVoiceMode(_ effects: [VoiceMode.Effect]) {
+        for effect in effects {
+            switch effect {
+            case .registerCaptureKeys:
+                guard captureKeys.register() else {
+                    // Nothing is registered; leave voice mode at once.
+                    applyVoiceMode(voiceMode.captureUnavailable())
+                    return
+                }
+                startVoiceModeTimer()
+            case .unregisterCaptureKeys:
+                captureKeys.unregister()
+                stopVoiceModeTimer()
+            case .startHold:
+                // Same path the old ⌃⌥V hold took. Only a hold started from
+                // idle is Space's: one already running (the workspace mic)
+                // is left alone, and so is its thread target.
+                guard voice.state == .idle else {
+                    if spaceCaptureActive, voice.state == .finishing {
+                        glass.notice("Still working on what you just said…")
+                    }
+                    break
+                }
+                spaceOwnsHold = true
+                spaceCaptureActive = true
+                workspaceVoice.clear() // a Space question is never a thread message
+                voice.holdLabel = "Space"
+                voice.startHold()
+            case .endHold:
+                guard spaceOwnsHold else { break }
+                spaceOwnsHold = false
+                // Key-up is this trace's start (V-8) — a fresh trace per
+                // hold, discarding any older one that never reached
+                // done/error: diagnostic instrumentation, so losing a stale
+                // trace's log line beats mixing two holds' checkpoints.
+                voiceTrace = VoiceTurnTrace()
+                voiceTrace?.mark(.keyUp)
+                if voice.state == .listening { hud.holdEnded() }
+                voice.endHold()
+            case .cancelHold:
+                // A Space capture, held or still finishing after release
+                // (Esc then must stop its transcript from going out).
+                let ours = spaceOwnsHold || spaceCaptureActive
+                spaceOwnsHold = false
+                spaceCaptureActive = false
+                guard ours else { break }
+                if voice.state != .idle {
+                    voice.cancel()
+                    hud.cancelled()
+                    partialStreamer = nil
+                    voiceTrace = nil
+                    panel.setInput("")
+                    clearStatus()
+                }
+            case .cancelTurn:
+                // Only a voice turn: a typed one keeps running in its panel.
+                guard activeVoiceTurn != nil else { break }
+                activeVoiceTurn = nil
+                runner.cancel() // closes the stream; its finish never arrives
+                voiceMode.turnsCancelled(now: Date())
+                if let t = voiceTraceTurn { finishVoiceTrace(turn: t, mark: nil) }
+                clearStatus()
+            case .stopSpeech:
+                interruptSpeech()
+            case .showGlobe:
+                hud.keepVisible = true
+            case .hideGlobe:
+                hud.keepVisible = false
+            case .exited(let reason):
+                stopVoiceModeTimer()
+                // Esc is immediate: the globe goes now (an approval still
+                // open keeps it and the glass tab; Esc never closes one).
+                if reason == .escape { hud.dismissNow() }
+                if reason == .captureUnavailable {
+                    panel.show()
+                    panel.beginReply()
+                    panel.appendError("Voice mode needs the Space key, but another app has it reserved as a shortcut.")
+                }
+            }
+        }
+        voiceModeItem.state = voiceMode.isOn ? .on : .off
+    }
+
+    private func startVoiceModeTimer() {
+        guard voiceModeTimer == nil else { return }
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let now = Date()
+            // A voice approval pins the globe; voice mode waits it out.
+            self.voiceMode.setApprovalPinned(self.hud.model.isPinned, now: now)
+            // A Space capture still finishing (a warm-up can take longer
+            // than the idle timeout) keeps voice mode on until it delivers.
+            self.voiceMode.setCapturePending(self.spaceCaptureActive && self.voice.state != .idle, now: now)
+            self.applyVoiceMode(self.voiceMode.tick(now: now))
+        }
+        RunLoop.main.add(t, forMode: .common)
+        voiceModeTimer = t
+    }
+
+    private func stopVoiceModeTimer() {
+        voiceModeTimer?.invalidate()
+        voiceModeTimer = nil
+    }
+
+    private static let voiceModeExplainedKey = "didExplainVoiceMode"
+
+    /// First entry only: one line on how voice mode works.
+    private func explainVoiceModeOnce() {
+        let d = UserDefaults.standard
+        guard !d.bool(forKey: Self.voiceModeExplainedKey) else { return }
+        d.set(true, forKey: Self.voiceModeExplainedKey)
+        // On the glass tab, briefly: the text bar would take focus and Esc.
+        glass.notice("Hold Space to talk. Esc to leave voice mode.")
+    }
+
     // MARK: meeting
 
     private func setUpMeeting() {
@@ -451,12 +657,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // pressed starts listening, released sends. The transcript goes out
         // as a voice turn with the page's thread_id (native only; the page
         // never reaches /v1/turns), so the question and reply land in that
-        // thread. It is spoken and drives the HUD like any voice turn, and
+        // thread. It is spoken and drives the globe like any voice turn, and
         // the page is refreshed on done.
         workspace.onMicDown = { [weak self] thread in
             guard let self else { return }
-            guard self.voice.state == .idle else { return } // already listening from the hotkey or menu
+            guard self.voice.state == .idle else { return } // already listening from Space in voice mode
+            self.spaceOwnsHold = false
+            self.spaceCaptureActive = false
             self.workspaceVoice.micDown(thread: thread)
+            self.voice.holdLabel = "the mic button"
             self.voice.startHold()
         }
         workspace.onMicUp = { [weak self] in
@@ -526,7 +735,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Turn on Water's global hotkeys"
         alert.informativeText = """
-        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice), \(HotKeyConfig.meeting.label) (meeting capture) and \(HotKeyConfig.workspace.label) (workspace), macOS needs you to allow it once:
+        To open Water from any app with \(HotKeyConfig.textBar.label) (text), \(HotKeyConfig.voice.label) (voice mode), \(HotKeyConfig.meeting.label) (meeting capture) and \(HotKeyConfig.workspace.label) (workspace), macOS needs you to allow it once:
 
         1. Open System Settings > Privacy & Security > Accessibility.
         2. Turn on the switch next to "Water". If Water isn't listed, click +, choose Water.app, and turn it on.

@@ -3,7 +3,9 @@ package nervous
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 
 	"water/internal/approvals"
 	"water/internal/nervous/intents"
@@ -13,6 +15,7 @@ import (
 	"water/internal/nervous/speak"
 	"water/internal/nervous/turn"
 	"water/internal/runtime"
+	"water/internal/spokenemail"
 )
 
 // Approver lets a voice yes/no directly decide the one pending envelope a
@@ -238,32 +241,75 @@ func (n *Nervous) answerVoiceApprove(ctx context.Context, id string, t Turn, res
 		// No binding, an expired one, or one that no longer names the
 		// current envelope (a decision or an Edit raced in): stale. Void
 		// whatever is there, re-surface the current read-back, and decide
-		// nothing on this turn (Design §13 step 3).
+		// nothing on this turn (Design §13 step 3). This also covers an
+		// armed confirm whose envelope changed between the two steps.
 		n.readbacks.Void(envel.ID)
 		resurface()
 		return
 	}
 
-	answer := approvals.Match(t.Text)
-	if answer != approvals.Yes {
-		// A spoken "no" (Ambiguous is always treated as No, exactly like
-		// every other approvals path in this codebase) is safe to apply at
-		// every risk tier: denying is never the wrong direction.
+	decide := func(reply, okText string) {
 		n.readbacks.Void(envel.ID)
-		out, derr := n.cfg.Approver.DecideBound(ctx, envel.ID, envel.PayloadHash, "no")
+		out, derr := n.cfg.Approver.DecideBound(ctx, envel.ID, envel.PayloadHash, reply)
 		if derr != nil {
 			deliver("error", n.voiceErrorPhrase("generic"))
 			return
 		}
-		text := "Denied."
 		if out.Error != "" {
-			text = n.voiceErrorPhrase("generic")
+			okText = n.voiceErrorPhrase("generic")
 		}
-		deliver("decided", text)
+		deliver("decided", okText)
+	}
+
+	if !bound.ConfirmAt.IsZero() {
+		// Stage two of the spoken send (Slice W, D5b): the CEO has heard the
+		// recipient spelled out and the subject.
+		if _, live := n.readbacks.Confirming(t.Channel, at, ConfirmSendWindow); !live {
+			// Too late: never execute on a stale confirm. Start over from
+			// stage one with a fresh read-back.
+			n.readbacks.Void(envel.ID)
+			resurface()
+			return
+		}
+		switch {
+		case isConfirmSendPhrase(t.Text):
+			// Warnings are recomputed on every queue read (an expired MX
+			// cache entry, a restart), so re-check the tier on the envelope
+			// as it is now: one that gained a warning since stage one is
+			// tap-only (D5b) and the spoken confirm must not execute it.
+			if vtier, _ := VoiceApprovalTier(envel, n.cfg.VoiceApprove.InternalDomains); vtier != VoiceConfirm {
+				n.readbacks.Void(envel.ID)
+				n.readbacks.Record(Readback{Channel: t.Channel, EnvelopeID: envel.ID, PayloadHash: envel.PayloadHash, At: at})
+				emitQuick(runtime.ApprovalRequiredEvent(envel))
+				deliver("tap_required", n.voiceErrorPhrase("tap_required"))
+				return
+			}
+			// The only spoken path that executes a send: the fixed phrase,
+			// bound to the same id and payload hash the spelled read-back
+			// named, through the same hash-checked DecideBound a tap uses.
+			decide("yes", "Sent.")
+		case approvals.MatchPending(t.Text, len(pend)) == approvals.No:
+			decide("no", "Denied.")
+		default:
+			// A second "yes", a hedge, anything else: decide nothing and
+			// keep the arm until it expires. The tap still works.
+			emitQuick(n.confirmSendEvent(envel))
+			deliver("confirm_pending", "Say "+ConfirmSendPhrase+", or tap Approve.")
+		}
 		return
 	}
 
-	if vtier, _ := VoiceApprovalTier(envel, n.cfg.VoiceApprove.InternalDomains); vtier == TapRequired {
+	answer := approvals.MatchPending(t.Text, len(pend))
+	if answer != approvals.Yes {
+		// A spoken "no" (Ambiguous is always treated as No, exactly like
+		// every other approvals path in this codebase) is safe to apply at
+		// every risk tier: denying is never the wrong direction.
+		decide("no", "Denied.")
+		return
+	}
+
+	switch vtier, _ := VoiceApprovalTier(envel, n.cfg.VoiceApprove.InternalDomains); vtier {
+	case TapRequired:
 		// A spoken "yes" never decides this envelope: re-emit
 		// approval_required so a client shows its tap affordance, and leave
 		// the binding exactly as it was (nothing about the envelope's own
@@ -273,17 +319,74 @@ func (n *Nervous) answerVoiceApprove(ctx context.Context, id string, t Turn, res
 		emitQuick(runtime.ApprovalRequiredEvent(envel))
 		deliver("tap_required", n.voiceErrorPhrase("tap_required"))
 		return
-	}
-
-	n.readbacks.Void(envel.ID)
-	out, derr := n.cfg.Approver.DecideBound(ctx, envel.ID, envel.PayloadHash, "yes")
-	if derr != nil {
-		deliver("error", n.voiceErrorPhrase("generic"))
+	case VoiceConfirm:
+		// Stage one of the spoken send: a yes never sends. Arm the confirm
+		// binding for this exact id and hash, and read the recipient back
+		// spelled out, plus the subject. The text is code-built and must
+		// never be cut, so it skips deliver's character cap.
+		n.readbacks.ArmConfirm(t.Channel, envel.ID, envel.PayloadHash, at)
+		emitQuick(n.confirmSendEvent(envel))
+		rec.outcome = "confirm_pending"
+		text := confirmSendReadBack(envel)
+		runtime.DeliverText(t.Channel, text, emitQuick)
+		emitQuick(runtime.Event{Kind: runtime.EventDone, Text: text})
+		_ = n.turns.Done(id, turn.StateDone)
 		return
 	}
-	text := n.cfg.Style.Confirmation()
-	if out.Error != "" {
-		text = n.voiceErrorPhrase("generic")
+
+	decide("yes", n.cfg.Style.Confirmation())
+}
+
+// confirmSendEvent is approval_required for an envelope in the two-step
+// spoken send, carrying confirm_phrase so a client can show the hint.
+func (n *Nervous) confirmSendEvent(e approvals.Envelope) runtime.Event {
+	ev := runtime.ApprovalRequiredEvent(e)
+	ev.ConfirmPhrase = ConfirmSendPhrase
+	return ev
+}
+
+// isConfirmSendPhrase reports whether reply is exactly the confirm phrase
+// ("confirm send", optionally "confirm send it"), ignoring case and
+// punctuation. Nothing looser: stage two is the deliberate second factor.
+func isConfirmSendPhrase(reply string) bool {
+	words := strings.FieldsFunc(strings.ToLower(reply), func(r rune) bool { return !unicode.IsLetter(r) })
+	got := strings.Join(words, " ")
+	return got == ConfirmSendPhrase || got == ConfirmSendPhrase+" it"
+}
+
+// confirmSubjectMax caps the subject in the spoken confirm read-back (the
+// full text is on the approval card).
+const confirmSubjectMax = 80
+
+// confirmSendReadBack is stage one's spoken read-back for a VoiceConfirm
+// envelope: the first recipient spelled out letter by letter (a known mail
+// provider's domain read as words), how many others, the subject, and the
+// instruction to say the confirm phrase.
+func confirmSendReadBack(e approvals.Envelope) string {
+	recips := confirmRecipients(e)
+	var b strings.Builder
+	b.WriteString("Sending to ")
+	if e.Action == "twinlink.send_message" {
+		b.WriteString("twin ")
 	}
-	deliver("decided", text)
+	if len(recips) > 0 {
+		b.WriteString(spokenemail.SpellOut(spokenemail.Address(recips[0])))
+	}
+	switch extra := len(recips) - 1; {
+	case extra == 1:
+		b.WriteString(" and 1 other")
+	case extra > 1:
+		fmt.Fprintf(&b, " and %d others", extra)
+	}
+	// Only the subject (model-written) is made speakable; the spelled
+	// address is code-built and is spoken exactly as built.
+	subject := strings.TrimRight(strings.TrimSpace(speak.Speakable(fmt.Sprint(e.Payload["subject"]), speak.Options{})), ". ")
+	if e.Payload["subject"] == nil || subject == "" {
+		subject = "none"
+	}
+	if r := []rune(subject); len(r) > confirmSubjectMax {
+		subject = string(r[:confirmSubjectMax]) + "…"
+	}
+	b.WriteString(", subject " + subject + ". Say " + ConfirmSendPhrase + " to send it.")
+	return b.String()
 }

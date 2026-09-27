@@ -330,3 +330,98 @@ func TestReflexRingNeverHoldsMoreThanThree(t *testing.T) {
 		t.Fatalf("ring holds %d entries, want at most 3", len(r.items))
 	}
 }
+
+// Slice W, D6: route_log.class. A main turn is general only when it
+// attempted nothing but research.web/display.show, with clean attribution.
+func TestRouteLogClass(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule": tier0ScheduleYAML})
+
+	cases := []struct {
+		name  string
+		calls func(n *Nervous)
+		want  string
+	}{
+		{"no tools is general", func(n *Nervous) {}, store.RouteClassGeneral},
+		{"research and display only is general", func(n *Nervous) {
+			n.RecordToolAttempt("research.web")
+			n.RecordToolUse("research.web")
+			n.RecordToolAttempt("display.show")
+			n.RecordToolUse("display.show")
+		}, store.RouteClassGeneral},
+		// The case that needs attempts: a queued send never reaches
+		// RecordToolUse, so tools_used alone would call this turn general.
+		{"a queued send is company", func(n *Nervous) {
+			n.RecordToolAttempt("gmail.send_message")
+		}, store.RouteClassCompany},
+		{"a denied company read is company", func(n *Nervous) {
+			n.RecordToolAttempt("gmail.list_messages")
+		}, store.RouteClassCompany},
+		{"research plus a company call is company", func(n *Nervous) {
+			n.RecordToolAttempt("research.web")
+			n.RecordToolUse("research.web")
+			n.RecordToolAttempt("gcal.list_events")
+			n.RecordToolUse("gcal.list_events")
+		}, store.RouteClassCompany},
+		{"a quick tool is company", func(n *Nervous) {
+			n.RecordToolUse("quick.calendar")
+		}, store.RouteClassCompany},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, ctx, fk := nervousTestEnv(t)
+			n := nervousWithLoggingFor(t, reg, env.Store, nil)
+			fk.Reply = func(req backend.Request) string {
+				tc.calls(n)
+				return "Sure."
+			}
+			start := tier0FixedNow.Add(-time.Second)
+			handleAndWait(n, ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i prioritize today", TaskID: "t-class"})
+			row := lastRoute(t, env.Store, start)
+			if row.Owner != "main" {
+				t.Fatalf("Owner = %q, want main", row.Owner)
+			}
+			if row.Class != tc.want {
+				t.Fatalf("Class = %q, want %q (row=%+v)", row.Class, tc.want, row)
+			}
+		})
+	}
+
+	t.Run("a tier-0 answer is company", func(t *testing.T) {
+		env, ctx, _ := nervousTestEnv(t)
+		n := nervousWithLoggingFor(t, reg, env.Store, nil)
+		start := tier0FixedNow.Add(-time.Second)
+		handleAndWait(n, ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar tomorrow", TaskID: "t-t0"})
+		row := lastRoute(t, env.Store, start)
+		if row.AnsweredBy != "t0" {
+			t.Fatalf("AnsweredBy = %q, want t0", row.AnsweredBy)
+		}
+		if row.Class != store.RouteClassCompany {
+			t.Fatalf("Class = %q, want company", row.Class)
+		}
+	})
+}
+
+func TestRouteClassForRules(t *testing.T) {
+	cases := []struct {
+		name      string
+		owner     string
+		reason    string
+		attr      bool
+		used, att []string
+		want      string
+	}{
+		{"clean main no tools", "main", "", true, nil, nil, "general"},
+		{"mcp spelling of research", "main", "", true, nil, []string{"research__web"}, "general"},
+		{"ambiguous attribution", "main", "", false, nil, nil, "company"},
+		{"brief cache miss", "main", "brief_cache_miss", true, nil, nil, "company"},
+		{"quick owner", "quick", "", true, nil, nil, "company"},
+		{"empty owner", "", "", true, nil, nil, "company"},
+		{"attempted company", "main", "", true, nil, []string{"twinlink.send_message"}, "company"},
+		{"used company", "main", "", true, []string{"notes.save_note"}, nil, "company"},
+	}
+	for _, tc := range cases {
+		if got := routeClassFor(tc.owner, tc.reason, tc.attr, tc.used, tc.att); got != tc.want {
+			t.Errorf("%s: routeClassFor = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

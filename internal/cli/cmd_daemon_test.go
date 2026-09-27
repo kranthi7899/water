@@ -44,6 +44,9 @@ func TestBuildNervousConfigMatchesDefaultConfig(t *testing.T) {
 	if got.AckAfter != want.AckAfter {
 		t.Errorf("AckAfter = %v, want %v", got.AckAfter, want.AckAfter)
 	}
+	if got.VoiceFiller != 0 {
+		t.Errorf("VoiceFiller = %v, want 0 (router.voice_filler_ms default: off)", got.VoiceFiller)
+	}
 	if got.Speculation != want.Speculation {
 		t.Errorf("Speculation = %v, want %v", got.Speculation, want.Speculation)
 	}
@@ -76,6 +79,7 @@ func TestBuildNervousConfigWiresNonDefaultValues(t *testing.T) {
 		"router.tier0.enabled":                  "false",
 		"router.main.enabled":                   "false",
 		"router.ack_ms":                         "100",
+		"router.voice_filler_ms":                "2500",
 		"router.breaker.failures":               "3",
 		"router.breaker.cooldown_seconds":       "15",
 		"router.breaker.max_miss_rate_pct":      "10",
@@ -101,6 +105,9 @@ func TestBuildNervousConfigWiresNonDefaultValues(t *testing.T) {
 	}
 	if got.AckAfter != 100*time.Millisecond {
 		t.Errorf("AckAfter = %v, want 100ms", got.AckAfter)
+	}
+	if got.VoiceFiller != 2500*time.Millisecond {
+		t.Errorf("VoiceFiller = %v, want 2.5s (router.voice_filler_ms)", got.VoiceFiller)
 	}
 	wantBreaker := nervous.BreakerConfig{
 		Failures: 3, Cooldown: 15 * time.Second, MaxMissRatePct: 10,

@@ -19,7 +19,30 @@ const (
 	// matter how it's phrased: the CEO must tap to confirm instead. A
 	// spoken "no" is always allowed regardless of tier (denying is safe).
 	TapRequired
+	// VoiceConfirm (Slice W, D5b) means a spoken "yes" only starts a
+	// two-step send: the daemon reads the recipient back spelled out plus
+	// the subject, and only the fixed phrase ConfirmSendPhrase, said within
+	// ConfirmSendWindow and bound to the same envelope and payload hash,
+	// decides it. A tap still works at any point.
+	VoiceConfirm
 )
+
+// ConfirmSendPhrase is the fixed phrase that completes a VoiceConfirm send
+// (approval_required's confirm_phrase). A fixed two-word phrase is
+// something speech recognition is unlikely to produce by accident.
+const ConfirmSendPhrase = "confirm send"
+
+// ConfirmSendWindow bounds how long after the spelled read-back the
+// confirm phrase still binds (D5b: 30 seconds).
+const ConfirmSendWindow = 30 * time.Second
+
+// confirmSendActions are the only actions the two-step spoken send covers:
+// mail from the agent address, and a message to another party's twin.
+// Money, public posts and every other high-risk action stay tap-only.
+var confirmSendActions = map[string]bool{
+	"gmail.send_message":    true,
+	"twinlink.send_message": true,
+}
 
 // DefaultVoiceApproveWindow is router.voice_approve.window_seconds's
 // default (Design §17).
@@ -58,6 +81,14 @@ var recipientPayloadKeys = []string{"to", "cc", "bcc", "attendees"}
 // (Design §13). Rules are evaluated in order and the first match wins:
 //
 //  1. e.Origin is auto-mode ("p2"): Tap ("auto-mode origin").
+//     Then, for gmail.send_message and twinlink.send_message only (Slice W,
+//     D5b):
+//     a. the envelope carries recipient warnings (an unusual or unverified
+//     domain): Tap ("recipient warnings");
+//     b. no recipient to read back: Tap ("no recipient");
+//     c. e.Origin is "p0" (the CEO's own session): VoiceConfirm.
+//     Any other origin falls through to the rules below (and, being high
+//     risk, ends at Tap).
 //  2. e.Risk is "high": Tap ("declared high risk").
 //  3. e.Risk is anything other than exactly "low" or "medium" (empty or
 //     unrecognized): Tap ("unrated").
@@ -75,6 +106,17 @@ func VoiceApprovalTier(e approvals.Envelope, internalDomains []string) (VoiceTie
 	// dependency-direction rule), so the literal is used directly instead.
 	if e.Origin == "p2" {
 		return TapRequired, "auto-mode origin"
+	}
+	if confirmSendActions[e.Action] {
+		if len(e.Warnings) > 0 {
+			return TapRequired, "recipient warnings"
+		}
+		if len(confirmRecipients(e)) == 0 {
+			return TapRequired, "no recipient"
+		}
+		if e.Origin == "p0" {
+			return VoiceConfirm, ""
+		}
 	}
 	if e.Risk == "high" {
 		return TapRequired, "declared high risk"
@@ -138,4 +180,18 @@ func domainOf(addr string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(addr[i+1:]))
+}
+
+// confirmRecipients lists who a confirmSendActions envelope goes to, in the
+// order the spelled read-back names them: a twin id for twinlink, the
+// to/cc/bcc addresses for mail.
+func confirmRecipients(e approvals.Envelope) []string {
+	if e.Action == "twinlink.send_message" {
+		return addressesOf(e.Payload["to_twin"])
+	}
+	var out []string
+	for _, key := range []string{"to", "cc", "bcc"} {
+		out = append(out, addressesOf(e.Payload[key])...)
+	}
+	return out
 }

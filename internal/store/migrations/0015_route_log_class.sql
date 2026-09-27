@@ -1,0 +1,11 @@
+-- Slice W (D6): the general/specific boundary on route_log.
+--
+-- class is 'company' or 'general'. A main-path turn is 'general' only when
+-- its tool attribution was unambiguous and every twin function it attempted
+-- (executed, queued or denied) was research.web or display.show, i.e. it
+-- touched no company data. Everything else is 'company', and so is every
+-- row written before this migration: the default is the conservative one.
+--
+-- General turns are never promotion input (QuickOnlyRoutes excludes them)
+-- and, per the owner amendment in docs/slices/G.md, never memory input.
+ALTER TABLE route_log ADD COLUMN class TEXT NOT NULL DEFAULT 'company';

@@ -2,37 +2,31 @@ package nervous
 
 import (
 	"context"
+	"io/fs"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"water"
 	"water/internal/approvals"
 	"water/internal/nervous/intents"
 	"water/internal/nervous/render"
 	"water/internal/runtime"
 )
 
-// approvalsRespondFixtureYAML is twins/ceo/intents/approvals_respond.yaml,
-// copied verbatim so these fixture registries can bind a spoken yes/no
-// exactly like the real ceo twin does.
-const approvalsRespondFixtureYAML = `
-id: approvals.respond
-description: Answer yes or no to the one pending approval
-function: approvals.bind_pending
-requires_pending_approval: true
-templates:
-  - "yes"
-  - "no"
-  - "yeah"
-  - "nope"
-examples:
-  - "yeah"
-escalate_if: [slot_unresolved, ambiguous_match]
-reflex_eligible: true
-tests:
-  - {utterance: "yeah", intent: approvals.respond, pending: 1}
-  - {utterance: "yeah", intent: none, pending: 0}
-`
+// realApprovalsRespondYAML is the embedded twins/ceo/intents/
+// approvals_respond.yaml itself (it used to be a hand-copied subset), so
+// these registries bind a spoken yes/no with exactly the phrasings the real
+// ceo twin accepts, Slice W's natural phrasings and "confirm send" included.
+func realApprovalsRespondYAML(t *testing.T) string {
+	t.Helper()
+	raw, err := fs.ReadFile(water.TwinsFS(), "twins/ceo/intents/approvals_respond.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
 
 const calendarCreateFixtureYAML = `
 id: calendar.create_event
@@ -148,7 +142,7 @@ func newVoiceBindHarness(t *testing.T, risk string, internalDomains []string, en
 	t.Helper()
 	reg := actionsFixtureRegistry(t, map[string]string{
 		"calendar_create_event": calendarCreateFixtureYAML,
-		"approvals_respond":     approvalsRespondFixtureYAML,
+		"approvals_respond":     realApprovalsRespondYAML(t),
 		"mail_send_reply":       mailSendReplyYAML,
 	})
 	env, ctx, _ := actionsTestEnv(t)
@@ -318,7 +312,9 @@ func TestHighRiskRequiresTap(t *testing.T) {
 	}{
 		{name: "high risk", action: "gcal.create_event", risk: "high", payload: map[string]any{"attendees": []string{"a@x.com"}}, domains: []string{"x.com"}},
 		{name: "empty risk (unrated)", action: "gcal.create_event", risk: "", payload: map[string]any{"attendees": []string{"a@x.com"}}, domains: []string{"x.com"}},
-		{name: "not voice-eligible action", action: "gmail.send_message", risk: "low", payload: map[string]any{"to": []string{"a@x.com"}}, domains: []string{"x.com"}},
+		// gmail.send_message on p0 is the two-step spoken send since Slice W
+		// (TestVoiceConfirmSend*); any other unlisted action still taps.
+		{name: "not voice-eligible action", action: "gdrive.share_file", risk: "low", payload: map[string]any{"to": []string{"a@x.com"}}, domains: []string{"x.com"}},
 		{name: "external recipient", action: "gcal.create_event", risk: "low", payload: map[string]any{"attendees": []string{"a@evil.example"}}, domains: []string{"x.com"}},
 	}
 	for _, c := range cases {
@@ -412,5 +408,295 @@ func TestVoiceApproveDifferentChannelNotBound(t *testing.T) {
 	latest, _ := h.env.Approvals.Get(h.ctx, pend[0].ID)
 	if latest.Status != approvals.Pending {
 		t.Fatalf("envelope status = %s, want still pending", latest.Status)
+	}
+}
+
+// ---- Slice W, D5b: the two-step spoken send ----
+
+func confirmPhraseOf(events []runtime.Event) string {
+	for _, e := range events {
+		if e.Kind == runtime.EventApprovalRequired && e.ConfirmPhrase != "" {
+			return e.ConfirmPhrase
+		}
+	}
+	return ""
+}
+
+func spokenText(events []runtime.Event) string {
+	var b strings.Builder
+	for _, e := range events {
+		if e.Kind == runtime.EventSentence {
+			b.WriteString(e.Text)
+			b.WriteString(" ")
+		}
+	}
+	return b.String()
+}
+
+// proposeSend queues a model-style gmail.send_message (origin p0) and
+// surfaces its read-back the way a first reply with no binding does, so the
+// next reply is bound to it. It returns the envelope as pending now.
+func proposeSend(t *testing.T, h *voiceBindHarness, payload map[string]any) approvals.Envelope {
+	t.Helper()
+	env, err := h.env.Approvals.Propose(h.ctx, approvals.Envelope{Action: "gmail.send_message", Origin: "p0", Risk: "high", Payload: payload})
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	h.n.RecordReadback(runtime.ChannelVoice, env.ID, env.PayloadHash, *h.now)
+	return env
+}
+
+func sendPayload() map[string]any {
+	return map[string]any{"to": []any{"kranthi@gmail.com"}, "subject": "Quarterly numbers", "body": "See attached."}
+}
+
+func statusOf(t *testing.T, h *voiceBindHarness, id string) approvals.Status {
+	t.Helper()
+	e, err := h.env.Approvals.Get(h.ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e.Status
+}
+
+// 1 + 2: yes → spelled read-back, nothing decided; "confirm send" within
+// 30s → decided once, with the same payload hash.
+func TestVoiceConfirmSendYesThenConfirmSends(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env := proposeSend(t, h, sendPayload())
+
+	h.advance(5 * time.Second)
+	events := h.turn(t, "I approve the message", "stage1")
+	if h.approver.callCount() != 0 {
+		t.Fatalf("DecideBound calls after stage one = %d, want 0: a yes never sends", h.approver.callCount())
+	}
+	if got := confirmPhraseOf(events); got != "confirm send" {
+		t.Fatalf("approval_required confirm_phrase = %q, want \"confirm send\" (events=%v)", got, events)
+	}
+	said := spokenText(events)
+	for _, want := range []string{"k r a n t h i at gmail dot com", "Quarterly numbers", "Say confirm send to send it"} {
+		if !strings.Contains(said, want) {
+			t.Fatalf("spoken read-back %q lacks %q", said, want)
+		}
+	}
+	if statusOf(t, h, env.ID) != approvals.Pending {
+		t.Fatal("envelope must stay pending after stage one")
+	}
+
+	h.advance(10 * time.Second)
+	events = h.turn(t, "confirm send", "stage2")
+	if h.approver.callCount() != 1 || h.approver.executedCount() != 1 {
+		t.Fatalf("calls=%d executed=%d, want exactly one decision and execution", h.approver.callCount(), h.approver.executedCount())
+	}
+	if h.approver.calls[0] != env.ID+":yes" {
+		t.Fatalf("decision = %q, want %s:yes", h.approver.calls[0], env.ID)
+	}
+	if statusOf(t, h, env.ID) != approvals.Executed {
+		t.Fatalf("status = %s, want executed", statusOf(t, h, env.ID))
+	}
+	if !strings.Contains(spokenText(events), "Sent") {
+		t.Fatalf("stage two said %q, want Sent", spokenText(events))
+	}
+}
+
+// 3: "confirm send" after the 30s window → nothing decided, resurfaced.
+func TestVoiceConfirmSendExpiresAfter30s(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env := proposeSend(t, h, sendPayload())
+	h.turn(t, "yes send it", "stage1")
+
+	h.advance(31 * time.Second)
+	events := h.turn(t, "confirm send", "late")
+	if h.approver.callCount() != 0 {
+		t.Fatalf("DecideBound calls = %d, want 0 (confirm window elapsed)", h.approver.callCount())
+	}
+	if statusOf(t, h, env.ID) != approvals.Pending {
+		t.Fatal("envelope must stay pending")
+	}
+	if !strings.Contains(spokenText(events), "That changed") {
+		t.Fatalf("late confirm said %q, want the read-back re-surfaced", spokenText(events))
+	}
+	// Starting over works: stage one again, then a timely confirm.
+	h.turn(t, "go ahead", "stage1-again")
+	if h.approver.callCount() != 0 {
+		t.Fatal("stage one again must not decide")
+	}
+	h.advance(3 * time.Second)
+	h.turn(t, "confirm send", "stage2-again")
+	if h.approver.executedCount() != 1 {
+		t.Fatalf("executed = %d, want 1 after a fresh stage one", h.approver.executedCount())
+	}
+}
+
+// 4: a second "yes" while armed decides nothing and keeps the arm.
+func TestVoiceConfirmSendYesWhileArmedDoesNothing(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env := proposeSend(t, h, sendPayload())
+	h.turn(t, "yes", "stage1")
+	h.advance(2 * time.Second)
+	events := h.turn(t, "yes", "yes-again")
+	if h.approver.callCount() != 0 {
+		t.Fatalf("DecideBound calls = %d, want 0", h.approver.callCount())
+	}
+	if !strings.Contains(spokenText(events), "Say confirm send, or tap Approve") {
+		t.Fatalf("said %q, want the confirm hint", spokenText(events))
+	}
+	if confirmPhraseOf(events) != "confirm send" {
+		t.Fatal("the re-emitted approval_required must still carry confirm_phrase")
+	}
+	h.advance(2 * time.Second)
+	h.turn(t, "confirm send it", "stage2")
+	if h.approver.executedCount() != 1 || statusOf(t, h, env.ID) != approvals.Executed {
+		t.Fatal("the arm must survive a stray yes and still accept the confirm phrase")
+	}
+}
+
+// 5: "no" while armed denies.
+func TestVoiceConfirmSendNoWhileArmedDenies(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env := proposeSend(t, h, sendPayload())
+	h.turn(t, "yes", "stage1")
+	h.advance(2 * time.Second)
+	h.turn(t, "no", "deny")
+	if h.approver.callCount() != 1 || h.approver.calls[0] != env.ID+":no" {
+		t.Fatalf("calls = %v, want exactly one no", h.approver.calls)
+	}
+	if statusOf(t, h, env.ID) != approvals.Denied {
+		t.Fatalf("status = %s, want denied", statusOf(t, h, env.ID))
+	}
+}
+
+// 6: an edit between the stages (new id and hash) → no decision.
+func TestVoiceConfirmSendEditBetweenStagesDoesNotSend(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env := proposeSend(t, h, sendPayload())
+	h.turn(t, "yes", "stage1")
+	p := sendPayload()
+	p["subject"] = "Changed subject"
+	edited, err := h.env.Approvals.Edit(h.ctx, env.ID, p)
+	if err != nil {
+		t.Fatalf("Edit: %v", err)
+	}
+	h.advance(2 * time.Second)
+	h.turn(t, "confirm send", "stage2")
+	if h.approver.callCount() != 0 {
+		t.Fatalf("DecideBound calls = %d, want 0 (payload changed between stages)", h.approver.callCount())
+	}
+	if statusOf(t, h, edited.ID) != approvals.Pending {
+		t.Fatal("the edited envelope must stay pending")
+	}
+}
+
+// 7: an envelope with recipient warnings is tap-only, never armed.
+func TestVoiceConfirmSendWarningsStayTapOnly(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	p := sendPayload()
+	p["to"] = []any{"kranthetjob@therightgmail.com"}
+	p["confirm_unusual_recipient"] = true
+	env := proposeSend(t, h, p)
+	pend, _ := h.env.Approvals.Pending(h.ctx)
+	if len(pend) != 1 || len(pend[0].Warnings) == 0 {
+		t.Fatalf("precondition: the near-miss override must leave a warning on the envelope, got %+v", pend)
+	}
+	events := h.turn(t, "yes", "stage1")
+	if confirmPhraseOf(events) != "" {
+		t.Fatal("a warnings envelope must never offer confirm send")
+	}
+	if !hasApprovalRequired(events) || !strings.Contains(spokenText(events), "tap") {
+		t.Fatalf("events = %v, want tap_required", events)
+	}
+	h.advance(2 * time.Second)
+	h.turn(t, "confirm send", "stage2")
+	if h.approver.callCount() != 0 || statusOf(t, h, env.ID) != approvals.Pending {
+		t.Fatalf("calls=%d, want 0 and still pending: warnings are tap-only", h.approver.callCount())
+	}
+}
+
+// 8: "confirm send" as the very first reply only arms; it never executes.
+func TestVoiceConfirmSendFirstReplyOnlyArms(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env := proposeSend(t, h, sendPayload())
+	events := h.turn(t, "confirm send", "first")
+	if h.approver.callCount() != 0 {
+		t.Fatalf("DecideBound calls = %d, want 0: stage one can't be skipped", h.approver.callCount())
+	}
+	if confirmPhraseOf(events) != "confirm send" || statusOf(t, h, env.ID) != approvals.Pending {
+		t.Fatal("the first confirm must act as stage one's yes: armed, pending")
+	}
+	h.advance(2 * time.Second)
+	h.turn(t, "confirm send", "second")
+	if h.approver.executedCount() != 1 {
+		t.Fatalf("executed = %d, want 1 on the second, armed confirm", h.approver.executedCount())
+	}
+}
+
+// P2 origin: a spoken yes never arms or sends.
+func TestVoiceConfirmSendNeverForP2(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env, err := h.env.Approvals.Propose(h.ctx, approvals.Envelope{Action: "gmail.send_message", Origin: "p2", Risk: "high", Payload: sendPayload()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.n.RecordReadback(runtime.ChannelVoice, env.ID, env.PayloadHash, *h.now)
+	events := h.turn(t, "yes", "stage1")
+	h.advance(time.Second)
+	h.turn(t, "confirm send", "stage2")
+	if confirmPhraseOf(events) != "" || h.approver.callCount() != 0 || statusOf(t, h, env.ID) != approvals.Pending {
+		t.Fatal("a p2 send must stay tap-only")
+	}
+}
+
+// twinlink.send_message: the twin id is spelled back.
+func TestVoiceConfirmSendTwinlinkReadBack(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	env, err := h.env.Approvals.Propose(h.ctx, approvals.Envelope{Action: "twinlink.send_message", Origin: "p0", Risk: "high",
+		Payload: map[string]any{"to_twin": "acme", "type": "request", "subject": "Pilot terms", "body": "Can we talk?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.n.RecordReadback(runtime.ChannelVoice, env.ID, env.PayloadHash, *h.now)
+	events := h.turn(t, "yes", "stage1")
+	if said := spokenText(events); !strings.Contains(said, "Sending to twin a c m e") || !strings.Contains(said, "Pilot terms") {
+		t.Fatalf("twinlink read-back = %q", said)
+	}
+	h.advance(time.Second)
+	h.turn(t, "confirm send", "stage2")
+	if h.approver.executedCount() != 1 {
+		t.Fatalf("executed = %d, want 1", h.approver.executedCount())
+	}
+}
+
+// The incident's own words, with exactly one pending approval, reach stage
+// one (before W they matched no template and Match read them as Ambiguous).
+func TestVoiceIApproveTheMessageReachesStageOne(t *testing.T) {
+	h := newVoiceBindHarness(t, "high", nil, true)
+	proposeSend(t, h, sendPayload())
+	events := h.turn(t, "I approve the message.", "incident")
+	if confirmPhraseOf(events) != "confirm send" || h.approver.callCount() != 0 {
+		t.Fatalf("events=%v calls=%d, want stage one armed and no decision", events, h.approver.callCount())
+	}
+}
+
+func TestConfirmSendReadBackShape(t *testing.T) {
+	long := strings.Repeat("x", 120)
+	e := approvals.Envelope{Action: "gmail.send_message", Payload: map[string]any{
+		"to": []any{"a.b_c@renaissance.ai", "x@gmail.com", "y@gmail.com"}, "subject": long}}
+	got := confirmSendReadBack(e)
+	if !strings.HasPrefix(got, "Sending to a dot b underscore c at ") || !strings.Contains(got, " and 2 others") {
+		t.Fatalf("read-back = %q", got)
+	}
+	if !strings.Contains(got, strings.Repeat("x", 80)+"…") || strings.Contains(got, strings.Repeat("x", 81)) {
+		t.Fatalf("subject not capped at 80 runes: %q", got)
+	}
+	if !strings.HasSuffix(got, "Say confirm send to send it.") {
+		t.Fatalf("read-back = %q", got)
+	}
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{{"confirm send", true}, {"Confirm send.", true}, {"confirm send it", true}, {"confirm", false}, {"yes confirm send", false}, {"confirm sending", false}, {"send", false}} {
+		if isConfirmSendPhrase(c.in) != c.want {
+			t.Errorf("isConfirmSendPhrase(%q) = %v, want %v", c.in, !c.want, c.want)
+		}
 	}
 }

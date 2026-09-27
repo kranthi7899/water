@@ -19,6 +19,22 @@ templates:
   - "sure approve that"
   - "approved"
   - "denied"
+  # Slice W (D5a): natural phrasings. Every affirmative one here must read as
+  # Yes under approvals.MatchPending with one pending (a test enforces it),
+  # because on the voice path anything that isn't Yes is applied as a denial.
+  - "i approve"
+  - "i approve it"
+  - "i approve the message"
+  - "approve the message"
+  - "approve the email"
+  - "yes send it"
+  - "send it"
+  - "go ahead"
+  - "do it"
+  - "go ahead and send it"
+  # D5b: stage two of the spoken send. Also a plain yes at stage one.
+  - "confirm send"
+  - "confirm send it"
 examples:
   - "yeah"
   - "nope"
@@ -32,3 +48,16 @@ tests:
   - {utterance: "denied", intent: approvals.respond, pending: 1}
   - {utterance: "yeah", intent: none, pending: 0}
   - {utterance: "nope", intent: none, pending: 0}
+  - {utterance: "i approve the message", intent: approvals.respond, pending: 1}
+  - {utterance: "approve the email", intent: approvals.respond, pending: 1}
+  - {utterance: "yes send it", intent: approvals.respond, pending: 1}
+  - {utterance: "send it", intent: approvals.respond, pending: 1}
+  - {utterance: "go ahead", intent: approvals.respond, pending: 1}
+  - {utterance: "do it", intent: approvals.respond, pending: 1}
+  - {utterance: "go ahead and send it", intent: approvals.respond, pending: 1}
+  - {utterance: "confirm send", intent: approvals.respond, pending: 1}
+  - {utterance: "i approve the message", intent: none, pending: 0}
+  - {utterance: "send it", intent: none, pending: 0}
+  - {utterance: "go ahead", intent: none, pending: 0}
+  - {utterance: "do it", intent: none, pending: 0}
+  - {utterance: "confirm send", intent: none, pending: 0}

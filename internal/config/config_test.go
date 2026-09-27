@@ -361,6 +361,43 @@ func TestRouterAckMSRejectsAtOrAbove300(t *testing.T) {
 	}
 }
 
+// TestRouterVoiceFillerMS is Slice W's D3 knob: router.voice_filler_ms
+// defaults to 0 (off: the handoff is never spoken), round-trips through
+// Load/Flat, and is bounded to 0..10000 with an error naming the key.
+func TestRouterVoiceFillerMS(t *testing.T) {
+	t.Setenv("WATER_HOME", t.TempDir())
+	r, err := Load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Router.VoiceFillerMS != 0 {
+		t.Fatalf("router.voice_filler_ms default = %d, want 0 (off)", r.Router.VoiceFillerMS)
+	}
+	if got := r.Flat()["router.voice_filler_ms"]; got != "0" {
+		t.Fatalf("Flat router.voice_filler_ms = %q, want \"0\"", got)
+	}
+	for _, good := range []string{"0", "1", "2500", "10000"} {
+		r, err := Load(map[string]string{"router.voice_filler_ms": good})
+		if err != nil {
+			t.Errorf("router.voice_filler_ms=%s should load: %v", good, err)
+			continue
+		}
+		if strconv.Itoa(r.Router.VoiceFillerMS) != good || r.Flat()["router.voice_filler_ms"] != good {
+			t.Errorf("router.voice_filler_ms=%s did not round trip: got %d", good, r.Router.VoiceFillerMS)
+		}
+	}
+	for _, bad := range []string{"-1", "10001", "soon"} {
+		if _, err := Load(map[string]string{"router.voice_filler_ms": bad}); err == nil {
+			t.Errorf("router.voice_filler_ms=%s should fail to load", bad)
+		} else if !strings.Contains(err.Error(), "router.voice_filler_ms") {
+			t.Errorf("router.voice_filler_ms=%s error = %q, want it to name the key", bad, err.Error())
+		}
+	}
+	if err := Save(map[string]string{"router.voice_filler_ms": "10001"}); err == nil {
+		t.Error("Save(router.voice_filler_ms=10001) should fail")
+	}
+}
+
 // TestRouterIntBoolCoercion exercises int/bool coercion for a
 // representative new key of each kind, the same style
 // TestSaveRejectsInvalidValues already uses for the pre-existing keys.

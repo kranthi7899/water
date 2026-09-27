@@ -358,6 +358,30 @@ amendment, 2026-09-25):
   because whether its plan worked isn't known yet. `memory.propose`
   already cannot create `procedure` records (Q §6).
 
+**Owner amendment (2026-09-26, Slice W): general turns are never memory
+input.** Slice W draws the line between *general* (the twin's own
+knowledge, opinion, small talk, and public web facts from `research.web`)
+and *specific* (company facts, which come only from tools). `route_log`
+now carries `class` (`company|general`, migration 0015). A main-path turn
+is `general` only when tool attribution was unambiguous and every twin
+function it attempted (executed, queued or denied) was `research.web` or
+`display.show`; every other turn, every Tier-0 turn, and every row written
+before 0015 is `company`. The rule G's writers follow:
+- a `general` turn is never offered to the live trigger (a) as material
+  for a twin-written `memory.propose`, never read by the consolidation
+  pass (b), and never contributes to a procedure (c);
+- the model is told the same in `twins/ceo/role.md` ("General knowledge
+  and conversation": general conversation is never a company fact, never
+  recorded or proposed to memory);
+- general conversation lives only in the warm session's own context.
+
+An explicit "remember this" still works: calling `memory.propose` is itself
+a company-tool attempt, so that turn is `company` by construction.
+Promotion mining already skips `general` rows (`store.QuickOnlyRoutes` and
+`promote.qualifies`). Not built in W: `~/.water/tmp/policy-*.events.jsonl`
+still retains full tool arguments, including general turns' `research.web`
+queries; pruning it is a known gap.
+
 ### 4. The approval path, and live `AuditSeq` binding
 
 Every change that makes something current, or stops something being

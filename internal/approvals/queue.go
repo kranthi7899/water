@@ -44,6 +44,13 @@ type Envelope struct {
 	Status      Status    `json:"status"`
 	Reason      string    `json:"reason"`
 	CreatedAt   time.Time `json:"created_at"`
+
+	// Warnings are code-built recipient warnings (an unusual domain the CEO
+	// confirmed, a mail domain with no mail server or that could not be
+	// verified). They are not persisted and not covered by PayloadHash:
+	// the Queue recomputes them on every read (see RecipientChecker), so
+	// they are always current and never something a caller can set.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 var (
@@ -65,6 +72,28 @@ type Queue struct {
 	// beforeTransition, when set (tests only), runs in Decide between the
 	// pending check and the compare-and-swap, to interleave a racing decider.
 	beforeTransition func()
+
+	// recipients runs the recipient checks for gmail writes (see
+	// SetRecipientChecker). Nil runs the pure checks only, with no DNS.
+	recipients *RecipientChecker
+}
+
+// SetRecipientChecker attaches the checker Propose and every read use for
+// gmail recipients: nil (the default, and what tests get) runs only the
+// pure checks (syntax, near-miss against the public providers) and never
+// touches DNS.
+func (q *Queue) SetRecipientChecker(c *RecipientChecker) { q.recipients = c }
+
+// withWarnings sets e.Warnings from the current recipient checks. It is
+// applied to every envelope the Queue returns, so warnings are never
+// stored, never hashed, and always current.
+// Only an envelope still awaiting a decision or its execution carries
+// them: a decided one's warnings no longer change anything.
+func (q *Queue) withWarnings(e Envelope) Envelope {
+	if e.Status == Pending || e.Status == Approved {
+		e.Warnings = q.recipients.Warnings(e)
+	}
+	return e
 }
 
 func NewQueue(st *store.Store, log *audit.Log) *Queue {
@@ -85,10 +114,16 @@ func newID() string {
 	return "env_" + hex.EncodeToString(b[:])
 }
 
-// Propose adds a pending envelope.
+// Propose adds a pending envelope. A gmail write whose recipient fails the
+// recipient checks (an invalid address, or a domain that looks misheard and
+// was not confirmed) is refused with an error wrapping ErrRecipient, and
+// nothing is proposed or audited.
 func (q *Queue) Propose(ctx context.Context, e Envelope) (Envelope, error) {
 	if e.Action == "" || e.Origin == "" {
 		return Envelope{}, errors.New("approvals: action and origin are required")
+	}
+	if _, err := q.recipients.Check(ctx, e.Action, e.Payload); err != nil {
+		return Envelope{}, err
 	}
 	now := q.Now().UTC()
 	if e.ExpiresAt.IsZero() {
@@ -130,7 +165,11 @@ func (q *Queue) Get(ctx context.Context, id string) (Envelope, error) {
 	if err != nil {
 		return Envelope{}, err
 	}
-	return fromRow(row)
+	e, err := fromRow(row)
+	if err != nil {
+		return Envelope{}, err
+	}
+	return q.withWarnings(e), nil
 }
 
 func fromRow(r store.ApprovalRow) (Envelope, error) {
@@ -160,7 +199,7 @@ func (q *Queue) Pending(ctx context.Context) ([]Envelope, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, e)
+		out = append(out, q.withWarnings(e))
 	}
 	return out, nil
 }
@@ -262,6 +301,11 @@ func (q *Queue) Edit(ctx context.Context, id string, payload map[string]any) (En
 	}
 	if old.Status != Pending && old.Status != Approved {
 		return Envelope{}, fmt.Errorf("approvals: %s is %s and cannot be edited", id, old.Status)
+	}
+	// An edit whose new recipients would be refused leaves the old
+	// envelope standing: check before voiding it (Propose checks again).
+	if _, err := q.recipients.Check(ctx, old.Action, payload); err != nil {
+		return Envelope{}, err
 	}
 	ok, err := q.st.TransitionApproval(ctx, id, string(old.Status), string(Denied), "voided by edit", q.Now().UTC())
 	if err != nil {

@@ -465,53 +465,67 @@ func TestAckTimerFiresAndStops(t *testing.T) {
 // is always visible before the main path's first output — Handle fires it
 // explicitly at the moment it routes to main (answerMain), rather than
 // waiting for AckAfter to elapse, so even a slow model's first delta is
-// always preceded by an ack. (Design §11.4 step 6's other half — the ack
-// firing purely from the timer while a slower quick tier is still working —
-// needs Tier 1, which doesn't exist until a later task; see
-// TestAckTimerFiresAndStops above for that mechanism tested directly.)
+// always preceded by an ack. Since Slice W (D3) that holds on voice too, and
+// the handoff is a silent ack there as well: no sentence is emitted before
+// the model's own output, and route_log.ack_ms is still recorded. (See
+// TestAckTimerFiresAndStops above for the timer mechanism tested directly.)
 func TestHandoffAckBeforeMainOutput(t *testing.T) {
-	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
-	env, ctx, fk := nervousTestEnv(t)
-	release := make(chan struct{})
-	fk.Reply = func(req backend.Request) string {
-		<-release
-		return "answer"
-	}
-	n := nervousFor(t, reg, realClock{})
+	for _, ch := range []runtime.Channel{runtime.ChannelCLI, runtime.ChannelVoice} {
+		t.Run(string(ch), func(t *testing.T) {
+			reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+			env, ctx, fk := nervousTestEnv(t)
+			release := make(chan struct{})
+			fk.Reply = func(req backend.Request) string {
+				<-release
+				return "answer"
+			}
+			n := nervousWithLoggingFor(t, reg, env.Store, realClock{})
 
-	var events []runtime.Event
-	var mu sync.Mutex
-	done := make(chan struct{})
-	go func() {
-		n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i do today", TaskID: "ack-order"}, collect(&events, &mu))
-		close(done)
-	}()
+			var events []runtime.Event
+			var mu sync.Mutex
+			done := make(chan struct{})
+			go func() {
+				n.Handle(ctx, env, Turn{Channel: ch, Text: "what should i do today", TaskID: "ack-order-" + string(ch)}, collect(&events, &mu))
+				close(done)
+			}()
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		n := len(events)
-		mu.Unlock()
-		if n >= 1 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	mu.Lock()
-	gotAck := len(events) >= 1 && events[0].Kind == runtime.EventAck
-	mu.Unlock()
-	if !gotAck {
-		t.Fatal("ack event was not emitted before the (still blocked) main path produced anything")
-	}
+			// Wait for both acks (router ack + handoff ack) while the main
+			// path is still blocked.
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				mu.Lock()
+				got := len(events)
+				mu.Unlock()
+				if got >= 2 {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			mu.Lock()
+			before := append([]runtime.Event(nil), events...)
+			mu.Unlock()
+			if len(before) < 2 {
+				t.Fatalf("events before main output = %+v, want the router ack and the handoff ack", before)
+			}
+			for _, e := range before {
+				if e.Kind != runtime.EventAck {
+					t.Fatalf("before main output got %q (%q); the handoff must be a silent ack", e.Kind, e.Text)
+				}
+			}
 
-	close(release)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("turn never finished after being released")
-	}
-	if fk.Calls() != 1 {
-		t.Fatalf("backend calls = %d, want 1", fk.Calls())
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("turn never finished after being released")
+			}
+			if fk.Calls() != 1 {
+				t.Fatalf("backend calls = %d, want 1", fk.Calls())
+			}
+			if row := lastRoute(t, env.Store, tier0FixedNow.Add(-24*time.Hour)); row.AckMS == nil {
+				t.Fatal("route_log ack_ms is null on an escalated turn")
+			}
+		})
 	}
 }
 

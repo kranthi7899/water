@@ -12,6 +12,7 @@ import (
 	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
+	"water/internal/connectors/research"
 	"water/internal/twins"
 )
 
@@ -38,7 +39,7 @@ func TestFunctionLabelFallback(t *testing.T) {
 // so the HUD never falls back to a model-facing description for them.
 func TestRealReadFunctionsHaveActivity(t *testing.T) {
 	conns := []connectors.Connector{&gcal.Calendar{}, &gmail.Gmail{}, &gdrive.Drive{}, &gsheets.Sheets{},
-		&github.GitHub{}, &linear.Linear{}, &hubspot.HubSpot{}}
+		&github.GitHub{}, &linear.Linear{}, &hubspot.HubSpot{}, research.New(nil)}
 	for _, c := range conns {
 		for _, f := range c.Functions() {
 			if f.Level != twins.R {

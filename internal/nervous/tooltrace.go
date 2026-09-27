@@ -33,7 +33,22 @@ type ToolTracer struct {
 	inFlight   map[string]bool
 	used       map[string][]string
 	attributed map[string]bool
+	// attempted holds every twin function a main turn asked the gateway to
+	// run (/v1/tools/invoke), whatever happened next: executed, queued for
+	// approval, or denied (Slice W, D6). used only ever sees executed calls,
+	// so a turn whose one call was a queued gmail.send_message would look
+	// tool-free there and be misclassed "general".
+	attempted map[string][]string
+	// ended parks a finished turn's attempted set between EndMain (run from
+	// answerMain's defer) and the route_log write (routeRecorder.finish,
+	// run later from Handle's own defer), which pops it with TakeAttempts.
+	ended map[string][]string
 }
+
+// maxEndedTraces bounds ended so a caller that runs EndMain without a
+// matching TakeAttempts (a unit test driving the tracer directly) can never
+// grow it without limit; the map is simply reset past this size.
+const maxEndedTraces = 256
 
 // NewToolTracer builds an empty tracer.
 func NewToolTracer() *ToolTracer {
@@ -41,6 +56,8 @@ func NewToolTracer() *ToolTracer {
 		inFlight:   map[string]bool{},
 		used:       map[string][]string{},
 		attributed: map[string]bool{},
+		attempted:  map[string][]string{},
+		ended:      map[string][]string{},
 	}
 }
 
@@ -61,10 +78,58 @@ func (tt *ToolTracer) EndMain(turnID string) (used []string, attributed bool) {
 	defer tt.mu.Unlock()
 	used = tt.used[turnID]
 	attributed = tt.attributed[turnID]
+	if tt.inFlight[turnID] {
+		if len(tt.ended) >= maxEndedTraces {
+			tt.ended = map[string][]string{}
+		}
+		tt.ended[turnID] = tt.attempted[turnID]
+	}
 	delete(tt.inFlight, turnID)
 	delete(tt.used, turnID)
 	delete(tt.attributed, turnID)
+	delete(tt.attempted, turnID)
 	return used, attributed
+}
+
+// RecordAttempt attributes an attempted twin function call to every
+// main-path turn in flight, under exactly RecordUse's rules (zero: dropped;
+// two or more: recorded on each and each marked unattributed).
+func (tt *ToolTracer) RecordAttempt(tool string) {
+	tt.mu.Lock()
+	defer tt.mu.Unlock()
+	if len(tt.inFlight) == 0 {
+		return
+	}
+	ambiguous := len(tt.inFlight) > 1
+	for id := range tt.inFlight {
+		tt.attempted[id] = append(tt.attempted[id], tool)
+		if ambiguous {
+			tt.attributed[id] = false
+		}
+	}
+}
+
+// TakeAttempts returns (and forgets) the attempted calls EndMain parked for
+// turnID. A turn that never reached the main path, or was already taken,
+// reports nil.
+func (tt *ToolTracer) TakeAttempts(turnID string) []string {
+	tt.mu.Lock()
+	defer tt.mu.Unlock()
+	a := tt.ended[turnID]
+	delete(tt.ended, turnID)
+	return a
+}
+
+// RecordToolAttempt records that the in-flight main turn asked the gateway
+// to run fn (internal/gateway's handleToolInvoke calls it for every request
+// body that decodes, before the gate decides anything). route_log's class
+// column reads it: a turn that attempted any company function is "company"
+// even when that call was only queued or denied (Slice W, D6).
+func (n *Nervous) RecordToolAttempt(fn string) {
+	if fn == "" {
+		return
+	}
+	n.toolTracer.RecordAttempt(fn)
 }
 
 // RecordUse attributes tool to every main-path turn currently in flight.

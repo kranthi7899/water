@@ -366,3 +366,59 @@ func TestRouterMigrationAppliesOnUpgrade(t *testing.T) {
 		t.Fatalf("pre-existing data survived migration: %v %v", msgs, err)
 	}
 }
+
+// Slice W, D6 (migration 0015): route_log.class.
+func TestRouteClassDefaultsToCompanyAndRoundTrips(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	unset := sampleRoute("unset", ts(10))
+	general := sampleRoute("general", ts(11))
+	general.Class = RouteClassGeneral
+	bogus := sampleRoute("bogus", ts(12))
+	bogus.Class = "chitchat" // anything but "general" is stored as company
+	for _, r := range []RouteRow{unset, general, bogus} {
+		if _, err := s.InsertRoute(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A row written without the column at all (the shape of every row that
+	// existed before 0015) reads back as company.
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO route_log (turn_id, at, channel, utterance, tiers_attempted, total_ms, outcome) VALUES ('legacy', ?, 'voice', 'hi', '[]', 0, 'answered')`, ts(13).UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListRoutes(ctx, ts(0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.TurnID] = r.Class
+	}
+	want := map[string]string{"unset": "company", "general": "general", "bogus": "company", "legacy": "company"}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("class[%s] = %q, want %q", id, got[id], w)
+		}
+	}
+}
+
+func TestQuickOnlyRoutesExcludesGeneral(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	company := sampleRoute("company1", ts(10))
+	company.Owner, company.QuickOnly = "main", true
+	general := sampleRoute("general1", ts(11))
+	general.Owner, general.QuickOnly, general.Class = "main", true, RouteClassGeneral
+	for _, r := range []RouteRow{company, general} {
+		if _, err := s.InsertRoute(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.QuickOnlyRoutes(ctx, ts(0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].TurnID != "company1" {
+		t.Fatalf("QuickOnlyRoutes = %v, want [company1]: a general turn is never promotion input", rowIDs(rows))
+	}
+}

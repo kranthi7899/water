@@ -43,6 +43,11 @@ final class VoiceController {
     var onFailure: ((String) -> Void)? {
         get { session.onFailure } set { session.onFailure = newValue }
     }
+    /// The key came up while the recognizer was still warming up: the
+    /// transcript is coming, just later (VoiceSession waits for it).
+    var onWarmingUp: (() -> Void)? {
+        get { session.onWarmingUp } set { session.onWarmingUp = newValue }
+    }
     /// Main thread, ~30Hz while the mic is open: its level, 0...1. Both
     /// captures feed it from their `MicTap` (V-hud's blob).
     var onLevel: ((Float) -> Void)? {
@@ -61,7 +66,18 @@ final class VoiceController {
         session = VoiceSession(permissions: SystemVoicePermissions(),
                                capture: capture,
                                scheduler: MainQueueScheduler())
-        session.releasedEarlyMessage = "Hold \(holdLabel) while you talk, and release it to send."
+        self.holdLabel = holdLabel
+        session.releasedEarlyMessage = Self.releasedEarly(holdLabel)
+    }
+
+    /// The key (or button) the current hold belongs to, for the "released
+    /// too early" message: Space in voice mode, the page's mic otherwise.
+    var holdLabel: String {
+        didSet { session.releasedEarlyMessage = Self.releasedEarly(holdLabel) }
+    }
+
+    private static func releasedEarly(_ label: String) -> String {
+        "Hold \(label) while you talk, and release it to send."
     }
 
     /// Menu click: start listening, or stop and send.

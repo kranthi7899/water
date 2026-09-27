@@ -41,6 +41,9 @@ type routeRecorder struct {
 	utterance string
 	start     time.Time
 	tierStart time.Time
+	// mainStart is when the main tier began (zero if it never did): the
+	// origin for the tool-span latency keys (toolSpanLatency).
+	mainStart time.Time
 
 	tiersAttempted   []string
 	owner            string
@@ -76,6 +79,9 @@ func (n *Nervous) newRouteRecorder(id string, ch runtime.Channel, utterance stri
 func (r *routeRecorder) beginTier(tier string) {
 	r.tiersAttempted = append(r.tiersAttempted, tier)
 	r.tierStart = r.n.cfg.Clock.Now()
+	if tier == "main" {
+		r.mainStart = r.tierStart
+	}
 }
 
 // endTier closes tier's latency clock. Call it once per matching beginTier.
@@ -106,6 +112,9 @@ func (r *routeRecorder) addWarnings(w []string) {
 // Config.Store (some unit tests build a Nervous without one): logging is
 // simply skipped rather than panicking.
 func (r *routeRecorder) finish(ctx context.Context) {
+	// Pop the turn's parked attempts first, even when nothing is logged
+	// below, so the tracer never holds them past this turn.
+	attempted := r.n.toolTracer.TakeAttempts(r.turnID)
 	if r.n.cfg.Store == nil {
 		return
 	}
@@ -124,6 +133,16 @@ func (r *routeRecorder) finish(ctx context.Context) {
 	logCtx := context.WithoutCancel(ctx)
 
 	now := r.n.cfg.Clock.Now()
+	if r.owner == "main" && r.toolsAttributed && !r.mainStart.IsZero() {
+		var first *time.Time
+		if r.firstSentenceMS != nil {
+			t := r.start.Add(time.Duration(*r.firstSentenceMS) * time.Millisecond)
+			first = &t
+		}
+		for k, v := range toolSpanLatency(r.mainStart, now, first, r.toolsUsed, runtime.ToolSpansWithin(r.mainStart, now)) {
+			r.latency[k] = v
+		}
+	}
 	partials, firstPartialLeadMS, speculation := r.n.captureSpeculationFacts(r.turnID, r.start)
 	row := store.RouteRow{
 		TurnID:             r.turnID,
@@ -157,6 +176,7 @@ func (r *routeRecorder) finish(ctx context.Context) {
 		ToolsAttributed:       r.toolsAttributed,
 		QuickOnly:             r.quickOnly,
 		ToolSignature:         r.toolSignature,
+		Class:                 routeClassFor(r.owner, r.escalationReason, r.toolsAttributed, r.toolsUsed, attempted),
 	}
 
 	// The "previous row" must be found BEFORE this one is inserted, or it
@@ -182,6 +202,96 @@ func (r *routeRecorder) finish(ctx context.Context) {
 
 	r.updateRing()
 	r.n.pruneRoutesOncePerDay(logCtx, now)
+}
+
+// toolSpanLatency splits a main-path turn's latency around the tool spans
+// that connectors recorded inside it (runtime.NoteToolSpan; docs/slices/W.md
+// §15). Only spans of functions the turn itself used count. It adds, in
+// milliseconds:
+//   - main_to_tool: main tier start until the first tool call began (the
+//     model's time to decide to call it);
+//   - tool: the used spans' total duration;
+//   - tool_to_done: the last span's end until the turn finished (the
+//     model's answer after the result);
+//   - tool_to_first_sentence: the last span's end until the first sentence,
+//     only when the first sentence came after it (no preamble);
+//   - each span's own phase keys (research_* for research.web), from the
+//     last span that carried them.
+//
+// No used span, no keys: the turn's row is unchanged.
+func toolSpanLatency(mainStart, end time.Time, firstSentence *time.Time, used []string, spans []runtime.ToolSpan) map[string]int64 {
+	usedSet := map[string]bool{}
+	for _, u := range used {
+		usedSet[u] = true
+	}
+	var mine []runtime.ToolSpan
+	for _, s := range spans {
+		if usedSet[s.Function] {
+			mine = append(mine, s)
+		}
+	}
+	if len(mine) == 0 {
+		return nil
+	}
+	out := map[string]int64{}
+	first, last := mine[0].Start, mine[0].End
+	var total time.Duration
+	for _, s := range mine {
+		if s.Start.Before(first) {
+			first = s.Start
+		}
+		if s.End.After(last) {
+			last = s.End
+		}
+		total += s.End.Sub(s.Start)
+		for k, v := range s.Phases {
+			out[k] = v
+		}
+	}
+	out["main_to_tool"] = ms(first.Sub(mainStart))
+	out["tool"] = ms(total)
+	out["tool_to_done"] = ms(end.Sub(last))
+	if firstSentence != nil && !firstSentence.Before(last) {
+		out["tool_to_first_sentence"] = ms(firstSentence.Sub(last))
+	}
+	return out
+}
+
+// generalFunctions are the only twin functions a "general" turn may have
+// attempted (Slice W, D6): public web research and putting something on
+// screen touch no company data. Both spellings are listed, the dotted
+// function id the gateway records and the MCP-safe tool name, so a future
+// caller recording either can't silently turn a company turn general.
+var generalFunctions = map[string]bool{
+	"research.web":  true,
+	"research__web": true,
+	"display.show":  true,
+	"display__show": true,
+}
+
+// routeClassFor decides route_log.class (Slice W, D6). A turn is general
+// only when all of these hold; anything else, including every doubt, is
+// company:
+//   - the main path owned it (a Tier-0 answer is a company read by
+//     construction), and not as a brief-cache miss (that is the brief);
+//   - tool attribution stayed unambiguous for the whole turn;
+//   - every function it attempted (queued and denied calls included, not
+//     only executed ones) or used is in generalFunctions.
+//
+// General turns are excluded from promotion mining (store.QuickOnlyRoutes)
+// and, per docs/slices/G.md's owner amendment, from memory.
+func routeClassFor(owner, escalationReason string, attributed bool, used, attempted []string) string {
+	if owner != "main" || escalationReason == "brief_cache_miss" || !attributed {
+		return store.RouteClassCompany
+	}
+	for _, list := range [][]string{used, attempted} {
+		for _, fn := range list {
+			if !generalFunctions[fn] {
+				return store.RouteClassCompany
+			}
+		}
+	}
+	return store.RouteClassGeneral
 }
 
 // autoDemoteSampleWindow bounds how many of a learned intent's most recent

@@ -292,6 +292,16 @@ func (st *toolStep) end(status runtime.StepStatus) {
 	st.emit(runtime.EventToolEnd, status)
 }
 
+// artifact sends an artifact event for this step (same sink, step id and
+// tool as its tool_start). Callers send it only after the call ran
+// successfully; a nil sink or artifact emits nothing.
+func (st *toolStep) artifact(a *runtime.Artifact) {
+	if st.sink == nil || a == nil {
+		return
+	}
+	st.sink.emit(runtime.Event{Kind: runtime.EventArtifact, StepID: st.ev.StepID, Tool: st.ev.Tool, Artifact: a})
+}
+
 func (st *toolStep) emit(kind runtime.EventKind, status runtime.StepStatus) {
 	if st.sink == nil {
 		return
@@ -747,6 +757,12 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	if body.Args == nil {
 		body.Args = map[string]any{}
 	}
+	// Every attempted call counts toward the in-flight main turn's class
+	// (docs/slices/W.md D6), whether it then runs, is queued or is refused:
+	// a turn whose only call was a queued send is still a company turn.
+	if d.cfg.Nervous != nil {
+		d.cfg.Nervous.RecordToolAttempt(body.Function)
+	}
 
 	if f, ok := d.cfg.Manifest.Function(body.Function); ok && gate.NeedsEnvelope(f.Level, ta.Taint) {
 		env, err := proposeEnvelope(r.Context(), d.cfg.Registry, d.cfg.Approvals, body.Function, body.Args, ta.Origin)
@@ -794,6 +810,10 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status = runtime.StepOK
+	// A draft the CEO asked for, or what the model chose to put on screen
+	// (display.show), is shown to the client as an artifact event, only now
+	// that it ran cleanly, never on a denied, queued or errored call.
+	step.artifact(turnArtifact(body.Function, body.Args))
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
 }
 

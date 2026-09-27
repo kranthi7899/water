@@ -20,6 +20,12 @@ type Readback struct {
 	EnvelopeID  string
 	PayloadHash string
 	At          time.Time
+	// ConfirmAt is set once a spoken yes on a VoiceConfirm envelope (Slice
+	// W, D5b) produced the spelled read-back: from then on only the confirm
+	// phrase, within ConfirmSendWindow of ConfirmAt and for this same
+	// envelope and hash, executes it. Zero means stage one: a plain
+	// read-back awaiting a yes or no.
+	ConfirmAt time.Time
 }
 
 // Readbacks is the single most recent read-back per channel. It lives only
@@ -68,6 +74,26 @@ func (r *Readbacks) Bound(ch runtime.Channel, now time.Time, window time.Duratio
 	defer r.mu.Unlock()
 	rb, ok := r.last[ch]
 	if !ok || now.Sub(rb.At) > window {
+		return Readback{}, false
+	}
+	return rb, true
+}
+
+// ArmConfirm records that ch's CEO has heard the spelled confirm read-back
+// for envelopeID/payloadHash at at (stage two of the spoken send). It
+// replaces whatever ch held, exactly like Record, and refreshes At so the
+// ordinary binding window counts from the confirm prompt too.
+func (r *Readbacks) ArmConfirm(ch runtime.Channel, envelopeID, payloadHash string, at time.Time) {
+	r.Record(Readback{Channel: ch, EnvelopeID: envelopeID, PayloadHash: payloadHash, At: at, ConfirmAt: at})
+}
+
+// Confirming reports ch's armed confirm read-back, if one exists and was
+// armed no longer than window before now. Like Bound, it never mutates.
+func (r *Readbacks) Confirming(ch runtime.Channel, now time.Time, window time.Duration) (Readback, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rb, ok := r.last[ch]
+	if !ok || rb.ConfirmAt.IsZero() || now.Sub(rb.ConfirmAt) > window {
 		return Readback{}, false
 	}
 	return rb, true

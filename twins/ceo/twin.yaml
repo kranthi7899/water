@@ -94,6 +94,25 @@ connectors:
       - {name: outstanding_invoices, level: R, rate: {max: 60, per: 1h}}
       - {name: revenue_by_application, level: R, rate: {max: 60, per: 1h}}
       - {name: funding_history, level: R, rate: {max: 60, per: 1h}}
+  # display.show (internal/connectors/display) puts a short title and a
+  # plain-text body on the CEO's screen during a turn (the model calls it on
+  # voice when seeing beats hearing). No network, no credential, no side
+  # effect beyond the UI; the daemon sends it to the active turn as an
+  # artifact event. Model-initiated only: never on the auto allowlist.
+  - name: display
+    functions:
+      - {name: show, level: R, rate: {max: 30, per: 1h}}
+  # research.web (internal/connectors/research) answers a short plain-words
+  # question about live public information (weather, news, "latest",
+  # prices) with a summary and sources. It runs a separate, cold `claude
+  # --print` on the subscription with only WebSearch/WebFetch (the twin
+  # keeps --tools ""), no credential, no API key. Its output is untrusted
+  # web content (External), so a call taints the session. Model-initiated
+  # only: never on the auto allowlist. Each call is a subscription model
+  # call, hence the modest cap.
+  - name: research
+    functions:
+      - {name: web, level: R, rate: {max: 20, per: 1h}}
 
 # Only functions that read (never draft or act) may run unattended in the
 # background sync (internal/sync); get_message and the Drive functions stay
