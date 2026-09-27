@@ -635,6 +635,25 @@ any daemon started from this binary unless a real send is intended.
   ("Today, Fri 25 Sep:\nNothing on your calendar Today, Fri 25 Sep.").
   Cosmetic.
 
+## Found in the globe-interaction / research-latency build (2026-09-26)
+
+- The movable/dockable globe (hover, drag, dock into the menu bar, the
+  double-click transparent-mode/go-to-panel/quit menu) is only verified by
+  a headless self-test (`--globe-selftest`) driving a real, never-shown
+  `GlobeHUD` with synthetic mouse events. It has never been tried in the
+  owner's actual running Water.app, and the `NSMenu`/status-item behavior
+  on a notched menu bar is untested.
+- `research.web` latency dropped from a 21.2s to a 10.0s median in
+  isolated testing (a warm spare `claude --print` process, haiku, thinking
+  off, a tighter prompt), but a live voice answer is estimated at ~15–18s
+  end to end, still short of the 8–12s target. The floor is `WebSearch`
+  itself (3–8.6s, done server-side by the CLI) plus the main model's two
+  turns around the tool call; neither is fixable from inside Water. Not
+  yet measured against the real daemon. Two levers are identified but
+  unbuilt: have the main model speak research's summary directly instead
+  of a second turn, and pre-warm the research spare on the voice channel's
+  first partial transcript instead of after first use.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
