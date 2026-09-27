@@ -729,6 +729,21 @@ any daemon started from this binary unless a real send is intended.
   (`finance`'s `vendors: []`, `people`/`research` with no rule fields at
   all) since nothing concrete matches them yet.
 
+## Found in Slice UI, Phase 3d (2026-09-26)
+
+- **A real, pre-existing test flake near local midnight**, independently
+  reproduced (not just reported by a build): `internal/gateway`'s
+  `TestQuickInvokeTaintedResultEscalatesSession` and
+  `TestGetTodayReturnsNeedsYouAndSchedule` both compute "today" from
+  `time.Now()`'s local-day bounds and seed a fixture event an hour or so
+  ahead of "now" — late at night (confirmed failing at ~23:00 PDT) that
+  pushes the fixture past local midnight into "tomorrow", outside the
+  test's own `[start,end)` window. Fix: seed relative to a fixed,
+  injected clock (or anchor the fixture to the start of the test's own
+  "today" rather than `time.Now()` directly) instead of wall-clock
+  `time.Now()` plus a fixed offset. Low priority — it only fails for
+  roughly the hour or so before local midnight.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
