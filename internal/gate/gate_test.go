@@ -16,6 +16,7 @@ import (
 	"water/internal/approvals"
 	"water/internal/audit"
 	"water/internal/backend"
+	"water/internal/canon"
 	"water/internal/connectors"
 	"water/internal/connectors/display"
 	"water/internal/connectors/fake"
@@ -602,5 +603,107 @@ func TestExecuteAuditFailureKeepsTheOutput(t *testing.T) {
 	}
 	if len(nt.saved) != 1 {
 		t.Fatalf("saved %d notes, want 1", len(nt.saved))
+	}
+}
+
+// countingAnchor fails every SaveAuditAnchor call from the failFrom-th call
+// onward (1-indexed); failFrom <= 0 means never fail. Unlike failingAnchor's
+// single armed flag, this lets a test's own setup (proposing and approving
+// an envelope, which appends audit records of its own) complete normally
+// before arming the failure at an exact, later call.
+type countingAnchor struct {
+	*store.Store
+	failFrom int
+	calls    int
+}
+
+func (a *countingAnchor) SaveAuditAnchor(ctx context.Context, seq int64, hash string) error {
+	a.calls++
+	if a.failFrom > 0 && a.calls >= a.failFrom {
+		return errors.New("database is locked (SQLITE_BUSY)")
+	}
+	return a.Store.SaveAuditAnchor(ctx, seq, hash)
+}
+
+// TestClaimAuditFailureRevertsToApproved: Approvals.Claim succeeds (the
+// envelope flips to Executed) but the gate's very next audit write --
+// KindDecision, the only record of the claim ever happening -- then fails.
+// Before the fix, the envelope was left stuck Executed forever with the
+// connector never having run: unreclaimable (Claim only accepts Approved),
+// unaudited, and with no way to resubmit the CEO's own approved action.
+// After the fix, the gate reverts the claim back to Approved so the normal
+// "refused before claim" recovery (decideAndExecute's Abandon) can still
+// end it as a clean denial instead of a silent, permanent limbo.
+func TestClaimAuditFailureRevertsToApproved(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	anchor := &countingAnchor{Store: st}
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"), audit.WithAnchor(anchor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	nt := &notes{}
+	reg, err := connectors.NewRegistry(fake.NewCalendar(), fake.NewMail(), fake.NewDocs(), nt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := twins.Parse([]byte(testManifest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := approvals.NewQueue(st, log)
+	g, err := gate.New(gate.Config{Manifest: m, Registry: reg, Approvals: q, Audit: log, Vault: vault.NewMemory(), Store: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	payload := map[string]any{"text": "hi"}
+	e, err := q.Propose(ctx, approvals.Envelope{Action: "notes.save_note", Payload: payload, Origin: "p0", Risk: "high"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, err = q.Decide(ctx, e.ID, approvals.Yes); err != nil || e.Status != approvals.Approved {
+		t.Fatalf("approve: %+v %v", e, err)
+	}
+
+	// Let the next call through (Invoke's own KindCall record) but fail the
+	// one right after it: KindDecision, immediately following the
+	// already-succeeded Claim.
+	anchor.failFrom = anchor.calls + 2
+
+	argsHash, err := canon.Hash(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ierr := g.Invoke(ctx, gate.Call{Function: "notes.save_note", Args: payload, Origin: gate.P0, Taint: gate.Clean, EnvelopeID: e.ID})
+	if ierr == nil {
+		t.Fatal("an audit failure right after claiming was not reported")
+	}
+	if len(nt.saved) != 0 {
+		t.Fatalf("the connector ran despite the claim's audit record failing: %v", nt.saved)
+	}
+
+	got, err := q.Get(ctx, e.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != approvals.Approved {
+		t.Fatalf("envelope status = %s, want Approved (reverted), so decideAndExecute's Abandon recovery can still end it as a denial", got.Status)
+	}
+	if got.PayloadHash != argsHash {
+		t.Fatal("reverted envelope's payload hash changed")
+	}
+
+	// The recovery decideAndExecute itself runs on this exact refusal path
+	// (Get sees Approved -> Abandon) works from here: the envelope can still
+	// be claimed again (it is not stuck), so a retry (or Abandon) is possible.
+	if _, err := q.Claim(ctx, e.ID, "notes.save_note", argsHash); err != nil {
+		t.Fatalf("reverted envelope could not be reclaimed: %v", err)
 	}
 }

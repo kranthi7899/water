@@ -247,6 +247,18 @@ func (g *Gate) Invoke(ctx context.Context, c Call) (Result, error) {
 		basis += " with approved envelope"
 	}
 	if err := rec(audit.KindDecision, true, basis); err != nil {
+		if claim {
+			// Claim already flipped the envelope to Executed (single-use,
+			// CAS-protected): left alone, this audit failure would strand it
+			// there forever with nothing having actually run — unreclaimable
+			// (Claim only accepts Approved), unaudited as a decision, and
+			// with no way to resubmit it. Revert it back to Approved so the
+			// same "refused before claim" recovery decideAndExecute already
+			// runs for every other pre-execution refusal (Abandon, ending it
+			// as a denial with a reason on the record) applies here too,
+			// instead of the CEO's own approved action just vanishing.
+			g.cfg.Approvals.RevertClaim(ctx, c.EnvelopeID, "reverted: audit write failed")
+		}
 		return Result{}, err
 	}
 

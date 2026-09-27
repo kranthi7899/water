@@ -369,6 +369,20 @@ func (q *Queue) Claim(ctx context.Context, id, action, payloadHash string) (Enve
 	return e, nil
 }
 
+// RevertClaim undoes Claim's transition to Executed for a caller that could
+// not go on to record that the claim happened (the gate's own audit write
+// right after a successful Claim failing is the one case this exists for).
+// Without it, that window leaves the envelope stuck Executed forever even
+// though the connector never ran: it cannot be reclaimed (Claim only accepts
+// Approved), and nothing ever surfaces the failure as a denial the way
+// decideAndExecute's own "refused before claim" path does for every other
+// pre-execution refusal. It is a best-effort no-op, not an error, if the
+// envelope is no longer Executed (e.g. concurrently moved on by something
+// else) — the caller's own error is what matters, not this cleanup.
+func (q *Queue) RevertClaim(ctx context.Context, id, reason string) {
+	_, _ = q.st.TransitionApproval(ctx, id, string(Executed), string(Approved), reason, q.Now().UTC())
+}
+
 // Abandon ends an Approved envelope that could not be executed (the gate
 // refused it before claiming it) as Denied, with reason on the record, so
 // it reaches a clear final state instead of sitting Approved with nothing

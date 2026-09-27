@@ -271,11 +271,19 @@ final class RecognitionStream {
     }
 
     /// Any thread (the audio callbacks call it).
+    ///
+    /// The lock is held across the actual `append(_:)` call, not just the
+    /// read of `current`: `SFSpeechAudioBufferRecognitionRequest` is not
+    /// documented as thread-safe, and calling `append(_:)` concurrently with
+    /// (or just after) `endAudio()` on the same request is undefined —
+    /// releasing the lock before calling `append` left a window where
+    /// `endCurrent()`, running on the main thread, could swap `current` to
+    /// nil and call `endAudio()` on the very request an audio callback had
+    /// already fetched and was about to append to.
     func append(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
-        let u = current
-        lock.unlock()
-        u?.request.append(buffer)
+        defer { lock.unlock() }
+        current?.request.append(buffer)
     }
 
     func stop() {
@@ -324,9 +332,19 @@ final class RecognitionStream {
     }
 
     private func endCurrent() {
-        guard let old = swapCurrent(nil) else { return }
+        // current is cleared and endAudio() called in the same critical
+        // section append() also uses, so an audio-thread append() and this
+        // endAudio() can never land on the same request concurrently: either
+        // append() runs first (under lock, current still old) and this waits
+        // for it, or this runs first and a concurrent append() then sees
+        // current already nil.
+        lock.lock()
+        let old = current
+        current = nil
+        old?.request.endAudio()
+        lock.unlock()
+        guard let old else { return }
         ending.append(old)
-        old.request.endAudio()
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.finalTimeout) { [weak self, weak old] in
             guard let self, let old, !old.done else { return }
             old.task?.cancel()

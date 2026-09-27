@@ -152,6 +152,31 @@ func (w *WarmSession) interruptTurn() {
 	w.turnMu.Unlock()
 }
 
+// interruptPollInterval bounds how long interruptAndAcquire waits between
+// attempts.
+const interruptPollInterval = 10 * time.Millisecond
+
+// interruptAndAcquire interrupts any in-flight turn and takes the session,
+// retrying the interrupt until acquire succeeds (or ctx ends). A single
+// interrupt-then-block (the old Clear/Close) can miss a turn that has just
+// taken sem in RunTurn but not yet registered its cancel func under turnMu —
+// a real, if narrow, window — and would then wait out that turn's own full
+// timeout (up to several minutes) instead of interrupting it. Retrying finds
+// the cancel func as soon as that turn registers it, a poll interval later
+// at worst.
+func (w *WarmSession) interruptAndAcquire(ctx context.Context) error {
+	for {
+		w.interruptTurn()
+		select {
+		case w.sem <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(interruptPollInterval):
+		}
+	}
+}
+
 func (w *WarmSession) bin() string {
 	if w.cfg.Bin != "" {
 		return w.cfg.Bin
@@ -171,8 +196,7 @@ func (w *WarmSession) maxTurns() int {
 // (it fails with a cancellation error) rather than waited for, so /clear
 // also recovers a hung session.
 func (w *WarmSession) Clear() {
-	w.interruptTurn()
-	_ = w.acquire(context.Background())
+	_ = w.interruptAndAcquire(context.Background())
 	defer w.release()
 	w.killLocked()
 }
@@ -181,8 +205,7 @@ func (w *WarmSession) Clear() {
 // in-flight turn, kills the process group, and makes later turns refuse
 // rather than start a new process.
 func (w *WarmSession) Close() {
-	w.interruptTurn()
-	_ = w.acquire(context.Background())
+	_ = w.interruptAndAcquire(context.Background())
 	defer w.release()
 	w.closed = true
 	w.killLocked()

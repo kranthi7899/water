@@ -1,6 +1,7 @@
 package turn
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -295,5 +296,49 @@ func TestSweepPrunesAfterDoneKeep(t *testing.T) {
 	// Now a duplicate Done call genuinely doesn't know about it any more.
 	if err := tbl.Done("task1", StateDone); err != ErrUnknown {
 		t.Fatalf("Done after pruning = %v, want ErrUnknown", err)
+	}
+}
+
+// TestRunSweepPrunesPeriodically proves the table actually gets swept when
+// nothing but time passes and RunSweep is running, the way the daemon relies
+// on it (nothing else ever calls Sweep in production: cmd_daemon.go starts
+// exactly one RunSweep goroutine, tied to the daemon's own shutdown
+// context). Before RunSweep existed, nothing in the whole repository called
+// Sweep outside this package's own tests, so a stale listening turn (and
+// every terminal turn) sat in the table, and in Table.order, forever.
+func TestRunSweepPrunesPeriodically(t *testing.T) {
+	fc := newFakeClock()
+	tbl := NewTableConfig(Config{ListeningTTL: 30 * time.Second, MaxListening: 8, DoneKeep: time.Minute}, fc.now)
+	if _, err := tbl.Partial("c1", runtime.ChannelVoice, 1); err != nil {
+		t.Fatal(err)
+	}
+	// The table's own clock is already past ListeningTTL; only a Sweep call
+	// turns that into StateExpired.
+	fc.advance(31 * time.Second)
+	if tn, ok := tbl.Get("c1"); !ok || tn.State != StateListening {
+		t.Fatalf("before any sweep: %+v ok=%v, want still StateListening", tn, ok)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { tbl.RunSweep(ctx, 5*time.Millisecond); close(done) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if tn, ok := tbl.Get("c1"); ok && tn.State == StateExpired {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("RunSweep never expired the stale listening turn")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunSweep did not return once ctx was cancelled")
 	}
 }

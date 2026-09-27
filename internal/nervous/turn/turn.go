@@ -6,6 +6,7 @@
 package turn
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"time"
@@ -357,4 +358,31 @@ func (t *Table) Sweep() {
 		kept = append(kept, id)
 	}
 	t.order = kept
+}
+
+// DefaultSweepInterval is how often RunSweep calls Sweep when the daemon
+// doesn't override it.
+const DefaultSweepInterval = time.Minute
+
+// RunSweep calls Sweep every interval until ctx is done. Nothing else ever
+// removes an entry from the table (Partial/Final only add), so without a
+// caller running this for the life of the process, turns and their order
+// index grow without bound, and evictOldestListeningLocked's per-partial
+// scan over the whole (never-shrinking) order slice gets slower forever.
+// The daemon runs this in its own goroutine tied to its own shutdown
+// context; interval <= 0 means DefaultSweepInterval.
+func (t *Table) RunSweep(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = DefaultSweepInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.Sweep()
+		}
+	}
 }

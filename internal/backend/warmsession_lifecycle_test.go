@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,6 +131,57 @@ func TestWarmSessionWaiterHonorsContextAndClearInterruptsAHungTurn(t *testing.T)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("hung turn never returned after Clear")
+	}
+}
+
+// TestInterruptAndAcquireCatchesALateRegisteredCancel is the regression for
+// a narrow window in RunTurn: it takes the one-slot semaphore, then only
+// afterwards registers its cancel func under turnMu (RunTurn.turnCancel).
+// A Clear/Close landing in that exact window used to call interruptTurn
+// exactly once, find turnCancel still nil, and then block on acquire until
+// whatever turn is running there releases the session on its own -- up to
+// its full timeout (several minutes), rather than being interrupted. This
+// reproduces the window directly (the semaphore taken first, the cancel
+// func registered only after a short delay) and checks Clear notices the
+// cancel func as soon as it exists, a poll interval later at worst, not
+// after some much longer bound.
+func TestInterruptAndAcquireCatchesALateRegisteredCancel(t *testing.T) {
+	w := NewWarmSession(WarmSessionConfig{})
+	// Simulate RunTurn having just won the race for the semaphore, before it
+	// has registered a cancel func for the turn it is about to run.
+	w.sem <- struct{}{}
+
+	cancelled := make(chan struct{})
+	var once sync.Once
+	go func() {
+		// The race window itself, held open for a few poll intervals so this
+		// only passes if Clear is actually retrying, not by getting lucky on
+		// its very first attempt.
+		time.Sleep(3 * interruptPollInterval)
+		w.turnMu.Lock()
+		w.turnCancel = func() { once.Do(func() { close(cancelled) }) }
+		w.turnMu.Unlock()
+		// Mirror RunTurn's own shape: once cancelled (as if ctx.Done() had
+		// unwound the turn), it clears turnCancel and releases the session.
+		<-cancelled
+		w.turnMu.Lock()
+		w.turnCancel = nil
+		w.turnMu.Unlock()
+		w.release()
+	}()
+
+	done := make(chan struct{})
+	go func() { w.Clear(); close(done) }()
+
+	select {
+	case <-cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Clear never interrupted the turn once its cancel func was registered")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Clear did not return once the turn was interrupted")
 	}
 }
 

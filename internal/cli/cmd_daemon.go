@@ -398,7 +398,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 	nvCfg := buildNervousConfig(cfg)
 	nvCfg.Registry = func() *intents.Registry { return deps.intents }
 	nvCfg.Style = deps.style
-	nvCfg.Turns = turn.NewTable(time.Now)
+	turnTable := turn.NewTable(time.Now)
+	nvCfg.Turns = turnTable
 	nvCfg.Store = deps.store
 	nvCfg.ReadStore = readStore
 	nvCfg.Tasks = tc
@@ -452,6 +453,14 @@ func (a *App) runDaemon(ctx context.Context) error {
 	srv := &http.Server{Handler: d.Mux(), BaseContext: func(net.Listener) context.Context { return baseCtx }}
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// turnTable.Sweep is otherwise never called: without this, every turn
+	// and every voice partial's client-supplied turn id stays in the table
+	// (and in its order index) for the rest of the daemon's life, and
+	// evictOldestListeningLocked's per-partial scan over that never-shrinking
+	// order slice gets slower forever. Tied to sigCtx like every other
+	// background loop here, so it stops with the rest of the daemon.
+	go turnTable.RunSweep(sigCtx, turn.DefaultSweepInterval)
 
 	// briefEnv is a plain (non-per-turn) runtime.Env, just enough to compute
 	// and cache the morning brief from the background sync loop — the same
