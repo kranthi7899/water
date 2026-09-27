@@ -654,6 +654,28 @@ any daemon started from this binary unless a real send is intended.
   of a second turn, and pre-warm the research spare on the voice channel's
   first partial transcript instead of after first use.
 
+## Found in Slice UI, Phase 0 (2026-09-26)
+
+- `internal/mailnoise`'s two test fixtures are hand-synthesized, not pulled
+  from the owner's real mailbox — the build's sandboxed shell couldn't open
+  `~/.water/water.db` (`SQLITE_CANTOPEN`). Someone with normal (non-sandboxed)
+  shell access should pull the two owner-cited message ids and swap them in.
+- `runtime/brief.go`'s noise check always passes a nil `wroteTo` (a domain
+  the CEO has actually written to still gets no exemption there, only from
+  `internal/decisions`' triage path does). Fixing this needs a CEO-address
+  config threaded through `runtime.Env`/`gateway.Config`, out of proportion
+  for a heuristic already documented as deliberately conservative.
+- `needsyou`'s "money" approval-priority signal (U14) is a generic,
+  undocumented-elsewhere heuristic (a payload key containing amount/price/
+  cost/budget) — no connector actually moves money yet, so it's untested
+  against a real one.
+- The approval priority rule's "deadline ≤3 days → urgent" half never fires
+  today: `Envelope` carries no deadline field.
+- The Decisions view computes an equivalent priority client-side
+  (`decisionPriorityClass` in app.js, mirroring `needsyou/priority.go`)
+  because `decisions.Card` doesn't carry a server-computed `Priority` yet —
+  a deliberate duplication, to collapse once it does.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
