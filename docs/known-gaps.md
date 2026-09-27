@@ -676,6 +676,31 @@ any daemon started from this binary unless a real send is intended.
   because `decisions.Card` doesn't carry a server-computed `Priority` yet —
   a deliberate duplication, to collapse once it does.
 
+## Found in the adversarial code-review pass (2026-09-26)
+
+- `internal/gateway`'s `Daemon.recaps` map never removes an entry once a
+  meeting's recap finishes — a resource leak of the same shape as the
+  turn-table one this pass fixed, but bounded by how many meetings are
+  ever stopped in a day, so not a practical problem at this app's scale
+  yet. A safe fix needs a retention timestamp plus care not to break
+  `meetingViewOf`'s fallback-to-store logic for skipped/failed recaps.
+- Swift: a mid-`startCapture` audio-device change landing in the narrow
+  synchronous window before `MeetingController`'s `state` is set to
+  `.active` is silently dropped instead of tearing down/notifying — the
+  mic can go dead with no user-visible signal.
+- Swift: `VoiceSession.startCapture` (`HoldToTalk.swift`) would silently
+  swallow a *synchronous* `.error` from `SpeechCapture.start`. Not
+  live-exploitable today (both real conformers, `ParakeetCapture` and
+  `OnDeviceSpeechCapture`, always dispatch via `DispatchQueue.main.async`),
+  but worth a `SpeechCapture` protocol contract note if a future
+  conformer is added that could call back synchronously.
+- The Swift meeting-capture data race this pass fixed (`RecognitionStream`
+  in `MeetingController.swift`) has no automated regression test —
+  `Sources/Water` (the AppKit/AVFoundation/Carbon glue) has no test target
+  reaching it. A Thread-Sanitizer run against a real, several-minutes-long
+  meeting capture (crossing a few 1.5s pauses and one 45s rotation) is the
+  owner's own manual verification step if wanted.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
