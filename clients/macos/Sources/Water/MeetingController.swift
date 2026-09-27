@@ -36,12 +36,21 @@ final class MeetingController {
         // keep the mic channel going on the new input, and say so if that
         // isn't possible rather than silently losing the CEO's side.
         mic.restartOnDeviceChange = true
+        // .starting counts too, not just .active: mic.start() (startCapture,
+        // below) registers this device-change observer and can itself
+        // succeed before state actually flips to .active a few lines later
+        // -- a device change landing in that window used to be silently
+        // dropped instead of tearing down or notifying (found in an
+        // adversarial review, 2026-09-26), which could leave the mic dead
+        // with no signal to the CEO. Handling it the same way .active
+        // already does is strictly safer than the old silent-drop, and a
+        // no-op if that window turns out to be unreachable in practice.
         mic.onRestarted = { [weak self] in
-            guard let self, self.state == .active else { return }
+            guard let self, self.state == .active || self.state == .starting else { return }
             self.onNote?("The audio input device changed; meeting capture switched to it.")
         }
         mic.onInterrupted = { [weak self] message in
-            guard let self, self.state == .active else { return }
+            guard let self, self.state == .active || self.state == .starting else { return }
             self.streams[.mic]?.cancel()
             self.streams[.mic] = nil
             if self.streams.isEmpty {

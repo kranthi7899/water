@@ -176,6 +176,17 @@ public final class VoiceSession {
         transcript = ""
         delivered = false
         startedWarm = capture.isWarmingUp
+        // state moves to .listening before capture.start, not after: the
+        // protocol doesn't forbid a synchronous callback (found in an
+        // adversarial review, 2026-09-26), and handle's own .error branch
+        // only acts while state == .listening. Setting it first means a
+        // synchronous .error is torn down correctly instead of silently
+        // swallowed while state was still whatever it was before this call
+        // (not live-exploitable today, since both real conformers --
+        // ParakeetCapture and OnDeviceSpeechCapture -- always dispatch via
+        // DispatchQueue.main.async, but this closes the contract gap for
+        // good rather than leaving it to a future conformer to rediscover).
+        state = .listening
         do {
             try capture.start { [weak self] result in
                 guard let self, self.generation == gen else { return }
@@ -185,7 +196,11 @@ public final class VoiceSession {
             capture.cancel()
             return fail((error as? LocalizedError)?.errorDescription ?? "\(error)")
         }
-        state = .listening
+        // A synchronous callback may already have resolved this hold (e.g.
+        // handle's .error branch called teardown(), which bumped
+        // generation and reset state to .idle) before capture.start even
+        // returned. Only announce listening if nothing did.
+        guard generation == gen else { return }
         onListening?()
     }
 

@@ -16,12 +16,19 @@ final class FakeCapture: SpeechCapture {
     var starts = 0, ends = 0, cancels = 0
     var live = false
     var startError: Error?
+    /// When set, start() calls onResult with this result synchronously,
+    /// before returning -- the protocol doesn't forbid it, and neither
+    /// real conformer does it today, but VoiceSession must still handle it
+    /// correctly (an adversarial-review finding, 2026-09-26; see
+    /// startCaptureHandlesASynchronousErrorCallback below).
+    var synchronousResult: SpeechResult?
     var sinks: [(SpeechResult) -> Void] = []
     func start(onResult: @escaping (SpeechResult) -> Void) throws {
         if let startError { throw startError }
         starts += 1
         live = true
         sinks.append(onResult)
+        if let synchronousResult { onResult(synchronousResult) }
     }
     func endAudio() { ends += 1; live = false }
     func cancel() { cancels += 1; live = false }
@@ -67,6 +74,28 @@ final class Harness {
         h.capture.emit(.final("send it"))
         #expect(h.transcripts == ["send it"] && h.session.state == .idle)
         #expect(h.partials.contains("send"))
+    }
+
+    /// A synchronous .error from capture.start (found in an adversarial
+    /// review, 2026-09-26: the protocol doesn't forbid this, and the old
+    /// code set state = .listening only *after* the call, so handle's own
+    /// .error branch -- which only acts while state == .listening -- saw
+    /// whatever state was current before this hold started and silently
+    /// dropped the error instead of tearing down and reporting it).
+    @Test func startCaptureHandlesASynchronousErrorCallback() {
+        let h = Harness()
+        h.capture.synchronousResult = .error("mic exploded")
+        h.session.startHold()
+        h.perms.grant()
+        #expect(h.session.state == .idle)
+        #expect(h.failures == ["Speech recognition stopped: mic exploded"])
+        #expect(h.listening == 0) // never announced listening for a hold that was already torn down
+        // The next hold still works normally -- the synchronous error
+        // didn't leave generation/state corrupted for future holds.
+        h.capture.synchronousResult = nil
+        h.session.startHold()
+        h.perms.grant()
+        #expect(h.session.state == .listening && h.listening == 1)
     }
 
     /// mac-1: the key comes up while the permission step is still pending
