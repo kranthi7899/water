@@ -323,6 +323,87 @@ func TestNormalizesPaginatesAndMarksExternal(t *testing.T) {
 	}
 }
 
+// TestFetchMetadataRequestsAndRoundTripsBulkSignals is docs/slices/UI.md
+// Phase 0's gmail test: the metadata request names the four new bulk-mail
+// headers, and the label/header fields it gets back round-trip through
+// Normalize into store.Message's own fields (migration 0016).
+func TestFetchMetadataRequestsAndRoundTripsBulkSignals(t *testing.T) {
+	ts := newTokenServer(t)
+	var metaQuery string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/gmail/v1/users/me/messages" && r.URL.Query().Get("format") == "":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(fixture(t, "messages_bulk.json"))
+		case r.URL.Path == "/gmail/v1/users/me/messages/mbulk":
+			metaQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(fixture(t, "meta_bulk.json"))
+		default:
+			t.Fatalf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+	}))
+	defer api.Close()
+
+	h := newHarness(t, NewWithOptions(testAgentAddress, &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep}))
+	res, err := listMessages(t, h, map[string]any{"max": json.Number("1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{"List-Unsubscribe", "List-Id", "Precedence", "Auto-Submitted"} {
+		if !strings.Contains(metaQuery, want) {
+			t.Errorf("metadata request %q does not ask for header %q", metaQuery, want)
+		}
+	}
+
+	var out listMessagesOutput
+	if err := json.Unmarshal(res.Output, &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Messages) != 1 {
+		t.Fatalf("messages %+v", out.Messages)
+	}
+	got := out.Messages[0]
+	if len(got.LabelIds) != 2 || got.LabelIds[0] != "CATEGORY_PROMOTIONS" {
+		t.Errorf("message LabelIds = %v", got.LabelIds)
+	}
+	if got.ListUnsubscribe == "" || got.ListID == "" || got.Precedence != "bulk" || got.AutoSubmitted != "auto-generated" {
+		t.Errorf("message bulk headers = %+v", got)
+	}
+
+	if len(res.Records) != 1 {
+		t.Fatalf("records %+v", res.Records)
+	}
+	m, ok := res.Records[0].(*store.Message)
+	if !ok {
+		t.Fatalf("wrong record type %T", res.Records[0])
+	}
+	if len(m.Labels) != 2 || m.Labels[0] != "CATEGORY_PROMOTIONS" || m.Labels[1] != "INBOX" {
+		t.Errorf("normalized Labels = %v", m.Labels)
+	}
+	if m.ListUnsubscribe != "<mailto:unsub@bulk-mail.example>" {
+		t.Errorf("normalized ListUnsubscribe = %q", m.ListUnsubscribe)
+	}
+	if m.ListID != "<deals.bulk-mail.example>" {
+		t.Errorf("normalized ListID = %q", m.ListID)
+	}
+	if m.Precedence != "bulk" {
+		t.Errorf("normalized Precedence = %q", m.Precedence)
+	}
+	if m.AutoSubmitted != "auto-generated" {
+		t.Errorf("normalized AutoSubmitted = %q", m.AutoSubmitted)
+	}
+
+	stored, err := store.Get[store.Message](context.Background(), h.st, "gmail", "mbulk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Labels) != 2 || stored.Precedence != "bulk" || stored.ListID != "<deals.bulk-mail.example>" {
+		t.Fatalf("stored message did not persist bulk signals: %+v", stored)
+	}
+}
+
 func TestMaxCapsResultsAndStopsPaginating(t *testing.T) {
 	ts := newTokenServer(t)
 	var listReqs atomic.Int32

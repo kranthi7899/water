@@ -247,12 +247,23 @@ func (tr *Trigger) build(ctx context.Context, now time.Time) (Report, error) {
 	if err != nil {
 		return Report{}, fmt.Errorf("decisions: trigger: listing messages: %w", err)
 	}
+	cutoff := now.Add(-window)
 	var rep Report
 	for i := range msgs {
 		if err := ctx.Err(); err != nil {
 			return rep, err
 		}
 		item := &msgs[i]
+		// The Since filter above bounds created_at (when the row was
+		// ingested), not SentAt (when the message was actually sent): a
+		// backfill or a model search can row an old message into the store
+		// today, and that must not count as a fresh candidate just because
+		// it was ingested inside the window. A message with no SentAt
+		// (zero time) is not excluded by this check — it has nothing to
+		// compare, and created_at already bounded it.
+		if !item.SentAt.IsZero() && item.SentAt.Before(cutoff) {
+			continue
+		}
 		c, ok, err := tr.Triager.Triage(ctx, item)
 		if err != nil {
 			rep.Skipped = append(rep.Skipped, fmt.Errorf("decisions: trigger: classifying %s: %w", Ref(item), err))

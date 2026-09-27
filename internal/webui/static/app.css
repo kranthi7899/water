@@ -215,9 +215,25 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .badge.hot, .badge.risk-high { color: var(--hot); border-color: var(--hot); }
 .badge.warn { color: var(--warn); border-color: var(--warn-border); background: var(--warn-bg); }
 .badge.approval { color: var(--accent); border-color: var(--accent); }
-.badge.ready-ready, .badge.status-executed, .badge.status-approved, .badge.recap-ready { color: #1a7f37; border-color: #1a7f37; }
-.badge.ready-blocked, .badge.status-denied, .badge.recap-failed { color: var(--danger); border-color: var(--danger); }
+.badge.status-executed, .badge.status-approved, .badge.recap-ready { color: #1a7f37; border-color: #1a7f37; }
+.badge.status-denied, .badge.recap-failed { color: var(--danger); border-color: var(--danger); }
 .badge.status-pending { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- priority (docs/slices/UI.md U14 / Phase 0b) ---------- */
+/* A 3px left-border cue on a needs-you row or decision card, replacing the
+   old raw "Severity N" pill. .badge.ready-* was removed above: readiness is
+   now muted text shown only when not ready (app.js), never a badge, so
+   nothing styles that class name any more. .badge.hot and .badge.warn stay
+   (the Meetings "Live" badge and the Threads "untrusted anchor" badge still
+   use them; only the pills that used to reuse those classes for severity/
+   external-content were removed from app.js). */
+.row.p-urgent, .card.p-urgent { border-left: 3px solid var(--hot); }
+.row.p-high, .card.p-high { border-left: 3px solid var(--warn); }
+.row.p-normal, .card.p-normal { border-left: 3px solid transparent; }
+
+/* ext-glyph replaces the old "External content" pill: a small, titled
+   glyph next to a needs-you row's or card's title. */
+.ext-glyph { color: var(--warn); cursor: help; }
 
 /* ---------- schedule ---------- */
 

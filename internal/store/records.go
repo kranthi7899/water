@@ -44,6 +44,20 @@ type Message struct {
 	// carrying only a preview keeps the full body instead of downgrading it.
 	BodyFull bool      `db:"body_full"`
 	SentAt   time.Time `db:"sent_at"`
+	// Labels, ListUnsubscribe, ListID, Precedence and AutoSubmitted
+	// (migration 0016) are bulk-mail signals a connector (gmail.go) fills in
+	// when it has them: the message's provider labels (e.g.
+	// "CATEGORY_PROMOTIONS"), and the raw List-Unsubscribe, List-Id,
+	// Precedence and Auto-Submitted header values. internal/mailnoise reads
+	// these (via a caller-built mailnoise.Signals, never store.Message
+	// directly — mailnoise is a dependency-free leaf) to classify a message
+	// as bulk/noise mail. Old rows stay at their defaults ("[]", "") until
+	// re-fetched.
+	Labels          []string `db:"labels"`
+	ListUnsubscribe string   `db:"list_unsubscribe"`
+	ListID          string   `db:"list_id"`
+	Precedence      string   `db:"precedence"`
+	AutoSubmitted   string   `db:"auto_submitted"`
 }
 
 type Meeting struct {
@@ -409,6 +423,73 @@ func MessagesInRange(ctx context.Context, s *Store, from, to time.Time) ([]Messa
 		args = append(args, to.UnixNano())
 	}
 	return listOrdered[Message](ctx, s, cond, args, 0, "messages", "COALESCE(sent_at, created_at) DESC, id DESC")
+}
+
+// SentToDomain reports whether any stored message whose sender (From) is
+// one of fromAddrs (case-insensitive, matched against the whole From
+// address so a "Name <addr>" wrapper still matches) was addressed to a
+// recipient at domain (case-insensitive). It backs internal/mailnoise's
+// wroteTo signal: a bulk-sender-shaped domain the CEO's own address has
+// genuinely exchanged mail with before is not noise. fromAddrs is typically
+// the CEO's own configured addresses (agent.mail_address, agent.forward_to,
+// wired in internal/cli/twin.go's buildDecisionsTrigger). An empty domain
+// or fromAddrs always reports false rather than matching everything.
+func (s *Store) SentToDomain(ctx context.Context, fromAddrs []string, domain string) (bool, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return false, nil
+	}
+	var conds []string
+	var args []any
+	for _, a := range fromAddrs {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		conds = append(conds, "lower(sender) LIKE ?")
+		args = append(args, "%"+strings.ToLower(a)+"%")
+	}
+	if len(conds) == 0 {
+		return false, nil
+	}
+	q := fmt.Sprintf("SELECT recipients FROM messages WHERE %s", strings.Join(conds, " OR "))
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return false, err
+		}
+		var recipients []string
+		if err := json.Unmarshal([]byte(raw), &recipients); err != nil {
+			continue
+		}
+		for _, r := range recipients {
+			if _, d := splitMailAddress(r); d == domain {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
+}
+
+// splitMailAddress returns addr's local part and domain, lowercased,
+// tolerating a "Name <addr>" wrapper. Both are "" when addr has no "@".
+func splitMailAddress(addr string) (local, domain string) {
+	addr = strings.TrimSpace(addr)
+	if i := strings.LastIndex(addr, "<"); i >= 0 {
+		if j := strings.Index(addr[i:], ">"); j >= 0 {
+			addr = addr[i+1 : i+j]
+		}
+	}
+	at := strings.LastIndex(addr, "@")
+	if at < 0 {
+		return "", ""
+	}
+	return strings.ToLower(strings.TrimSpace(addr[:at])), strings.ToLower(strings.TrimSpace(addr[at+1:]))
 }
 
 func list[T any, P interface {

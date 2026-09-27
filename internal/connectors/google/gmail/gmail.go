@@ -158,14 +158,26 @@ var writeMessageSchema = connectors.Schema{
 // message is the JSON shape Invoke returns and Normalize reads back, shared
 // by both functions. list_messages fills Body with the snippet; get_message
 // fills it with the extracted body.
+//
+// LabelIds, ListUnsubscribe, ListID, Precedence and AutoSubmitted
+// (docs/slices/UI.md Phase 0, 0a) are the bulk-mail signals
+// internal/mailnoise classifies from: Gmail's own labels plus the raw
+// List-Unsubscribe, List-Id, Precedence and Auto-Submitted header values.
+// toRecord copies them straight into store.Message's own fields of the same
+// name (migration 0016).
 type message struct {
-	ID           string   `json:"id"`
-	ThreadID     string   `json:"threadId"`
-	From         string   `json:"from"`
-	To           []string `json:"to"`
-	Subject      string   `json:"subject"`
-	Body         string   `json:"body"`
-	InternalDate string   `json:"internalDate"`
+	ID              string   `json:"id"`
+	ThreadID        string   `json:"threadId"`
+	From            string   `json:"from"`
+	To              []string `json:"to"`
+	Subject         string   `json:"subject"`
+	Body            string   `json:"body"`
+	InternalDate    string   `json:"internalDate"`
+	LabelIds        []string `json:"label_ids,omitempty"`
+	ListUnsubscribe string   `json:"list_unsubscribe,omitempty"`
+	ListID          string   `json:"list_id,omitempty"`
+	Precedence      string   `json:"precedence,omitempty"`
+	AutoSubmitted   string   `json:"auto_submitted,omitempty"`
 }
 
 type header struct {
@@ -189,6 +201,9 @@ type gmailMessage struct {
 	InternalDate string   `json:"internalDate"`
 	HistoryID    string   `json:"historyId"`
 	Payload      mimePart `json:"payload"`
+	// LabelIds is Gmail's own label list (e.g. "CATEGORY_PROMOTIONS"),
+	// always present regardless of the format= a request asked for.
+	LabelIds []string `json:"labelIds"`
 }
 
 // idPair is a message ID paired with its thread ID, as returned by both
@@ -408,14 +423,23 @@ func hasSkipLabel(labels []string) bool {
 	return false
 }
 
+// metadataHeaders is the header allowlist fetchMetadata asks Gmail for:
+// the three original headers plus the four bulk-mail signal headers
+// internal/mailnoise classifies from (docs/slices/UI.md Phase 0, 0a). Date
+// is requested but not read into message (InternalDate is authoritative).
+var metadataHeaders = []string{"From", "To", "Subject", "Date", "List-Unsubscribe", "List-Id", "Precedence", "Auto-Submitted"}
+
 func fetchMetadata(ctx context.Context, cl *gapi.Client, id string) (message, string, error) {
 	var raw gmailMessage
-	q := url.Values{"format": {"metadata"}, "metadataHeaders": {"From", "To", "Subject", "Date"}}
+	q := url.Values{"format": {"metadata"}, "metadataHeaders": metadataHeaders}
 	if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/messages/"+url.PathEscape(id), q, &raw); err != nil {
 		return message{}, "", err
 	}
-	from, to, subject := headerValues(raw.Payload.Headers)
-	m := message{ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: capBody(raw.Snippet), InternalDate: raw.InternalDate}
+	from, to, subject, bulk := headerValues(raw.Payload.Headers)
+	m := message{
+		ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: capBody(raw.Snippet), InternalDate: raw.InternalDate,
+		LabelIds: raw.LabelIds, ListUnsubscribe: bulk.ListUnsubscribe, ListID: bulk.ListID, Precedence: bulk.Precedence, AutoSubmitted: bulk.AutoSubmitted,
+	}
 	return m, raw.HistoryID, nil
 }
 
@@ -456,13 +480,20 @@ func (g *Gmail) getMessage(ctx context.Context, cl *gapi.Client, args map[string
 		return nil, errors.New("gmail: id is required")
 	}
 	var raw gmailMessage
+	// format=full always returns every header (unlike format=metadata, which
+	// is filtered by metadataHeaders), so no explicit header allowlist is
+	// needed here: headerValues picks the same four bulk-mail headers out of
+	// whatever full set comes back.
 	q := url.Values{"format": {"full"}}
 	if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/messages/"+url.PathEscape(id), q, &raw); err != nil {
 		return nil, err
 	}
-	from, to, subject := headerValues(raw.Payload.Headers)
+	from, to, subject, bulk := headerValues(raw.Payload.Headers)
 	body := capBody(extractBody(raw.Payload))
-	m := message{ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: body, InternalDate: raw.InternalDate}
+	m := message{
+		ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: body, InternalDate: raw.InternalDate,
+		LabelIds: raw.LabelIds, ListUnsubscribe: bulk.ListUnsubscribe, ListID: bulk.ListID, Precedence: bulk.Precedence, AutoSubmitted: bulk.AutoSubmitted,
+	}
 	return json.Marshal(m)
 }
 
@@ -716,7 +747,14 @@ func buildRawMessage(from string, to []string, subject, body, html string) (stri
 	return base64.URLEncoding.EncodeToString(head.Bytes()), nil
 }
 
-func headerValues(hs []header) (from, to, subject string) {
+// bulkHeaders is the raw value of the four bulk-mail headers
+// internal/mailnoise classifies from (docs/slices/UI.md Phase 0, 0a), or ""
+// when a header is absent.
+type bulkHeaders struct {
+	ListUnsubscribe, ListID, Precedence, AutoSubmitted string
+}
+
+func headerValues(hs []header) (from, to, subject string, bulk bulkHeaders) {
 	for _, h := range hs {
 		switch strings.ToLower(h.Name) {
 		case "from":
@@ -725,6 +763,14 @@ func headerValues(hs []header) (from, to, subject string) {
 			to = h.Value
 		case "subject":
 			subject = h.Value
+		case "list-unsubscribe":
+			bulk.ListUnsubscribe = h.Value
+		case "list-id":
+			bulk.ListID = h.Value
+		case "precedence":
+			bulk.Precedence = h.Value
+		case "auto-submitted":
+			bulk.AutoSubmitted = h.Value
 		}
 	}
 	return
@@ -844,14 +890,19 @@ func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) 
 // snippet, and store.Upsert will not let that overwrite a full body.
 func toRecord(m message, full bool) store.Record {
 	return &store.Message{
-		Meta:     store.Meta{Source: connName, SourceID: m.ID, External: true},
-		Channel:  "email",
-		Thread:   m.ThreadID,
-		From:     m.From,
-		To:       m.To,
-		Subject:  m.Subject,
-		Body:     m.Body,
-		BodyFull: full,
-		SentAt:   parseInternalDate(m.InternalDate),
+		Meta:            store.Meta{Source: connName, SourceID: m.ID, External: true},
+		Channel:         "email",
+		Thread:          m.ThreadID,
+		From:            m.From,
+		To:              m.To,
+		Subject:         m.Subject,
+		Body:            m.Body,
+		BodyFull:        full,
+		SentAt:          parseInternalDate(m.InternalDate),
+		Labels:          m.LabelIds,
+		ListUnsubscribe: m.ListUnsubscribe,
+		ListID:          m.ListID,
+		Precedence:      m.Precedence,
+		AutoSubmitted:   m.AutoSubmitted,
 	}
 }

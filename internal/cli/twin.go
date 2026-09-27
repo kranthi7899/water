@@ -392,7 +392,14 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 //
 // cardTTL (config decisions.card_ttl_seconds) is how long the trigger
 // reuses its last pass of cards; see decisions.Trigger.CardTTL.
-func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider string, cardTTL time.Duration) *decisions.Trigger {
+//
+// mailAddress and forwardTo (config's agent.mail_address and
+// agent.forward_to) are the CEO's own addresses for internal/mailnoise's
+// wroteTo signal (docs/slices/UI.md Phase 0, 0a): decisions.CandidateWith
+// only excludes a bulk-sender-shaped, claim-pattern message as noise when
+// the CEO has never sent mail to that domain, via store.SentToDomain bound
+// to these two addresses.
+func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider string, cardTTL time.Duration, mailAddress, forwardTo string) *decisions.Trigger {
 	model := deps.manifest.ModelFor(twins.TierFast)
 	charge := func() error { return deps.gate.ModelCall(gate.P1) }
 	classifier := &decisions.ModelClassifier{Registry: deps.decisions, Backend: be, Model: model, Charge: charge}
@@ -402,7 +409,12 @@ func buildDecisionsTrigger(deps *twinDeps, be backend.Backend, deciderProvider s
 	}
 	wrapped := decider.Wrap(dec, classifier, deps.decisions)
 	cached := &decisions.StoreCache{Store: deps.store, Inner: wrapped}
-	triager, err := decisions.NewTriager(cached, decisions.Candidate)
+	ownAddrs := []string{mailAddress, forwardTo}
+	wroteTo := func(domain string) bool {
+		ok, err := deps.store.SentToDomain(context.Background(), ownAddrs, domain)
+		return err == nil && ok
+	}
+	triager, err := decisions.NewTriager(cached, decisions.CandidateWith(wroteTo))
 	if err != nil {
 		return nil
 	}

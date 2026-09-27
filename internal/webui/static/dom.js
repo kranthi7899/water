@@ -71,6 +71,7 @@
 
   const dateFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   const timeFmt = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' });
+  const dayFmt = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 
   function parseTime(s) {
     if (!s) return null;
@@ -80,6 +81,10 @@
   }
   function fmtDate(s) { const d = parseTime(s); return d ? dateFmt.format(d) : ''; }
   function fmtTime(s) { const d = parseTime(s); return d ? timeFmt.format(d) : ''; }
+  // fmtDay is fmtDate without the time, for a plain "Due Oct 15" chip
+  // (docs/slices/UI.md Phase 0b): the exact minute a decision is due is
+  // rarely the point, and dropping it reads as calmer, plainer language.
+  function fmtDay(s) { const d = parseTime(s); return d ? dayFmt.format(d) : ''; }
   function fmtAgo(s) {
     const d = parseTime(s);
     if (!d) return '';
@@ -97,5 +102,5 @@
       h('blockquote', { class: 'quoted' }, String(text || '')));
   }
 
-  window.dom = { h, clear, replace, get, list, fmtDate, fmtTime, fmtAgo, untrusted };
+  window.dom = { h, clear, replace, get, list, fmtDate, fmtTime, fmtDay, fmtAgo, untrusted };
 })();

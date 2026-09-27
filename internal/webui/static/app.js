@@ -9,7 +9,7 @@
 'use strict';
 
 (function () {
-  const { h, replace, get, list, fmtDate, fmtTime, fmtAgo, untrusted } = window.dom;
+  const { h, replace, get, list, fmtDate, fmtTime, fmtDay, fmtAgo, untrusted } = window.dom;
   const api = window.api;
 
   const main = document.getElementById('main');
@@ -105,6 +105,73 @@
     return badge(statusLabel(s, get(env, 'action')), 'status-' + s);
   }
 
+  // riskLabel turns a connector risk level into a plain-language phrase
+  // (docs/slices/UI.md Phase 0b: "Risk x" -> "Medium risk"), instead of
+  // echoing the raw "low"/"medium"/"high" enum value.
+  function riskLabel(r) {
+    return { low: 'Low risk', medium: 'Medium risk', high: 'High risk' }[r] || String(r || '');
+  }
+
+  // actionLabel turns a "connector.function" id into plain language
+  // (docs/slices/UI.md Phase 0b: "Prepare gmail.send_message" -> "Prepare
+  // email"). Known mail-shaped functions get a specific phrase; anything
+  // else falls back to its own function name with underscores as spaces,
+  // never the raw dotted id.
+  const ACTION_LABELS = {
+    'gmail.send_message': 'email', 'gmail.draft_message': 'email draft', 'gmail.draft_for_review': 'email draft',
+    'twinlink.send_message': 'message',
+  };
+  function actionLabel(fn) {
+    fn = String(fn || '');
+    if (ACTION_LABELS[fn]) return ACTION_LABELS[fn];
+    const tail = fn.split('.').pop() || fn;
+    return tail.replace(/_/g, ' ') || fn;
+  }
+
+  // dueBadge is a plain, date-only "Due Oct 15" chip (docs/slices/UI.md
+  // Phase 0b): no time-of-day, which reads calmer than the full timestamp
+  // fmtDate gives.
+  function dueBadge(date) {
+    const d = fmtDay(date);
+    return d ? h('span', { class: 'muted' }, 'Due ' + d) : null;
+  }
+
+  // extGlyph replaces the old raw "External content" pill with a small,
+  // titled glyph (docs/slices/UI.md Phase 0b). It never touches how the
+  // untrusted content itself is quoted/escaped elsewhere (dom.untrusted) —
+  // only this label.
+  function extGlyph() {
+    return h('span', { class: 'ext-glyph', title: 'Built from an outside email' }, '⚠');
+  }
+
+  // decisionPriorityClass mirrors internal/needsyou.DecisionPriority
+  // (U14) client-side: the Decisions view's own card list carries Severity
+  // and Deadline but not a server-computed Priority field in this phase —
+  // only needsyou.Item (Today's needs-you list) does. Keeping this in step
+  // with priority.go's rule is this function's whole job; it has no other
+  // reason to exist once Card itself carries Priority.
+  function decisionPriorityClass(sev, deadline) {
+    const days = deadlineDays(deadline);
+    if (sev >= 3 || (days !== null && days <= 3)) return 'p-urgent';
+    if (sev === 2 || (days !== null && days <= 7)) return 'p-high';
+    return 'p-normal';
+  }
+
+  function deadlineDays(deadline) {
+    if (!deadline) return null;
+    const t = Date.parse(deadline);
+    if (isNaN(t)) return null;
+    return (t - Date.now()) / 86400000;
+  }
+
+  // priorityClass reads a needs-you item's own server-computed Priority
+  // field (needsyou.Item.Priority, U14) straight through, falling back to
+  // 'p-normal' for an item from before this field existed.
+  function priorityClass(it) {
+    const p = get(it, 'Priority', 'priority');
+    return p === 'urgent' ? 'p-urgent' : p === 'high' ? 'p-high' : 'p-normal';
+  }
+
   // ---------- routing ----------
 
   function parseHash() {
@@ -185,21 +252,19 @@
     for (const it of items) {
       const kind = get(it, 'Kind', 'kind');
       const id = get(it, 'ID', 'id');
-      const sev = get(it, 'Severity', 'severity');
       const deadline = get(it, 'Deadline', 'deadline');
       const readiness = get(it, 'Readiness', 'readiness');
       ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row',
+        type: 'button', class: 'row ' + priorityClass(it),
         on: { click: () => go(kind === 'approval' ? 'approvals' : 'decisions', id) },
       },
       h('span', { class: 'row-main' },
         h('span', { class: 'row-title' }, get(it, 'Title', 'title') || id),
         h('span', { class: 'row-meta' },
           badge(kind === 'approval' ? 'Approval' : 'Decision', kind),
-          sev ? badge('Severity ' + sev, sev >= 3 ? 'hot' : '') : null,
-          readiness ? badge(readinessLabel(readiness), 'ready-' + readiness) : null,
-          get(it, 'Untrusted', 'untrusted') ? badge('External content', 'warn') : null,
-          deadline ? h('span', { class: 'muted' }, 'Due ' + fmtDate(deadline)) : null,
+          readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, readinessLabel(readiness)) : null,
+          get(it, 'Untrusted', 'untrusted') ? extGlyph() : null,
+          dueBadge(deadline),
           kind === 'approval' ? h('span', { class: 'muted' }, 'Waiting ' + fmtAgo(get(it, 'CreatedAt', 'created_at')).replace(' ago', '')) : null)))));
     }
     needs.appendChild(ul);
@@ -220,8 +285,11 @@
     replace(c, header('Today', day), h('div', { class: 'stack' }, needs, sched));
   }
 
+  // readinessLabel is only ever called for a non-ready state (Today and the
+  // decision card both check readiness !== 'ready' first): "ready" itself
+  // is shown by omission, not a badge (docs/slices/UI.md Phase 0b).
   function readinessLabel(r) {
-    return { ready: 'Ready', missing_info: 'Missing info', blocked: 'Blocked' }[r] || String(r);
+    return { missing_info: 'Missing info', blocked: 'Blocked' }[r] || String(r);
   }
 
   // ---------- payload forms (staging and editing) ----------
@@ -365,15 +433,14 @@
     const awaiting = stagedID && stagedStatus === 'pending';
     const status = h('div', { class: 'card-status' });
 
-    const el = h('article', { class: 'card' },
+    const el = h('article', { class: 'card ' + decisionPriorityClass(sev, deadline) },
       h('header', { class: 'card-head' },
         h('h2', null, get(card, 'Lead', 'lead') || get(card, 'Question', 'question') || id),
         h('div', { class: 'row-meta' },
           awaiting ? badge('Staged, awaiting your yes', 'status-pending') : null,
-          sev ? badge('Severity ' + sev, sev >= 3 ? 'hot' : '') : null,
-          readiness ? badge(readinessLabel(readiness), 'ready-' + readiness) : null,
-          isUntrusted ? badge('External content', 'warn') : null,
-          deadline ? h('span', { class: 'muted' }, 'Due ' + fmtDate(deadline)) : null)));
+          readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, readinessLabel(readiness)) : null,
+          isUntrusted ? extGlyph() : null,
+          dueBadge(deadline))));
 
     const question = get(card, 'Question', 'question');
     if (question) el.appendChild(h('p', { class: 'question' }, question));
@@ -418,11 +485,11 @@
       for (const a of list(get(card, 'StagedActions', 'staged_actions'))) {
         const fn = get(a, 'Function', 'function') || '';
         if (get(a, 'Actionable', 'actionable')) {
-          actionRow.appendChild(button('Prepare ' + fn, () => {
+          actionRow.appendChild(button('Prepare ' + actionLabel(fn), () => {
             replace(stageArea, stageForm(id, a, status, gen));
           }, 'primary'));
         } else {
-          actionRow.appendChild(h('span', { class: 'muted not-granted', title: 'The manifest does not grant this at level A yet' }, fn + ' (not granted)'));
+          actionRow.appendChild(h('span', { class: 'muted not-granted', title: 'The manifest does not grant this at level A yet' }, actionLabel(fn) + ' (not granted)'));
         }
       }
     }
@@ -505,7 +572,7 @@
 
   function stageForm(cardId, action, status, gen) {
     const fn = get(action, 'Function', 'function') || '';
-    const form = h('div', { class: 'form' }, h('h3', null, 'Prepare ' + fn));
+    const form = h('div', { class: 'form' }, h('h3', null, 'Prepare ' + actionLabel(fn)));
     const read = payloadInputs(form, payloadFields(action));
     const submit = button('Stage for approval', async () => {
       let payload;
@@ -561,7 +628,7 @@
       h('span', { class: 'row-sub' }, get(e, 'summary') || ''),
       h('span', { class: 'row-meta' },
         statusBadge(e),
-        get(e, 'risk') ? badge('Risk ' + get(e, 'risk'), 'risk-' + get(e, 'risk')) : null,
+        get(e, 'risk') ? badge(riskLabel(get(e, 'risk')), 'risk-' + get(e, 'risk')) : null,
         h('span', { class: 'muted' }, fmtAgo(get(e, 'created_at')))))));
   }
 
@@ -683,8 +750,7 @@
           h('h2', null, action || id),
           h('div', { class: 'row-meta' },
             statusBadge(env),
-            get(env, 'risk') ? badge('Risk ' + get(env, 'risk'), 'risk-' + get(env, 'risk')) : null,
-            get(env, 'origin') ? badge('Origin ' + get(env, 'origin')) : null,
+            get(env, 'risk') ? badge(riskLabel(get(env, 'risk')), 'risk-' + get(env, 'risk')) : null,
             h('span', { class: 'muted' }, 'Created ' + fmtDate(get(env, 'created_at'))),
             pending && expires ? h('span', { class: 'muted' }, 'Expires ' + fmtAgo(expires)) : null)),
         h('section', { class: 'card-sec' },

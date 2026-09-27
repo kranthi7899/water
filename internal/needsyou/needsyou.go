@@ -34,6 +34,10 @@ type Item struct {
 	Readiness string
 	Untrusted bool
 	CreatedAt time.Time
+	// Priority is U14's plain-language urgency bucket ("urgent"|"high"|
+	// "normal"), computed once here — see priority.go — so native
+	// notifications and the web UI's chips share one server-computed value.
+	Priority Priority
 
 	// sourceItemIDs is a decision card's SourceItemIDs, kept (unexported,
 	// so never serialized into Today's JSON) for Tick's involves links.
@@ -109,7 +113,7 @@ func Compute(ctx context.Context, src DecisionSource, q *approvals.Queue, st *st
 		out = append(out, itemFromCard(c, now))
 	}
 	for _, e := range envelopes {
-		out = append(out, itemFromEnvelope(e))
+		out = append(out, itemFromEnvelope(e, now))
 	}
 	return out, nil
 }
@@ -132,20 +136,26 @@ func itemFromCard(c *decisions.Card, now time.Time) Item {
 		Readiness: string(c.Readiness),
 		Untrusted: c.Untrusted,
 		CreatedAt: now,
+		Priority:  DecisionPriority(c.Severity, c.Deadline, now),
 
 		sourceItemIDs: append([]string(nil), c.SourceItemIDs...),
 	}
 }
 
 // itemFromEnvelope maps a pending approval to an Item. An envelope has no
-// severity or readiness concept, so those are left at their zero values;
-// Title is the action id (Envelope has no separate human-readable name).
-func itemFromEnvelope(e approvals.Envelope) Item {
+// severity, readiness or deadline concept, so those are left at their zero
+// values; Title is the action id (Envelope has no separate human-readable
+// name). Priority follows U14's approval sub-rule (ApprovalPriority): risk
+// high or a money-shaped payload is High; Envelope carries no deadline
+// today, so the "deadline <= 3 days -> Urgent" half of the rule never fires
+// here yet (there is nothing to read it from).
+func itemFromEnvelope(e approvals.Envelope, now time.Time) Item {
 	return Item{
 		Kind:      KindApproval,
 		ID:        e.ID,
 		Title:     e.Action,
 		CreatedAt: e.CreatedAt,
+		Priority:  ApprovalPriority(e.Risk == "high", PayloadLooksLikeMoney(e.Payload), nil, now),
 	}
 }
 

@@ -232,6 +232,25 @@ func TestCSPIsStrict(t *testing.T) {
 	}
 }
 
+// TestNoRawPills is docs/slices/UI.md Phase 0b's "no raw pills" acceptance
+// item: app.js must no longer contain the literal old pill strings it used
+// to render a raw "Severity N" badge, an "External content" badge, a
+// readiness badge shown even when ready, or a raw "Origin p0" label. Phase
+// 0b replaced these with plain-language text, a titled glyph, and a
+// priority-based row/card border class instead.
+func TestNoRawPills(t *testing.T) {
+	b, err := ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, pill := range []string{"'Severity '", "'External content'", "ready: 'Ready'", "'Origin '"} {
+		if strings.Contains(src, pill) {
+			t.Errorf("app.js still contains the raw pill %s", pill)
+		}
+	}
+}
+
 // TestIndexMetaCSPMatchesTheHeader keeps index.html's <meta> copy of the
 // policy in step with the header.
 func TestIndexMetaCSPMatchesTheHeader(t *testing.T) {

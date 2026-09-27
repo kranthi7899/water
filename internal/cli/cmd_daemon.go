@@ -329,7 +329,7 @@ func (a *App) runDaemon(ctx context.Context) error {
 	// process's own gate/store/backend; shared between the daemon's
 	// /v1/decisions endpoint and the morning brief's open-cards signal so
 	// both see the same in-memory classification cache.
-	trigger := buildDecisionsTrigger(deps, sel.Backend, cfg.Decider.Provider, cfg.Decisions.CardTTL())
+	trigger := buildDecisionsTrigger(deps, sel.Backend, cfg.Decider.Provider, cfg.Decisions.CardTTL(), cfg.Agent.MailAddress, cfg.Agent.ForwardTo)
 
 	// needsYouSvc computes docs/slices/V.md §5's shared "needs you"
 	// threshold (Slice V-3/V-4): decisions ranked/filtered by

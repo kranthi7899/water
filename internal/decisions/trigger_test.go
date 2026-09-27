@@ -162,3 +162,97 @@ func TestStubTypeMatchesAndBuildsSparseCard(t *testing.T) {
 		t.Fatal("a sparse card must say what's missing, not stay silent")
 	}
 }
+
+// TestTriggerNeverClassifiesANoiseMessage is docs/slices/UI.md Phase 0's
+// mailnoise/decisions test: a message internal/mailnoise.Classify marks
+// noise makes zero classifier calls, even when a stale needs_decision=1 row
+// already exists for it in decision_classifications — because
+// CandidateWith's noise check runs before the candidate predicate ever lets
+// Triage look at either cache (see attention.go's CandidateWith doc).
+func TestTriggerNeverClassifiesANoiseMessage(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	// Bulk-sender-shaped, with a claim/confirm phrase, from a domain never
+	// written to: internal/mailnoise.Classify marks this "noise". It still
+	// reads as NeedsAttention (a "?" and "can you" style phrase), so without
+	// the noise filter it would be a candidate.
+	noisy := attentionMsg("noisy1", "updates@bulk-mail.example", "Is this your paper?",
+		"Can you confirm your authorship? Please claim your profile.")
+	if err := st.Upsert(ctx, noisy); err != nil {
+		t.Fatal(err)
+	}
+	// A stale cached verdict from before this message was ever filtered as
+	// noise (or from before it accrued its bulk signals): it must never be
+	// consulted, because the candidate check now excludes the message
+	// entirely, before Triage would ever reach the cache.
+	if err := st.SetDecisionClassification(ctx, store.DecisionClassification{
+		Source: "gmail", SourceID: "noisy1", NeedsDecision: true, TypeID: "generic", ClassifiedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := registry(t, map[string]string{"budget.yaml": budgetYAML})
+	var calls atomic.Int64
+	mc := modelClassifier(r, `{"needs_decision": true, "type_id": "budget", "confidence": 0.9}`, &calls)
+	g := &fakeGate{answers: map[string]func(gate.Call) (gate.Result, error){"gmail.list_messages": none}}
+	build := &Builder{Registry: r, Gate: g}
+
+	tr, err := NewTriager(&StoreCache{Store: st, Inner: mc}, CandidateWith(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards, err := (&Trigger{Store: st, Triager: tr, Builder: build}).Run(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 0 {
+		t.Fatalf("a noise message must never build a card: %+v", cards)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("a noise message must make zero classifier calls, got %d", calls.Load())
+	}
+}
+
+// TestTriggerExcludesMessagesSentBeforeTheWindow is the window-bug fix test:
+// a message with an old SentAt but a fresh CreatedAt (as a backfill or a
+// model search would produce) must not count as a fresh candidate just
+// because it was recently ingested.
+func TestTriggerExcludesMessagesSentBeforeTheWindow(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	old := attentionMsg("old1", "dana@x.com", "Budget approval?", "Can you approve this by Friday?")
+	old.CreatedAt = now.Add(-time.Minute)      // ingested just now (inside the window)
+	old.SentAt = now.Add(-30 * 24 * time.Hour) // but actually sent long before the window
+	if err := st.Upsert(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := attentionMsg("fresh1", "dana@x.com", "Budget approval, take two?", "Can you approve this by Friday?")
+	fresh.CreatedAt = now.Add(-time.Minute)
+	fresh.SentAt = now.Add(-time.Hour)
+	if err := st.Upsert(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	r := registry(t, map[string]string{"budget.yaml": budgetYAML})
+	var calls atomic.Int64
+	mc := modelClassifier(r, `{"needs_decision": true, "type_id": "budget", "confidence": 0.9}`, &calls)
+	g := &fakeGate{answers: map[string]func(gate.Call) (gate.Result, error){"gmail.list_messages": none}}
+	build := &Builder{Registry: r, Gate: g}
+	tr, err := NewTriager(&StoreCache{Store: st, Inner: mc}, Candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cards, err := (&Trigger{Store: st, Triager: tr, Builder: build, Window: 24 * time.Hour}).Run(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cards) != 1 || cards[0].SourceItemIDs[0] != "gmail:fresh1" {
+		t.Fatalf("expected only the freshly-sent message to build a card, got %+v", cards)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("classified %d time(s), want 1 (the old-SentAt message must be excluded before classification)", calls.Load())
+	}
+}

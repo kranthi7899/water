@@ -181,6 +181,40 @@ func TestBriefIgnoresOldMailIngestedToday(t *testing.T) {
 	}
 }
 
+// TestBriefNoLongerCitesANoiseMessage is docs/slices/UI.md Phase 0's
+// runtime/mailnoise test: a message internal/mailnoise.Classify marks noise
+// (a bulk-sender-shaped, claim-pattern message) is no longer cited as
+// needing attention, even though its wording alone (a "?" and "can you")
+// would otherwise flag it.
+func TestBriefNoLongerCitesANoiseMessage(t *testing.T) {
+	env, ctx := testEnv(t)
+	noisy := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "noisy", External: true, CreatedAt: env.now()},
+		From:    "updates@bulk-mail.example",
+		Subject: "Is this your paper?",
+		Body:    "Can you confirm your authorship? Please claim your profile.",
+		SentAt:  env.now().Add(-time.Hour),
+	}
+	fresh := &store.Message{
+		Meta:    store.Meta{Source: "gmail", SourceID: "fresh2", External: true, CreatedAt: env.now()},
+		From:    "lee@acme.com",
+		Subject: "urgent: sign today",
+		SentAt:  env.now().Add(-time.Hour),
+	}
+	for _, m := range []*store.Message{noisy, fresh} {
+		if err := env.Store.Upsert(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sig, _, err := computeBriefSignals(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sig.NeedsAttention) != 1 || sig.NeedsAttention[0].SourceID != "fresh2" {
+		t.Fatalf("NeedsAttention = %+v, want only the non-noise message", sig.NeedsAttention)
+	}
+}
+
 // TestBriefSignalsRankOpenCardsAndOmitTheSectionWhenEmpty covers both the
 // morning brief's new signal (task 3) and its explicit "absent, not an
 // empty section" rule: no Env.Decisions at all renders no cards section,

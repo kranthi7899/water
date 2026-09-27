@@ -3,6 +3,7 @@ package decisions
 import (
 	"strings"
 
+	"water/internal/mailnoise"
 	"water/internal/store"
 )
 
@@ -18,7 +19,8 @@ var attentionMarkers = []string{"?", "asap", "urgent", "deadline", "by eod", "by
 // not from a bulk/no-reply-looking sender, and its subject or body reads
 // like it wants a reply (a question mark or one of a small set of
 // urgency/deadline phrases). It is the candidate source for classification:
-// Candidate below is what Triage's candidate predicate actually uses.
+// Candidate/CandidateWith below is what Triage's candidate predicate
+// actually uses.
 func NeedsAttention(m *store.Message) bool {
 	if m == nil {
 		return false
@@ -38,10 +40,48 @@ func NeedsAttention(m *store.Message) bool {
 	return false
 }
 
-// Candidate adapts NeedsAttention to the func(store.Record) bool shape
-// NewTriager and Trigger require. Only messages are ever candidates, the
-// same scope brief.go's own heuristic has today.
+// signalsFromMessage builds mailnoise's input from a store.Message's own
+// bulk-signal fields (migration 0016). mailnoise stays a dependency-free
+// leaf (docs/slices/UI.md Phase 0, U21): it never imports internal/store,
+// so this package builds the Signals value itself.
+func signalsFromMessage(m *store.Message) mailnoise.Signals {
+	return mailnoise.Signals{
+		Labels:          m.Labels,
+		ListUnsubscribe: m.ListUnsubscribe,
+		ListID:          m.ListID,
+		Precedence:      m.Precedence,
+		AutoSubmitted:   m.AutoSubmitted,
+	}
+}
+
+// CandidateWith returns a candidate predicate like Candidate, additionally
+// excluding a message internal/mailnoise.Classify marks noise, given
+// wroteTo (typically internal/store.SentToDomain bound to the CEO's own
+// addresses — see internal/cli/twin.go's buildDecisionsTrigger).
+//
+// Order matters here: NewTriager's Triager.Triage checks the candidate
+// predicate FIRST, before it ever touches its own in-memory cache or falls
+// through to the classifier (StoreCache, which reads
+// decision_classifications) — see classify.go's Triage and trigger.go's
+// package doc. So a message this predicate excludes is never looked up in
+// either cache: a decision_classifications row persisted before this filter
+// existed (or before a message accrued its bulk signals) simply stops
+// mattering, rather than needing to be invalidated.
+func CandidateWith(wroteTo func(domain string) bool) func(store.Record) bool {
+	return func(r store.Record) bool {
+		m, ok := r.(*store.Message)
+		if !ok || !NeedsAttention(m) {
+			return false
+		}
+		v := mailnoise.Classify(m.From, m.Subject, m.Body, signalsFromMessage(m), wroteTo)
+		return v.Class != mailnoise.ClassNoise
+	}
+}
+
+// Candidate is CandidateWith(nil): the CEO's own addresses are unknown, so
+// wroteTo is conservatively always false. Kept for callers with no wroteTo
+// source wired; production wiring (buildDecisionsTrigger) uses CandidateWith
+// directly so a domain the CEO has actually written to is never misclassified.
 func Candidate(r store.Record) bool {
-	m, ok := r.(*store.Message)
-	return ok && NeedsAttention(m)
+	return CandidateWith(nil)(r)
 }

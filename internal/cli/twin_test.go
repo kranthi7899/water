@@ -256,6 +256,107 @@ func TestBuildCEORegistryPicksRealOrFakeGitHubLinearHubSpot(t *testing.T) {
 	}
 }
 
+// TestBuildDecisionsTriggerWroteToExemptsAKnownDomain is docs/slices/UI.md
+// Phase 0's end-to-end wroteTo wiring test: buildDecisionsTrigger's
+// mailAddress/forwardTo parameters back internal/mailnoise's wroteTo signal
+// through store.SentToDomain, so a bulk-sender-shaped, claim-pattern message
+// from a domain the CEO has actually sent mail to is still triaged normally,
+// while the exact same message is filtered as noise (never even reaching
+// the classifier) when no mail address is configured.
+func TestBuildDecisionsTriggerWroteToExemptsAKnownDomain(t *testing.T) {
+	const mailAddress = "water.twin@gmail.com"
+
+	newDeps := func(t *testing.T) *twinDeps {
+		home := t.TempDir()
+		t.Setenv("WATER_HOME", home)
+		deps, err := buildTwinDepsFS(water.TwinsFS(), demoTwinID, "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(deps.Close)
+		return deps
+	}
+	seed := func(t *testing.T, deps *twinDeps) {
+		t.Helper()
+		// A message the agent sent, establishing a real relationship with
+		// vendor-mail.example.
+		if err := deps.store.Upsert(context.Background(), &store.Message{
+			Meta: store.Meta{Source: "gmail", SourceID: "sent-1", External: true},
+			From: mailAddress, To: []string{"billing@vendor-mail.example"},
+			Subject: "Re: invoice", Body: "Thanks, paid.",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Bulk-sender-shaped (domain segment "mail") and claim-pattern
+		// ("is this your", "confirm your"), which would be noise from an
+		// unfamiliar domain, but this one is vendor-mail.example.
+		if err := deps.store.Upsert(context.Background(), &store.Message{
+			Meta:    store.Meta{Source: "gmail", SourceID: "candidate-1", External: true},
+			From:    "billing@vendor-mail.example",
+			Subject: "Is this your account?",
+			Body:    "Can you confirm your billing details on file?",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	be := func() *backend.Fake {
+		b := backend.NewFake("test")
+		b.Reply = func(req backend.Request) string {
+			return `{"needs_decision": true, "type_id": "investor_request", "confidence": 0.9}`
+		}
+		return b
+	}
+
+	t.Run("wired", func(t *testing.T) {
+		deps := newDeps(t)
+		seed(t, deps)
+		b := be()
+		trig := buildDecisionsTrigger(deps, b, "none", 0, mailAddress, "")
+		if trig == nil {
+			t.Fatal("buildDecisionsTrigger returned nil")
+		}
+		cards, err := trig.Run(context.Background(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, c := range cards {
+			for _, id := range c.SourceItemIDs {
+				if id == "gmail:candidate-1" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("candidate-1 should still be triaged normally once the CEO has written to its domain; cards=%+v", cards)
+		}
+	})
+
+	t.Run("unwired", func(t *testing.T) {
+		deps := newDeps(t)
+		seed(t, deps)
+		b := be()
+		// No mail address configured: wroteTo is conservatively always
+		// false, so candidate-1 is classified noise and excluded before the
+		// classifier ever runs.
+		trig := buildDecisionsTrigger(deps, b, "none", 0, "", "")
+		if trig == nil {
+			t.Fatal("buildDecisionsTrigger returned nil")
+		}
+		cards, err := trig.Run(context.Background(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range cards {
+			for _, id := range c.SourceItemIDs {
+				if id == "gmail:candidate-1" {
+					t.Fatalf("candidate-1 should be filtered as noise with no wroteTo source wired; cards=%+v", cards)
+				}
+			}
+		}
+	})
+}
+
 // TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier is
 // R-24's regression guard: buildDecisionsTrigger wraps its ModelClassifier
 // with decider.Wrap(decider.New(deciderProvider), classifier, reg) before
@@ -290,7 +391,7 @@ func TestBuildDecisionsTriggerWithNullDeciderMatchesUnwrappedClassifier(t *testi
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be, "none", 0)
+	trig := buildDecisionsTrigger(deps, be, "none", 0, "", "")
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
 	}
@@ -349,7 +450,7 @@ func TestBuildDecisionsTriggerSourcesProviderFromResolvedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be, resolved.Decider.Provider, resolved.Decisions.CardTTL())
+	trig := buildDecisionsTrigger(deps, be, resolved.Decider.Provider, resolved.Decisions.CardTTL(), "", "")
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
 	}
@@ -397,7 +498,7 @@ func TestBuildDecisionsTriggerFallsBackToNullOnUnsupportedProvider(t *testing.T)
 		t.Fatal(err)
 	}
 
-	trig := buildDecisionsTrigger(deps, be, "bogus-provider", 0)
+	trig := buildDecisionsTrigger(deps, be, "bogus-provider", 0, "", "")
 	if trig == nil {
 		t.Fatal("buildDecisionsTrigger returned nil")
 	}

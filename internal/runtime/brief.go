@@ -11,6 +11,7 @@ import (
 	"water/internal/agentmail"
 	"water/internal/backend"
 	"water/internal/decisions"
+	"water/internal/mailnoise"
 	"water/internal/store"
 	"water/internal/twins"
 )
@@ -40,12 +41,33 @@ var attentionMarkers = []string{"?", "asap", "urgent", "deadline", "by eod", "by
 // It is deliberately conservative and over-simple — a real classifier is not
 // worth it for a brief whose only job is to point at a handful of messages,
 // not to be exhaustive.
+//
+// It also consults internal/mailnoise.Classify (docs/slices/UI.md Phase 0,
+// 0a) for the same bulk-mail/noise signal internal/decisions'
+// CandidateWith uses, so a message with a List-Unsubscribe/List-Id header, a
+// bulk category label, or a claim-pattern-from-an-unfamiliar-domain shape is
+// never cited in the brief either. Unlike CandidateWith, this always passes
+// a nil wroteTo (conservatively "never written to"): Env carries no CEO
+// mail-address config to build a real internal/store.SentToDomain closure
+// from, and this heuristic was already documented above as deliberately
+// conservative and over-simple, so the same direction of error here is
+// consistent, not a regression. Wiring a real wroteTo through runtime.Env
+// (and from there through gateway.Config/cmd_daemon.go) is future work if
+// the brief's noise filtering ever needs the "domain I've actually written
+// to" exception CandidateWith gets.
 func needsAttention(m store.Message) bool {
 	from := strings.ToLower(m.From)
 	for _, marker := range bulkSenderMarkers {
 		if strings.Contains(from, marker) {
 			return false
 		}
+	}
+	sig := mailnoise.Signals{
+		Labels: m.Labels, ListUnsubscribe: m.ListUnsubscribe, ListID: m.ListID,
+		Precedence: m.Precedence, AutoSubmitted: m.AutoSubmitted,
+	}
+	if v := mailnoise.Classify(m.From, m.Subject, m.Body, sig, nil); v.Class == mailnoise.ClassNoise {
+		return false
 	}
 	text := strings.ToLower(m.Subject + " " + m.Body)
 	for _, marker := range attentionMarkers {
