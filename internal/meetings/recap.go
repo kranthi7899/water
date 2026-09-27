@@ -2,6 +2,7 @@ package meetings
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -32,9 +33,9 @@ const recapSystemPrompt = "You are writing a private after-meeting recap for the
 // transcript segment — never a paraphrase — so every item traces back to
 // something actually said.
 type RecapItem struct {
-	Text    string
-	At      time.Time
-	Channel Channel
+	Text    string    `json:"text"`
+	At      time.Time `json:"at"`
+	Channel Channel   `json:"channel"`
 }
 
 // ActionItem is a candidate action item: level D, twins.D's own meaning —
@@ -44,18 +45,23 @@ type RecapItem struct {
 // decision-card actions.
 type ActionItem struct {
 	RecapItem
-	Owner string // "" when the transcript doesn't name one
-	Level twins.Level
+	Owner string      `json:"owner,omitempty"` // "" when the transcript doesn't name one
+	Level twins.Level `json:"level"`
 }
 
 // RecapSignals is everything the recap's phrasing model call is allowed to
 // talk about, extracted from the transcript by plain code — the same
 // "code computes signals, model only phrases" split brief.go established.
+// The json tags are this struct's persisted shape: migration 0022 stores
+// exactly json.Marshal(RecapSignals) in meeting_sessions.recap_signals, and
+// docs/slices/UI.md Phase 3d's recap view (internal/gateway's meetingView)
+// decodes that column back into this type to render its four sections,
+// rather than re-deriving them from recap_text prose.
 type RecapSignals struct {
-	Decisions     []RecapItem
-	ActionItems   []ActionItem
-	OpenQuestions []RecapItem
-	FYI           []RecapItem
+	Decisions     []RecapItem  `json:"decisions"`
+	ActionItems   []ActionItem `json:"action_items"`
+	OpenQuestions []RecapItem  `json:"open_questions"`
+	FYI           []RecapItem  `json:"fyi"`
 }
 
 // ProjectGuess is the recap's project/decision-type match. It is always
@@ -192,6 +198,42 @@ func (g ProjectGuess) String() string {
 	return fmt.Sprintf("Project match: %s (a guess, confidence %.2f, unconfirmed)", g.TypeID, g.Confidence)
 }
 
+// ConfidenceBucket renders a 0..1 confidence as one of the three words
+// internal/gateway's own risk table already uses for a code-computed
+// three-level judgment (approval_extras.go's riskPhrases: low/medium/high)
+// — reused here rather than inventing a second confidence vocabulary.
+// Thresholds mirror decisions.DefaultFloor (0.5, the floor below which a
+// classifier's verdict is discarded rather than trusted at all) for the
+// low/medium split, and split medium/high at 0.75.
+func ConfidenceBucket(confidence float64) string {
+	switch {
+	case confidence >= 0.75:
+		return "high"
+	case confidence >= decisions.DefaultFloor:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// Label is the guess as docs/slices/UI.md Phase 3d's recap view shows it:
+// "likely: <name> (<bucket>)" when available, "Project match: unavailable"
+// otherwise (String's own wording, kept identical for the unavailable
+// case). name is the project's resolved display name (or its bare id when
+// the gateway couldn't resolve one); ProjectGuess itself only ever carries
+// an id, never a name, so the caller supplies it. This is always a guess
+// shown to the CEO, never something that files a for_project link or any
+// other anchor on its own.
+func (g ProjectGuess) Label(name string) string {
+	if !g.Available {
+		return "Project match: unavailable"
+	}
+	if name == "" {
+		name = g.TypeID
+	}
+	return fmt.Sprintf("likely: %s (%s)", name, ConfidenceBucket(g.Confidence))
+}
+
 // transcriptText renders segs (oldest first, as Segments/SegmentsSince
 // return them) as one plain-text transcript: "[channel HH:MM:SS] text" per
 // line, the same form the whole session's TranscriptRef points at.
@@ -310,6 +352,25 @@ func (m *Manager) Recap(ctx context.Context, sessionID string, classifier decisi
 	}
 	if err := m.st.Upsert(ctx, &meeting); err != nil {
 		return RecapResult{}, fmt.Errorf("meetings: recap: storing summary: %w", err)
+	}
+	// Migration 0022 (docs/slices/UI.md Phase 3d): the recap's structured
+	// signal block and project guess persist onto meeting_sessions itself,
+	// alongside (not instead of) the phrased summary above, so the recap
+	// view can render Decisions/Action items/Open questions/FYI as distinct
+	// sections and show the guess without re-parsing recap_text prose. This
+	// only runs once the phrasing call above succeeded, so a failed recap
+	// never leaves a half-written row.
+	sigJSON, err := json.Marshal(sig)
+	if err != nil {
+		return RecapResult{}, fmt.Errorf("meetings: recap: marshaling signals: %w", err)
+	}
+	var guessConfidence *float64
+	if guess.Available {
+		c := guess.Confidence
+		guessConfidence = &c
+	}
+	if err := m.st.SetMeetingRecapSignals(ctx, sess.ID, string(sigJSON), guess.TypeID, guessConfidence); err != nil {
+		return RecapResult{}, fmt.Errorf("meetings: recap: storing signals: %w", err)
 	}
 	return RecapResult{Text: text, Signals: sig, ProjectGuess: guess}, nil
 }

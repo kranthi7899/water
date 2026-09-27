@@ -6,11 +6,43 @@
   const { h, replace, get, list, fmtDate, untrusted } = window.dom;
   const api = window.api;
 
+  // meetingsTab remembers which list ("recent" or "upcoming") is showing,
+  // across re-renders of this view within one page load.
+  let meetingsTab = 'recent';
+
   async function viewMeetings(c, param, gen) {
     const S = window.appShared;
     const listPane = h('div', { class: 'list-pane' });
     const detail = h('div', { class: 'detail-pane' });
-    replace(c, S.header('Meetings', 'Recaps are phrased from meeting speech, so they are shown as quoted text.'), h('div', { class: 'split' }, listPane, detail));
+    const tabs = h('div', { class: 'head-actions' },
+      S.button('Recent', () => { meetingsTab = 'recent'; viewMeetings(c, param, gen); }, meetingsTab === 'recent' ? 'primary' : 'secondary'),
+      S.button('Upcoming', () => { meetingsTab = 'upcoming'; viewMeetings(c, param, gen); }, meetingsTab === 'upcoming' ? 'primary' : 'secondary'));
+    replace(c, S.header('Meetings', 'Recaps are phrased from meeting speech, so they are shown as quoted text.', tabs), h('div', { class: 'split' }, listPane, detail));
+
+    if (meetingsTab === 'upcoming') {
+      let events;
+      try {
+        events = list(await api.upcomingMeetings(20));
+      } catch (err) {
+        if (S.current(gen)) replace(listPane, S.errorBox('Could not load upcoming meetings', err));
+        return;
+      }
+      if (!S.current(gen)) return;
+      replace(detail, S.empty('Upcoming meetings come from your calendar; nothing to recap yet.'));
+      if (!events.length) listPane.appendChild(S.empty('Nothing upcoming.'));
+      const ul = h('ul', { class: 'rows' });
+      for (const e of events) {
+        ul.appendChild(h('li', null, h('span', { class: 'row' },
+          h('span', { class: 'row-main' },
+            h('span', { class: 'row-title' }, get(e, 'title') || 'Meeting'),
+            h('span', { class: 'row-meta' },
+              get(e, 'location') ? h('span', { class: 'muted' }, get(e, 'location')) : null,
+              h('span', { class: 'muted' }, fmtDate(get(e, 'start_at'))))))));
+      }
+      listPane.appendChild(ul);
+      return;
+    }
+
     const [ms] = await Promise.all([
       api.meetings(30),
       param ? renderMeetingDetail(detail, param, gen) : Promise.resolve(replace(detail, S.empty('Select a meeting to see its recap.'))),
@@ -62,7 +94,9 @@
     let body;
     switch (recap) {
       case 'ready':
-        body = untrusted('Recap (quoted, untrusted: phrased from what was said in the meeting; shown as plain text)', get(m, 'recap_text') || '');
+        body = h('div', null,
+          untrusted('Recap (quoted, untrusted: phrased from what was said in the meeting; shown as plain text)', get(m, 'recap_text') || ''),
+          recapSignalsSections(m));
         break;
       case 'running':
         body = h('p', { class: 'muted' }, 'The recap is being written…');
@@ -88,6 +122,48 @@
           ended ? h('span', { class: 'muted' }, duration(get(m, 'started_at'), ended)) : null)),
       body,
       h('div', { class: 'actions' }, S.button('Open a thread about this', () => S.openThreadAbout('meeting', id)))));
+  }
+
+  // recapSignalsSections renders the recap's four sections (docs/slices/
+  // UI.md Phase 3d: Decisions made, Action items, Open questions, FYI) from
+  // recap_signals -- structured JSON the daemon extracted from the
+  // transcript by code, not parsed out of recap_text prose here -- plus the
+  // project guess's own label, always shown as a guess (Label already
+  // reads "likely: <name> (<bucket>)" or "Project match: unavailable";
+  // this view never restates or recomputes it). null when the session
+  // predates migration 0022 or its recap produced no signals.
+  function recapSignalsSections(m) {
+    const sig = get(m, 'recap_signals');
+    if (!sig) return null;
+    const guess = get(m, 'project_guess');
+    return h('div', { class: 'recap-signals' },
+      guess && get(guess, 'available') ? h('p', { class: 'muted' }, 'Project: ' + get(guess, 'label')) : null,
+      recapSection('Decisions made', list(get(sig, 'decisions'))),
+      recapActionItemsSection(list(get(sig, 'action_items'))),
+      recapSection('Open questions', list(get(sig, 'open_questions'))),
+      recapSection('FYI', list(get(sig, 'fyi'))));
+  }
+
+  function recapSection(title, items) {
+    return h('div', { class: 'recap-section' },
+      h('h3', null, title),
+      items.length ? h('ul', { class: 'plain' }, items.map((it) => h('li', null, get(it, 'text')))) : h('p', { class: 'muted' }, 'None.'));
+  }
+
+  // recapActionItemsSection shows each action item's owner with an avatar
+  // only when the daemon resolved one (an exact roster name match, never a
+  // fuzzy guess, docs/slices/UI.md Phase 3d) -- a name with no match still
+  // shows as plain text, with no avatar.
+  function recapActionItemsSection(items) {
+    return h('div', { class: 'recap-section' },
+      h('h3', null, 'Action items'),
+      items.length ? h('ul', { class: 'plain' }, items.map((it) => {
+        const owner = get(it, 'owner');
+        const initials = get(it, 'owner_initials');
+        return h('li', { class: 'row-line' },
+          owner ? (initials ? h('span', { class: 'avatar', title: owner }, initials) : h('span', { class: 'muted' }, owner + ':')) : null,
+          h('span', null, get(it, 'text')));
+      })) : h('p', { class: 'muted' }, 'None.'));
   }
 
   window.views = window.views || {};

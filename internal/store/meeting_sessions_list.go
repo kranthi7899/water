@@ -11,7 +11,8 @@ import (
 // 0 means unlimited, matching ThreadMessages' and ListRoutes' convention.
 // It reads the existing meeting_sessions table only; no schema change.
 func (s *Store) ListMeetingSessions(ctx context.Context, limit int) ([]MeetingSessionRow, error) {
-	q := `SELECT id, started_at, ended_at, event_id FROM meeting_sessions ORDER BY started_at DESC, rowid DESC`
+	q := `SELECT id, started_at, ended_at, event_id, recap_signals, project_guess_id, project_guess_confidence
+		FROM meeting_sessions ORDER BY started_at DESC, rowid DESC`
 	var args []any
 	if limit > 0 {
 		q += ` LIMIT ?`
@@ -27,15 +28,22 @@ func (s *Store) ListMeetingSessions(ctx context.Context, limit int) ([]MeetingSe
 		var r MeetingSessionRow
 		var started int64
 		var ended sql.NullInt64
-		var event sql.NullString
-		if err := rows.Scan(&r.ID, &started, &ended, &event); err != nil {
+		var event, signals, guessID sql.NullString
+		var guessConf sql.NullFloat64
+		if err := rows.Scan(&r.ID, &started, &ended, &event, &signals, &guessID, &guessConf); err != nil {
 			return nil, err
 		}
 		r.StartedAt = time.Unix(0, started).UTC()
 		r.EventID = event.String
+		r.RecapSignals = signals.String
+		r.ProjectGuessID = guessID.String
 		if ended.Valid {
 			t := time.Unix(0, ended.Int64).UTC()
 			r.EndedAt = &t
+		}
+		if guessConf.Valid {
+			v := guessConf.Float64
+			r.ProjectGuessConfidence = &v
 		}
 		out = append(out, r)
 	}

@@ -106,6 +106,9 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 	allowed := []string{
 		"'/v1/today'", "'/v1/decisions'", "'/v1/decisions/'", "'/v1/approvals?status='", "'/v1/approvals/'",
 		"'/v1/threads'", "'/v1/threads/anchor'", "'/v1/threads/'", "'/v1/tasks/'", "'/v1/meetings?limit='", "'/v1/meetings/'",
+		// Phase 3d: upcoming meetings, a query-param-shaped route like the
+		// existing '/v1/meetings?limit=' entry above.
+		"'/v1/meetings?upcoming=1&limit='",
 		"'/v1/workspaces'", "'/v1/dashboards'",
 		// Phase 3c: the Drafts editor.
 		"'/v1/drafts'", "'/v1/drafts/'",

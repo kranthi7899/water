@@ -17,16 +17,25 @@ import (
 	"water/internal/recordlinks"
 	"water/internal/runtime"
 	"water/internal/store"
+	"water/internal/workspaces"
 )
 
-// Thread anchor types (docs/slices/V.md §5): the one other record a thread
-// can be about. They match the node-type strings internal/store/links.go
-// documents, so a thread's LinkAbout edge names its anchor the same way.
+// Thread anchor types (docs/slices/V.md §5, extended by docs/slices/UI.md
+// Phase 3d's project/workspace/idea). They match the node-type strings
+// internal/store/links.go documents, so a thread's LinkAbout edge names its
+// anchor the same way. There is no "free"/"unanchored" constant: an
+// unanchored thread simply has AnchorType == "" (store.Thread's zero
+// value) — "Unanchored" is anchorLabel's display word for that case, not a
+// stored type name (verified against store.CreateThread/GetOrCreateThread,
+// neither of which ever writes a literal "free").
 const (
-	anchorDecision = "decision"
-	anchorApproval = "approval"
-	anchorMessage  = "message"
-	anchorMeeting  = "meeting"
+	anchorDecision  = "decision"
+	anchorApproval  = "approval"
+	anchorMessage   = "message"
+	anchorMeeting   = "meeting"
+	anchorProject   = "project"
+	anchorWorkspace = "workspace"
+	anchorIdea      = "idea"
 )
 
 const (
@@ -56,10 +65,59 @@ type threadView struct {
 	Title           string    `json:"title"`
 	AnchorType      string    `json:"anchor_type"`
 	AnchorID        string    `json:"anchor_id"`
+	AnchorLabel     string    `json:"anchor_label"`
 	AnchorContext   string    `json:"anchor_context,omitempty"`
 	AnchorUntrusted bool      `json:"anchor_untrusted"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// anchorTypeWords is anchorLabel's one word per anchor type.
+var anchorTypeWords = map[string]string{
+	anchorDecision:  "Decision",
+	anchorApproval:  "Approval",
+	anchorMessage:   "Message",
+	anchorMeeting:   "Meeting",
+	anchorProject:   "Project",
+	anchorWorkspace: "Workspace",
+	anchorIdea:      "Idea",
+}
+
+// anchorLabel is threadView.AnchorLabel: a human-readable "<Kind>: <title>"
+// caption (docs/slices/UI.md Phase 3d), e.g. "Decision: Meridian renewal",
+// "Project: Water", built by code alone from already-known, already-stored
+// fields — never re-derived from a live lookup of the anchored record, and
+// never a model or client guess (the same "never let a model or client
+// guess this" posture needsyou.itemOrigin already uses for a comparable
+// server-built label).
+//
+// title is the thread's own Title: for a thread created through
+// handleAnchorThread with no explicit title, that IS the anchor's own
+// display title (resolveAnchor's snapshot.Title, word-joined and clipped)
+// — so in the common case this reads exactly like the anchor's own name.
+// The one edge case is a thread the CEO later renamed: anchorLabel then
+// reads "<Kind>: <the new name>" rather than the anchor's original title.
+// That is a deliberate trade, matching handleAnchorThread's own existing
+// invariant that an existing thread's anchor is never re-resolved ("the
+// snapshot is deliberately what the record was when the thread began, and
+// a decision card that has since closed must still reopen its thread") —
+// re-resolving just for the label would break that same guarantee (a
+// closed decision, or a since-renamed project, would make the label fail
+// where the thread itself still works), and it would call a Get that
+// resolveAnchor's decision case couples to side effects (linkDecision).
+// anchorType == "" (no anchor at all) is not in anchorTypeWords, so it
+// falls through to "Unanchored" — the map lookup's only miss case, since
+// anchor_type is otherwise restricted to this file's closed switch.
+func anchorLabel(anchorType, title string) string {
+	word, ok := anchorTypeWords[anchorType]
+	if !ok {
+		return "Unanchored"
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return word
+	}
+	return word + ": " + title
 }
 
 // threadMessageView is one thread message as the API returns it.
@@ -88,6 +146,7 @@ type threadAnchorResponse struct {
 func viewThread(t store.Thread, withContext bool) threadView {
 	v := threadView{
 		ID: t.ID, Title: t.Title, AnchorType: t.AnchorType, AnchorID: t.AnchorID,
+		AnchorLabel:     anchorLabel(t.AnchorType, t.Title),
 		AnchorUntrusted: t.AnchorUntrusted, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
 	}
 	if withContext {
@@ -187,7 +246,16 @@ var errAnchorNotFound = errors.New("anchored record not found")
 //     the same reason);
 //   - message: the message's External flag;
 //   - meeting: always — meeting speech is untrusted on both channels
-//     (handleMeetingSegment), and so is a recap phrased from it.
+//     (handleMeetingSegment), and so is a recap phrased from it;
+//   - project/workspace: always false — internal/roster's "projects" table
+//     and internal/workspaces' spec-loaded rows are the CEO's own
+//     configured data (roster seed files, twins/<id>/workspaces/*.yaml),
+//     never synced from an external connector, so their Meta.External is
+//     always false by construction (verified: neither internal/roster.go
+//     nor internal/workspaces.go's Sync ever sets it);
+//   - idea: always false — store.Idea has no Meta/External field at all
+//     (Phase 5c's own design: an idea is CEO-authored through a capture
+//     bar, not synced from a connector), so there is nothing to check.
 func (d *Daemon) resolveAnchor(ctx context.Context, anchorType, anchorID string) (anchorSnapshot, error) {
 	switch anchorType {
 	case anchorDecision:
@@ -275,6 +343,57 @@ func (d *Daemon) resolveAnchor(ctx context.Context, anchorType, anchorID string)
 			return anchorSnapshot{Title: "Meeting " + s.StartedAt.Local().Format("Jan 2 15:04"), Context: clipTail(b.String(), maxAnchorContext), Untrusted: true}, nil
 		}
 		return anchorSnapshot{Title: "Meeting " + s.StartedAt.Local().Format("Jan 2 15:04"), Context: b.String(), Untrusted: true}, nil
+	case anchorProject:
+		p, err := store.Get[store.Project](ctx, d.cfg.Store, "seed", anchorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return anchorSnapshot{}, errAnchorNotFound
+		}
+		if err != nil {
+			return anchorSnapshot{}, err
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Project %s: %s\n", anchorID, p.Name)
+		if p.LinearProject != "" {
+			fmt.Fprintf(&b, "Linear project: %s\n", p.LinearProject)
+		}
+		if !p.StartAt.IsZero() {
+			fmt.Fprintf(&b, "Start: %s\n", p.StartAt.UTC().Format(time.RFC3339))
+		}
+		if !p.TargetAt.IsZero() {
+			fmt.Fprintf(&b, "Target: %s\n", p.TargetAt.UTC().Format(time.RFC3339))
+		}
+		return anchorSnapshot{Title: p.Name, Context: b.String(), Untrusted: p.External}, nil
+	case anchorWorkspace:
+		wk, err := store.Get[store.Workspace](ctx, d.cfg.Store, workspaces.SpecSource, anchorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return anchorSnapshot{}, errAnchorNotFound
+		}
+		if err != nil {
+			return anchorSnapshot{}, err
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Workspace %s: %s (%s)\n", anchorID, wk.Name, wk.Template)
+		if wk.Description != "" {
+			fmt.Fprintf(&b, "%s\n", wk.Description)
+		}
+		if wk.PrimarySource != "" {
+			fmt.Fprintf(&b, "Source: %s\n", wk.PrimarySource)
+		}
+		return anchorSnapshot{Title: wk.Name, Context: b.String(), Untrusted: wk.External}, nil
+	case anchorIdea:
+		idea, err := d.cfg.Store.GetIdea(ctx, anchorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return anchorSnapshot{}, errAnchorNotFound
+		}
+		if err != nil {
+			return anchorSnapshot{}, err
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Idea %s (%s)\n", idea.Title, idea.Stage)
+		if idea.Gist != "" {
+			b.WriteString(idea.Gist + "\n")
+		}
+		return anchorSnapshot{Title: idea.Title, Context: b.String(), Untrusted: false}, nil
 	default:
 		return anchorSnapshot{}, fmt.Errorf("unknown anchor_type %q", anchorType)
 	}
@@ -282,11 +401,12 @@ func (d *Daemon) resolveAnchor(ctx context.Context, anchorType, anchorID string)
 
 // handleAnchorThread serves POST /v1/threads/anchor: get-or-create the one
 // thread about a record. Body: {"anchor_type":
-// "decision"|"approval"|"message"|"meeting", "anchor_id": "...", "title":
-// optional}. A new thread snapshots the anchored record now (anchor_context,
-// anchor_untrusted) and links to it (store.LinkAbout); an existing thread is
-// returned as it is, with its original snapshot. 404 when the anchored
-// record doesn't exist (for a decision: isn't an open card right now).
+// "decision"|"approval"|"message"|"meeting"|"project"|"workspace"|"idea",
+// "anchor_id": "...", "title": optional}. A new thread snapshots the
+// anchored record now (anchor_context, anchor_untrusted) and links to it
+// (store.LinkAbout); an existing thread is returned as it is, with its
+// original snapshot. 404 when the anchored record doesn't exist (for a
+// decision: isn't an open card right now).
 func (d *Daemon) handleAnchorThread(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AnchorType string `json:"anchor_type"`
@@ -300,9 +420,9 @@ func (d *Daemon) handleAnchorThread(w http.ResponseWriter, r *http.Request) {
 	at := strings.TrimSpace(body.AnchorType)
 	id := strings.TrimSpace(body.AnchorID)
 	switch at {
-	case anchorDecision, anchorApproval, anchorMessage, anchorMeeting:
+	case anchorDecision, anchorApproval, anchorMessage, anchorMeeting, anchorProject, anchorWorkspace, anchorIdea:
 	default:
-		http.Error(w, "anchor_type must be decision|approval|message|meeting", http.StatusBadRequest)
+		http.Error(w, "anchor_type must be decision|approval|message|meeting|project|workspace|idea", http.StatusBadRequest)
 		return
 	}
 	if id == "" || len(id) > maxAnchorID {

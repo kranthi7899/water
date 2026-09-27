@@ -18,6 +18,20 @@ type MeetingSessionRow struct {
 	StartedAt time.Time
 	EndedAt   *time.Time
 	EventID   string
+	// RecapSignals is the recap's structured signal block as JSON
+	// (meetings.RecapSignals' own json tags), written once at recap-on-stop
+	// (migration 0022, docs/slices/UI.md Phase 3d). "" before a recap
+	// finishes, or for one recapped before this migration existed.
+	RecapSignals string
+	// ProjectGuessID/ProjectGuessConfidence are the recap's project guess
+	// (migration 0022): a classifier's chosen project id (store's
+	// "projects" table, source "seed") and its confidence. ProjectGuessID
+	// is "" and ProjectGuessConfidence is nil when no classifier was wired,
+	// the transcript gave no confident match, or the recap hasn't run yet.
+	// Always rendered as a labelled guess (gateway.meetingViewOf); never
+	// filed as a for_project link or any other anchor on its own.
+	ProjectGuessID         string
+	ProjectGuessConfidence *float64
 }
 
 // MeetingSegmentRow is one transcript segment. There is no External field:
@@ -48,21 +62,55 @@ func (s *Store) InsertMeetingSession(ctx context.Context, r MeetingSessionRow) e
 func (s *Store) GetMeetingSession(ctx context.Context, id string) (MeetingSessionRow, error) {
 	var started int64
 	var ended sql.NullInt64
-	var event sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT started_at, ended_at, event_id FROM meeting_sessions WHERE id = ?`, id).
-		Scan(&started, &ended, &event)
+	var event, signals, guessID sql.NullString
+	var guessConf sql.NullFloat64
+	err := s.db.QueryRowContext(ctx, `SELECT started_at, ended_at, event_id, recap_signals, project_guess_id, project_guess_confidence
+		FROM meeting_sessions WHERE id = ?`, id).
+		Scan(&started, &ended, &event, &signals, &guessID, &guessConf)
 	if err == sql.ErrNoRows {
 		return MeetingSessionRow{}, ErrNotFound
 	}
 	if err != nil {
 		return MeetingSessionRow{}, err
 	}
-	r := MeetingSessionRow{ID: id, StartedAt: time.Unix(0, started).UTC(), EventID: event.String}
+	r := MeetingSessionRow{
+		ID: id, StartedAt: time.Unix(0, started).UTC(), EventID: event.String,
+		RecapSignals: signals.String, ProjectGuessID: guessID.String,
+	}
 	if ended.Valid {
 		t := time.Unix(0, ended.Int64).UTC()
 		r.EndedAt = &t
 	}
+	if guessConf.Valid {
+		v := guessConf.Float64
+		r.ProjectGuessConfidence = &v
+	}
 	return r, nil
+}
+
+// SetMeetingRecapSignals records id's recap signal block and project guess
+// (migration 0022, docs/slices/UI.md Phase 3d), called once when
+// recap-on-stop finishes (internal/meetings.Manager.Recap). recapSignals is
+// JSON already produced by json.Marshal(meetings.RecapSignals); this
+// function does not interpret it. projectGuessID is "" and
+// projectGuessConfidence nil when the guess is unavailable (no classifier
+// wired, or no confident match), which stores NULL rather than a fake
+// zero-confidence guess.
+func (s *Store) SetMeetingRecapSignals(ctx context.Context, id, recapSignals, projectGuessID string, projectGuessConfidence *float64) error {
+	var signals, guessID any
+	if recapSignals != "" {
+		signals = recapSignals
+	}
+	if projectGuessID != "" {
+		guessID = projectGuessID
+	}
+	var guessConf any
+	if projectGuessConfidence != nil {
+		guessConf = *projectGuessConfidence
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE meeting_sessions SET recap_signals = ?, project_guess_id = ?, project_guess_confidence = ? WHERE id = ?`,
+		signals, guessID, guessConf, id)
+	return err
 }
 
 // EndMeetingSession sets ended_at once; ended is false, with no error, when

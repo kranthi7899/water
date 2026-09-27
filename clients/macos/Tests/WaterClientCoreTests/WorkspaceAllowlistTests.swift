@@ -47,6 +47,9 @@ import Testing
             ("GET", "water://app/v1/meetings?limit=30", "/v1/meetings?limit=30"),
             ("GET", "water://app/v1/meetings", "/v1/meetings"),
             ("GET", "water://app/v1/meetings/ms_77", "/v1/meetings/ms_77"),
+            // Phase 3d: upcoming meetings, same route, a new query key.
+            ("GET", "water://app/v1/meetings?upcoming=1", "/v1/meetings?upcoming=1"),
+            ("GET", "water://app/v1/meetings?upcoming=1&limit=10", "/v1/meetings?upcoming=1&limit=10"),
             // Slice UI Phase 2.
             ("GET", "water://app/v1/workspaces", "/v1/workspaces"),
             ("GET", "water://app/v1/dashboards", "/v1/dashboards"),
@@ -240,6 +243,8 @@ import Testing
             "water://app/v1/meetings?status=all", // key valid elsewhere, not here
             "water://app/v1/meetings?limit=30;x",
             "water://app/v1/meetings?limit=30+1",
+            "water://app/v1/approvals?upcoming=1", // key valid on meetings, not here
+            "water://app/v1/meetings?upcoming=1&upcoming=1", // duplicate key
         ]
         for url in cases {
             #expect(!decide("GET", url).isAllowed, "\(url)")

@@ -2,6 +2,7 @@ package meetings
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -221,6 +222,119 @@ func TestRecapWithNoClassifierLeavesProjectGuessUnavailable(t *testing.T) {
 	}
 	if res.ProjectGuess.Available {
 		t.Fatalf("project guess = %+v, want unavailable with no classifier wired", res.ProjectGuess)
+	}
+}
+
+// TestRecapPersistsSignalsAndProjectGuessOntoMeetingSession is migration
+// 0022's own contract: recap_signals (JSON of RecapSignals) and the project
+// guess (id, confidence) land on the meeting_sessions row itself, not only
+// in the phrased store.Meeting summary, so the recap view can render the
+// four sections and the guess without re-parsing prose.
+func TestRecapPersistsSignalsAndProjectGuessOntoMeetingSession(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seg := range scriptedTranscript(time.Now()) {
+		if err := m.AddSegment(ctx, s.ID, seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fb := backend.NewFake("fake")
+	fb.Reply = func(backend.Request) string { return "Decisions: moved brokers to spot." }
+	cls := fakeClassifier{c: decisions.Classification{TypeID: "budget_request", Confidence: 0.71}}
+	res, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	row, err := st.GetMeetingSession(ctx, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.RecapSignals == "" {
+		t.Fatal("recap_signals was not persisted")
+	}
+	var sig RecapSignals
+	if err := json.Unmarshal([]byte(row.RecapSignals), &sig); err != nil {
+		t.Fatalf("recap_signals is not valid JSON: %v", err)
+	}
+	if len(sig.Decisions) != len(res.Signals.Decisions) || len(sig.ActionItems) != len(res.Signals.ActionItems) {
+		t.Fatalf("persisted signals = %+v, want to match res.Signals = %+v", sig, res.Signals)
+	}
+	if sig.ActionItems[0].Owner == "" && res.Signals.ActionItems[0].Owner != "" {
+		t.Fatalf("persisted action item lost its owner: %+v", sig.ActionItems[0])
+	}
+	if row.ProjectGuessID != "budget_request" {
+		t.Fatalf("project_guess_id = %q, want budget_request", row.ProjectGuessID)
+	}
+	if row.ProjectGuessConfidence == nil || *row.ProjectGuessConfidence != 0.71 {
+		t.Fatalf("project_guess_confidence = %v, want 0.71", row.ProjectGuessConfidence)
+	}
+}
+
+// TestRecapWithUnavailableGuessPersistsNoProjectGuess: a nil classifier (or
+// a Fallback verdict) must leave project_guess_id/confidence unset, not a
+// fake zero-confidence guess.
+func TestRecapWithUnavailableGuessPersistsNoProjectGuess(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: Mic, Text: "just a quick sync"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	if _, err := m.Recap(ctx, s.ID, nil, fb, "haiku", 0); err != nil {
+		t.Fatal(err)
+	}
+	row, err := st.GetMeetingSession(ctx, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ProjectGuessID != "" || row.ProjectGuessConfidence != nil {
+		t.Fatalf("row = %+v, want no project guess persisted", row)
+	}
+}
+
+// TestRecapProjectGuessNeverWritesAForProjectLink is the phase's central
+// safety property: a labelled project guess is shown to the CEO, and it
+// must never, by itself, create a for_project link (or any other anchor) —
+// only the CEO's own action ever does that (docs/slices/UI.md Phase 3d,
+// V's invariant 9 "never-guess links").
+func TestRecapProjectGuessNeverWritesAForProjectLink(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: System, Text: "the halcyon rollout budget is over by twenty percent"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	fb.Reply = func(backend.Request) string { return "Decisions: none." }
+	cls := fakeClassifier{c: decisions.Classification{TypeID: "halcyon-rollout", Confidence: 0.9}}
+	if _, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 0); err != nil {
+		t.Fatal(err)
+	}
+	links, err := st.LinksFrom(ctx, "meeting", s.ID, store.LinkForProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("for_project links after recap = %+v, want none: a project guess must never file a link on its own", links)
+	}
+	threads, err := st.ListThreads(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 0 {
+		t.Fatalf("threads after recap = %+v, want none: a project guess must never anchor a thread on its own", threads)
 	}
 }
 

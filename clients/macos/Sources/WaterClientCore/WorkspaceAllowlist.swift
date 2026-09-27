@@ -85,7 +85,10 @@ public enum WorkspaceAllowlist {
         route("GET", "/v1/threads/{id}"),
         route("POST", "/v1/threads/{id}/messages"),
         route("POST", "/v1/tasks/{id}/cancel"),
-        route("GET", "/v1/meetings", query: ["limit"]),
+        // Phase 3d: ?upcoming=1 switches this same route to future events
+        // from the events table instead of recent meeting_sessions rows
+        // (docs/slices/UI.md Phase 3d) -- no new route.
+        route("GET", "/v1/meetings", query: ["limit", "upcoming"]),
         route("GET", "/v1/meetings/{id}"),
         // Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
         // disclosure. Both are read-only lists with no id segment.

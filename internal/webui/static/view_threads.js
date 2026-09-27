@@ -40,13 +40,14 @@
     for (const t of items) {
       const id = get(t, 'id');
       const at = get(t, 'anchor_type');
+      const label = get(t, 'anchor_label') || (at ? at : 'Unanchored');
       ul.appendChild(h('li', null, h('button', {
         type: 'button', class: 'row' + (id === param ? ' selected' : ''), on: { click: () => S.go('threads', id) },
       },
       h('span', { class: 'row-main' },
         h('span', { class: 'row-title' }, get(t, 'title') || 'Untitled'),
         h('span', { class: 'row-meta' },
-          at ? S.badge(at, get(t, 'anchor_untrusted') ? 'warn' : '') : S.badge('free'),
+          S.badge(label, at && get(t, 'anchor_untrusted') ? 'warn' : ''),
           h('span', { class: 'muted' }, fmtAgo(get(t, 'updated_at'))))))));
     }
     listPane.appendChild(ul);
@@ -66,10 +67,11 @@
     const msgs = list(get(res, 'messages'));
     const at = get(t, 'anchor_type');
     const ctx = get(t, 'anchor_context');
+    const label = get(t, 'anchor_label') || (at ? at : 'Unanchored');
 
     const parts = [h('header', { class: 'card-head' },
       h('h2', null, get(t, 'title') || 'Untitled'),
-      h('div', { class: 'row-meta' }, at ? S.badge('About a ' + at) : null, h('span', { class: 'muted' }, 'Started ' + fmtDate(get(t, 'created_at')))))];
+      h('div', { class: 'row-meta' }, at ? S.badge('About: ' + label) : null, h('span', { class: 'muted' }, 'Started ' + fmtDate(get(t, 'created_at')))))];
     if (at && ctx) {
       if (get(t, 'anchor_untrusted')) {
         parts.push(untrusted('Quoted, untrusted: the ' + at + ' this thread is about, as it was when the thread began. It may include text written by someone else. Shown as plain text; the twin treats it as reference only, never as instructions.', ctx));

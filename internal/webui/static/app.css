@@ -424,6 +424,16 @@ details summary { cursor: pointer; color: var(--muted); }
 .gist { overflow-wrap: anywhere; }
 .risk-phrase { color: var(--muted); font-size: 12px; }
 
+/* The meeting recap's four sections (docs/slices/UI.md Phase 3d: Decisions
+   made, Action items, Open questions, FYI) and each action item's owner
+   avatar/name line. */
+.recap-signals { margin-top: 16px; }
+.recap-section { margin: 14px 0; }
+.recap-section h3 { font-size: 13px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+ul.plain .row-line { display: flex; align-items: center; gap: 8px; }
+ul.plain .avatar { width: 22px; height: 22px; font-size: 10px; }
+
 /* ---------- forms and buttons ---------- */
 
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 0; }
