@@ -99,6 +99,8 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		"'/submit'": true,
 		// Phase 5b: the People workspace's draft-creating buttons.
 		"'/drafts'": true,
+		// Phase 5c: Ideas' "Start research"/"Propose" and Research's Attach.
+		"'/research'": true, "'/propose'": true, "'/attach'": true,
 	}
 	for _, m := range regexp.MustCompile(`\+ '(/[^']*)'`).FindAllStringSubmatch(src, -1) {
 		if lit := "'" + m[1] + "'"; !suffixes[lit] {
@@ -117,6 +119,8 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		"'/v1/dashboards'", "'/v1/dashboards/'",
 		// Phase 3c: the Drafts editor.
 		"'/v1/drafts'", "'/v1/drafts/'",
+		// Phase 5c: Ideas and Research.
+		"'/v1/ideas'", "'/v1/ideas/'", "'/v1/research/runs'", "'/v1/research/runs/'",
 	}
 	// Every quoted '/v1...' literal in api.js must be one of the above.
 	for _, part := range strings.Split(src, "'/v1")[1:] {

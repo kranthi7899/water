@@ -32,10 +32,12 @@ type Draft struct {
 // just the migration's own CHECK), the same belt-and-suspenders convention
 // ideas.go's ideaStages uses for Idea.Stage. team_message and pulse_check
 // (docs/slices/UI.md Phase 5b's People workspace buttons, migration 0023)
-// are additive to the three Phase 3c originally shipped with.
+// are additive to the three Phase 3c originally shipped with; idea_proposal
+// (docs/slices/UI.md Phase 5c's "Propose" button, migration 0024) is
+// additive again.
 var draftTemplates = map[string]bool{
 	"reply": true, "delegation": true, "investor_update": true,
-	"team_message": true, "pulse_check": true,
+	"team_message": true, "pulse_check": true, "idea_proposal": true,
 }
 
 // DraftTemplateLabel is Template's display label (docs/slices/UI.md Phase
@@ -54,6 +56,8 @@ func DraftTemplateLabel(template string) string {
 		return "Team message"
 	case "pulse_check":
 		return "Pulse check"
+	case "idea_proposal":
+		return "Idea proposal"
 	default:
 		return ""
 	}

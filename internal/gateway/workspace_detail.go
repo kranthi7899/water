@@ -80,10 +80,12 @@ type WorkspaceView struct {
 	Meetings []meetingView   `json:"meetings"`
 	Threads  []threadView    `json:"threads"`
 
-	Project *projectWorkspaceView `json:"project,omitempty"`
-	Finance *financeWorkspaceView `json:"finance,omitempty"`
-	Clients *clientsWorkspaceView `json:"clients,omitempty"`
-	People  *peopleWorkspaceView  `json:"people,omitempty"`
+	Project  *projectWorkspaceView  `json:"project,omitempty"`
+	Finance  *financeWorkspaceView  `json:"finance,omitempty"`
+	Clients  *clientsWorkspaceView  `json:"clients,omitempty"`
+	People   *peopleWorkspaceView   `json:"people,omitempty"`
+	Ideas    *ideasWorkspaceView    `json:"ideas,omitempty"`
+	Research *researchWorkspaceView `json:"research,omitempty"`
 }
 
 // handleGetWorkspace serves GET /v1/workspaces/{id}. An unknown id (or no
@@ -121,9 +123,12 @@ func (d *Daemon) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
 		view.Clients = d.clientsWorkspaceView(ctx)
 	case "people":
 		view.People = d.peopleWorkspaceView(ctx)
-		// ideas, research, marketing: no extra tiles yet (Phase 5c-5d's own
-		// job) -- the base fields above are already a valid, non-crashing
-		// shape.
+	case "ideas":
+		view.Ideas = d.ideasWorkspaceView(ctx)
+	case "research":
+		view.Research = d.researchWorkspaceView(ctx)
+		// marketing: no extra tiles yet (Phase 5d's own job) -- the base
+		// fields above are already a valid, non-crashing shape.
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -1493,4 +1498,86 @@ func (d *Daemon) handleCreateWorkspaceDraft(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, draftViewOf(dr))
+}
+
+// ---- Ideas / Research workspaces (docs/slices/UI.md Phase 5c) ----
+//
+// Unlike Project/Finance/Clients/People above, Ideas and Research are not
+// scoped to this one workspace id at all: ideas.go's GET /v1/ideas and
+// research_runs.go's GET /v1/research/runs are global lists (there is only
+// ever one "ideas" workspace and one "research" workspace per twin, per
+// twins/ceo/workspaces/ideas.yaml and research.yaml). ideasWorkspaceView/
+// researchWorkspaceView below are pure reads over those same store
+// accessors -- ideaViewOf/researchRunViewOf, defined in ideas.go/
+// research_runs.go -- reused here rather than duplicated, so the workspace
+// page and the two list endpoints always agree on shape. Nothing here
+// writes anything, and nothing here calls Gate.Invoke: nothing this file
+// needs to prepare requires a gated read (unlike the Project workspace's
+// GitHub tiles), so THE INVARIANT at the top of this file holds trivially
+// for both.
+
+// ideasWorkspaceView is the ideas-template workspace's control-room
+// content: every idea, split into the plan's own Raw/Explored groups by its
+// own stage field (docs/slices/UI.md Phase 5c: "Raw and Explored groups").
+type ideasWorkspaceView struct {
+	Raw      []ideaView `json:"raw"`
+	Explored []ideaView `json:"explored"`
+}
+
+func (d *Daemon) ideasWorkspaceView(ctx context.Context) *ideasWorkspaceView {
+	view := &ideasWorkspaceView{Raw: []ideaView{}, Explored: []ideaView{}}
+	if d.cfg.Store == nil {
+		return view
+	}
+	ideas, err := d.cfg.Store.ListIdeas(ctx)
+	if err != nil {
+		return view
+	}
+	for _, idea := range ideas {
+		iv := ideaViewOf(idea)
+		if idea.Stage == "explored" {
+			view.Explored = append(view.Explored, iv)
+		} else {
+			view.Raw = append(view.Raw, iv)
+		}
+	}
+	return view
+}
+
+// researchWorkspaceView is the research-template workspace's control-room
+// content: every research run, split into the plan's own Queued/Running/
+// Finished columns by its own status field (docs/slices/UI.md Phase 5c:
+// "Research columns: Queued, Running, Finished"). A "failed" run (a denial
+// or a metered refusal stopped it, research_runner.go) is surfaced under
+// Finished too, since there is no fourth column in the plan and a failed
+// run is, like a finished one, no longer queued or running -- its own
+// status field (still "failed", never silently rewritten to "finished")
+// tells the client which it is.
+type researchWorkspaceView struct {
+	Queued   []researchRunView `json:"queued"`
+	Running  []researchRunView `json:"running"`
+	Finished []researchRunView `json:"finished"`
+}
+
+func (d *Daemon) researchWorkspaceView(ctx context.Context) *researchWorkspaceView {
+	view := &researchWorkspaceView{Queued: []researchRunView{}, Running: []researchRunView{}, Finished: []researchRunView{}}
+	if d.cfg.Store == nil {
+		return view
+	}
+	runs, err := d.cfg.Store.ListResearchRuns(ctx)
+	if err != nil {
+		return view
+	}
+	for _, run := range runs {
+		rv := researchRunViewOf(run)
+		switch run.Status {
+		case "queued":
+			view.Queued = append(view.Queued, rv)
+		case "running":
+			view.Running = append(view.Running, rv)
+		default: // finished or failed
+			view.Finished = append(view.Finished, rv)
+		}
+	}
+	return view
 }

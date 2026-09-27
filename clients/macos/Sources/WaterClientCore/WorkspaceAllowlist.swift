@@ -116,6 +116,19 @@ public enum WorkspaceAllowlist {
         route("GET", "/v1/drafts/{id}"),
         route("POST", "/v1/drafts/{id}"),
         route("POST", "/v1/drafts/{id}/submit"),
+        // Phase 5c: Ideas -- the capture bar (a POST body, never a query
+        // string), Start research (queues a run), Propose (creates a
+        // draft). Discuss reuses the existing thread-anchor route above.
+        route("GET", "/v1/ideas"),
+        route("POST", "/v1/ideas"),
+        route("POST", "/v1/ideas/{id}/research"),
+        route("POST", "/v1/ideas/{id}/propose"),
+        // Phase 5c: Research runs -- the runner itself is entirely
+        // server-side (research_runner.go); this is only the read/attach
+        // surface, and Attach inserts only into card_evidence_extra.
+        route("GET", "/v1/research/runs"),
+        route("GET", "/v1/research/runs/{id}"),
+        route("POST", "/v1/research/runs/{id}/attach"),
     ]
 
     /// Judges a URL the web view asked for.

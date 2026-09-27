@@ -8,10 +8,17 @@
 // or decides anything by itself; "Message a team"/"Send pulse check" only
 // ever create a drafts row (api.createWorkspaceDraft), never send anything,
 // and everything else only opens a decision/approval/meeting/thread/draft
-// the CEO already has, exactly like Today's own rows do.
+// the CEO already has, exactly like Today's own rows do. Phase 5c's Ideas
+// and Research templates follow the same posture: "Start research" queues
+// a run (api.startIdeaResearch, entirely server-side from there --
+// research_runner.go), "Discuss" anchors a thread, "Propose" creates a
+// drafts row, and Research's own Attach inserts only into
+// card_evidence_extra server-side (internal/gateway/research_runs.go's own
+// sanctioned exception) -- nothing here ever proposes an envelope or
+// reaches a decision.
 //
-// ideas/research/marketing templates still render the Phase 2 placeholder:
-// their real content is Phase 5c-5d's own job.
+// marketing still renders the Phase 2 placeholder: its real content is
+// Phase 5d's own job.
 //
 // The hash route is "workspaces" with an optional two-segment param,
 // "<id>/<sub>" (e.g. "#workspaces/finance/overview", parsed by app.js's
@@ -402,6 +409,235 @@
       policiesPanel);
   }
 
+  // ---- ideas workspace (docs/slices/UI.md Phase 5c) ----
+  //
+  // A capture bar (a POST body, never a query string -- api.createIdea),
+  // Raw/Explored groups (idea.stage), and three per-idea buttons:
+  // "Start research" queues a run (api.startIdeaResearch, entirely
+  // server-side from here on -- research_runner.go), "Discuss" anchors a
+  // thread of type "idea" (api.anchorThread, Phase 3d's existing endpoint,
+  // reused as-is) and opens it, "Propose" creates a drafts row
+  // (api.proposeIdea) and opens it in the Drafts editor. None of these
+  // three ever proposes an envelope or reaches a decision by itself.
+
+  async function discussIdea(ideaID) {
+    const S = window.appShared;
+    try {
+      const out = await api.anchorThread('idea', ideaID);
+      S.go('threads', get(get(out, 'thread'), 'id'));
+    } catch (err) {
+      S.toast('Could not open a thread: ' + S.errText(err), 'bad');
+    }
+  }
+
+  async function proposeIdeaDraft(ideaID) {
+    const S = window.appShared;
+    try {
+      const draft = await api.proposeIdea(ideaID);
+      S.toast('Proposal drafted.');
+      S.go('drafts', get(draft, 'id'));
+    } catch (err) {
+      S.toast('Could not create the draft: ' + S.errText(err), 'bad');
+    }
+  }
+
+  function ideaRow(idea, onStartResearch) {
+    const S = window.appShared;
+    const id = get(idea, 'id');
+    return h('li', null, h('div', { class: 'row row-static' },
+      h('span', { class: 'row-main' },
+        h('span', { class: 'row-title' }, get(idea, 'title')),
+        get(idea, 'gist') ? h('span', { class: 'row-sub' }, get(idea, 'gist')) : null),
+      h('div', { class: 'head-actions' },
+        S.button('Start research', () => onStartResearch(id), 'secondary'),
+        S.button('Discuss', () => discussIdea(id), 'secondary'),
+        S.button('Propose', () => proposeIdeaDraft(id), 'secondary'))));
+  }
+
+  function ideaGroupPanel(title, items, onStartResearch) {
+    const S = window.appShared;
+    const panel = h('section', { class: 'panel' }, h('h2', null, title));
+    if (!items.length) { panel.appendChild(S.empty('Nothing here yet.')); return panel; }
+    const ul = h('ul', { class: 'rows' });
+    for (const idea of items) ul.appendChild(ideaRow(idea, onStartResearch));
+    panel.appendChild(ul);
+    return panel;
+  }
+
+  // ideaCaptureBar posts the new idea as a JSON body (api.createIdea),
+  // never a query string, then calls onCreated to refresh the page.
+  function ideaCaptureBar(onCreated) {
+    const S = window.appShared;
+    const title = h('input', { type: 'text', placeholder: 'New idea', maxlength: 200, autocomplete: 'off' });
+    const gist = h('input', { type: 'text', placeholder: 'One-line gist (optional)', autocomplete: 'off' });
+    const msg = h('div');
+    const add = S.button('Add idea', async () => {
+      const t = title.value.trim();
+      if (!t) { replace(msg, S.errorBox('Title is required', new Error('empty title'))); return; }
+      add.disabled = true;
+      try {
+        await api.createIdea(t, gist.value.trim());
+        title.value = '';
+        gist.value = '';
+        replace(msg, null);
+        onCreated();
+      } catch (err) {
+        replace(msg, S.errorBox('Could not add this idea', err));
+      } finally {
+        add.disabled = false;
+      }
+    }, 'primary');
+    return h('section', { class: 'panel' },
+      h('h2', null, 'Capture'),
+      h('div', { class: 'form inline' }, title, gist, add),
+      msg);
+  }
+
+  function ideasTiles(view, reload) {
+    const idv = get(view, 'ideas');
+    if (!idv) return null;
+    const onStartResearch = async (ideaID) => {
+      const S = window.appShared;
+      try {
+        await api.startIdeaResearch(ideaID);
+        S.toast('Research queued.');
+        reload();
+      } catch (err) {
+        S.toast('Could not start research: ' + S.errText(err), 'bad');
+      }
+    };
+    return h('div', { class: 'stack' },
+      ideaCaptureBar(reload),
+      ideaGroupPanel('Raw', list(get(idv, 'raw')), onStartResearch),
+      ideaGroupPanel('Explored', list(get(idv, 'explored')), onStartResearch));
+  }
+
+  // ---- research workspace (docs/slices/UI.md Phase 5c) ----
+  //
+  // Queued/Running/Finished columns (research_runs.status). Each row
+  // expands in place (no new page/route) into its own steps ("N of 5",
+  // research_steps) and, once finished, either "In <card>"
+  // (attached_card_id) or an Attach control that posts a card id
+  // (api.attachResearchRun) -- inserting only into card_evidence_extra
+  // server-side (internal/gateway/research_runs.go's own sanctioned
+  // exception), never anything this file has to know about.
+
+  function researchStatusBadge(S, status) {
+    switch (status) {
+      case 'queued': return S.badge('Queued', '');
+      case 'running': return S.badge('Running', 'warn');
+      case 'finished': return S.badge('Finished', 'ok');
+      case 'failed': return S.badge('Failed', 'status-denied');
+      default: return S.badge(String(status || ''), '');
+    }
+  }
+
+  function researchStepsList(steps) {
+    const S = window.appShared;
+    const ul = h('ul', { class: 'rows' });
+    for (const s of steps) {
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(s, 'label')),
+          h('span', { class: 'row-meta' }, researchStatusBadge(S, get(s, 'status')))))));
+    }
+    return ul;
+  }
+
+  // researchAttachForm is the Attach control: a card id input plus a
+  // button, refresh is called (re-fetching this same run) once the attach
+  // succeeds so the row immediately switches to "In <card>".
+  function researchAttachForm(runID, refresh) {
+    const S = window.appShared;
+    const cardID = h('input', { type: 'text', placeholder: 'Decision card id', autocomplete: 'off' });
+    const msg = h('div');
+    const attach = S.button('Attach', async () => {
+      const id = cardID.value.trim();
+      if (!id) { replace(msg, S.errorBox('Card id is required', new Error('empty card id'))); return; }
+      attach.disabled = true;
+      try {
+        await api.attachResearchRun(runID, id);
+        S.toast('Attached.');
+        await refresh();
+      } catch (err) {
+        replace(msg, S.errorBox('Could not attach', err));
+      } finally {
+        attach.disabled = false;
+      }
+    }, 'secondary');
+    return h('div', null, h('div', { class: 'form inline' }, cardID, attach), msg);
+  }
+
+  function researchRunDetailPanel(run, refresh) {
+    const steps = list(get(run, 'steps'));
+    const done = steps.filter((s) => get(s, 'status') === 'done').length;
+    const attachedCardID = get(run, 'attached_card_id');
+    let attachArea = null;
+    if (attachedCardID) {
+      attachArea = h('p', { class: 'muted small' }, 'In ' + attachedCardID);
+    } else if (get(run, 'status') === 'finished') {
+      attachArea = researchAttachForm(get(run, 'id'), refresh);
+    }
+    return h('div', { class: 'stack' },
+      h('p', { class: 'muted small' }, done + ' of ' + steps.length + ' steps'),
+      researchStepsList(steps),
+      get(run, 'report_text') ? h('pre', { class: 'policies-text' }, get(run, 'report_text')) : null,
+      attachArea);
+  }
+
+  // researchRunRow expands in place: the detail panel is fetched
+  // (api.researchRun) only the first time it is opened, and re-fetched
+  // after a successful Attach.
+  function researchRunRow(runSummary) {
+    const S = window.appShared;
+    const id = get(runSummary, 'id');
+    const detail = h('div', { class: 'run-detail', hidden: true });
+    let loaded = false;
+    async function load() {
+      try {
+        const run = await api.researchRun(id);
+        replace(detail, researchRunDetailPanel(run, load));
+      } catch (err) {
+        replace(detail, S.errorBox('Could not load this run', err));
+      }
+    }
+    const toggle = h('button', {
+      type: 'button', class: 'row',
+      on: {
+        click: async () => {
+          detail.hidden = !detail.hidden;
+          if (!detail.hidden && !loaded) {
+            loaded = true;
+            await load();
+          }
+        },
+      },
+    },
+    h('span', { class: 'row-main' },
+      h('span', { class: 'row-title' }, get(runSummary, 'topic')),
+      h('span', { class: 'row-meta' }, researchStatusBadge(S, get(runSummary, 'status')))));
+    return h('li', null, toggle, detail);
+  }
+
+  function researchColumn(title, items) {
+    const S = window.appShared;
+    const panel = h('section', { class: 'panel' }, h('h2', null, title));
+    if (!items.length) { panel.appendChild(S.empty('Nothing here yet.')); return panel; }
+    const ul = h('ul', { class: 'rows' });
+    for (const r of items) ul.appendChild(researchRunRow(r));
+    panel.appendChild(ul);
+    return panel;
+  }
+
+  function researchTiles(view) {
+    const rv = get(view, 'research');
+    if (!rv) return null;
+    return h('div', { class: 'stack' },
+      researchColumn('Queued', list(get(rv, 'queued'))),
+      researchColumn('Running', list(get(rv, 'running'))),
+      researchColumn('Finished', list(get(rv, 'finished'))));
+  }
+
   // ---- shared "filtered existing sections": needs-you, meetings, threads ----
 
   function needsYouPanel(items) {
@@ -492,10 +728,12 @@
     else if (template === 'finance') tiles = financeTiles(view);
     else if (template === 'clients') tiles = clientsTiles(view);
     else if (template === 'people') tiles = peopleTiles(view, id);
+    else if (template === 'ideas') tiles = ideasTiles(view, () => renderWorkspaceDetail(c, spec, sub, gen));
+    else if (template === 'research') tiles = researchTiles(view);
 
     const body = tiles
       ? h('div', { class: 'stack' }, tiles)
-      : h('section', { class: 'panel' }, S.empty('The full ' + template + ' workspace view is not built yet (docs/slices/UI.md Phase 5b-5d). This page only confirms routing and navigation.'));
+      : h('section', { class: 'panel' }, S.empty('The full ' + template + ' workspace view is not built yet (docs/slices/UI.md Phase 5d). This page only confirms routing and navigation.'));
 
     replace(c, S.header(get(view, 'name') || get(spec, 'name') || id, workspaceSubtitle(spec)),
       tabs, body,

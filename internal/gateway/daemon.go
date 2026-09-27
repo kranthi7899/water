@@ -175,8 +175,16 @@ type Daemon struct {
 	recapMu sync.Mutex
 	recaps  map[string]recapState
 	// bg tracks background work the daemon starts on its own (the recap
-	// model call), so tests can wait for it.
+	// model call, the research runner below), so tests can wait for it.
 	bg sync.WaitGroup
+
+	// researchMu/researchQueue/researchRunning are the research runner's
+	// FIFO queue (docs/slices/UI.md Phase 5c, research_runner.go): run ids
+	// waiting their turn, and whether a worker goroutine is already
+	// draining the queue (so queueResearchRun starts at most one).
+	researchMu      sync.Mutex
+	researchQueue   []string
+	researchRunning bool
 }
 
 func New(cfg Config) *Daemon {
@@ -401,6 +409,15 @@ func (d *Daemon) Mux() http.Handler {
 	// buttons, each creating one drafts row (store.CreateDraft) with a
 	// code-built body -- never an approval envelope, never a decision.
 	mux.Handle("POST /v1/workspaces/{id}/drafts", d.auth(d.handleCreateWorkspaceDraft))
+	// Phase 5c: Ideas (ideas.go) and Research (research_runs.go,
+	// research_runner.go).
+	mux.Handle("GET /v1/ideas", d.auth(d.handleListIdeas))
+	mux.Handle("POST /v1/ideas", d.auth(d.handleCreateIdea))
+	mux.Handle("POST /v1/ideas/{id}/research", d.auth(d.handleStartIdeaResearch))
+	mux.Handle("POST /v1/ideas/{id}/propose", d.auth(d.handleProposeIdeaDraft))
+	mux.Handle("GET /v1/research/runs", d.auth(d.handleListResearchRuns))
+	mux.Handle("GET /v1/research/runs/{id}", d.auth(d.handleGetResearchRun))
+	mux.Handle("POST /v1/research/runs/{id}/attach", d.auth(d.handleAttachResearchRun))
 	mux.Handle("GET /v1/dashboards", d.auth(d.handleListDashboards))
 	// Phase 4: one dashboard's actual computed tiles (internal/dashboards.
 	// Compute), alongside the list route above.

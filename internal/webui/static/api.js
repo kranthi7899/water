@@ -131,5 +131,17 @@
     draft: (id) => request('GET', '/v1/drafts/' + enc(id)),
     saveDraft: (id, to, subject, body) => request('POST', '/v1/drafts/' + enc(id), { to, subject, body }),
     submitDraft: (id, to, subject, body) => request('POST', '/v1/drafts/' + enc(id) + '/submit', { to, subject, body }),
+    // Phase 5c: Ideas -- the capture bar posts a body (never a query
+    // string, so an idea's text never lands in a server access log via a
+    // URL), Start research queues a run, Propose creates a draft.
+    ideas: () => request('GET', '/v1/ideas'),
+    createIdea: (title, gist) => request('POST', '/v1/ideas', { title, gist }),
+    startIdeaResearch: (id) => request('POST', '/v1/ideas/' + enc(id) + '/research'),
+    proposeIdea: (id) => request('POST', '/v1/ideas/' + enc(id) + '/propose'),
+    // Phase 5c: Research runs -- the runner itself is entirely server-side
+    // (research_runner.go); this is only the read/attach surface.
+    researchRuns: () => request('GET', '/v1/research/runs'),
+    researchRun: (id) => request('GET', '/v1/research/runs/' + enc(id)),
+    attachResearchRun: (id, cardID) => request('POST', '/v1/research/runs/' + enc(id) + '/attach', { card_id: cardID }),
   };
 })();

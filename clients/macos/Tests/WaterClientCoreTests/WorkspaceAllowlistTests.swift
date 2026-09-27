@@ -68,6 +68,14 @@ import Testing
             ("GET", "water://app/v1/drafts/draft_0a1b", "/v1/drafts/draft_0a1b"),
             ("POST", "water://app/v1/drafts/draft_0a1b", "/v1/drafts/draft_0a1b"),
             ("POST", "water://app/v1/drafts/draft_0a1b/submit", "/v1/drafts/draft_0a1b/submit"),
+            // Slice UI Phase 5c: Ideas and Research.
+            ("GET", "water://app/v1/ideas", "/v1/ideas"),
+            ("POST", "water://app/v1/ideas", "/v1/ideas"),
+            ("POST", "water://app/v1/ideas/idea_0a1b/research", "/v1/ideas/idea_0a1b/research"),
+            ("POST", "water://app/v1/ideas/idea_0a1b/propose", "/v1/ideas/idea_0a1b/propose"),
+            ("GET", "water://app/v1/research/runs", "/v1/research/runs"),
+            ("GET", "water://app/v1/research/runs/run_0a1b", "/v1/research/runs/run_0a1b"),
+            ("POST", "water://app/v1/research/runs/run_0a1b/attach", "/v1/research/runs/run_0a1b/attach"),
         ]
         for (m, url, want) in cases {
             #expect(allowed(m, url) == want, "\(m) \(url)")
@@ -133,6 +141,13 @@ import Testing
         #expect(!decide("GET", "water://app/v1/drafts/draft_1/submit").isAllowed)
         #expect(!decide("GET", "water://app/v1/workspaces/people/drafts").isAllowed)
         #expect(!decide("PUT", "water://app/v1/workspaces/people/drafts").isAllowed)
+        // Slice UI Phase 5c.
+        #expect(!decide("PUT", "water://app/v1/ideas").isAllowed)
+        #expect(!decide("GET", "water://app/v1/ideas/idea_1/research").isAllowed)
+        #expect(!decide("GET", "water://app/v1/ideas/idea_1/propose").isAllowed)
+        #expect(!decide("POST", "water://app/v1/research/runs").isAllowed)
+        #expect(!decide("POST", "water://app/v1/research/runs/run_1").isAllowed)
+        #expect(!decide("GET", "water://app/v1/research/runs/run_1/attach").isAllowed)
     }
 
     @Test func wrongOriginIsDenied() {
