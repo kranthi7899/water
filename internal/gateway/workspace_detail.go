@@ -28,6 +28,22 @@
 // for how its signature makes this checkable by inspection, and
 // TestPeopleStrainSignatureCarriesNoTextParameter
 // (workspace_detail_test.go) for the AST-based proof.
+//
+// Phase 5d (Marketing, docs/slices/UI.md "5d. Marketing") extends this file
+// once more: trend tiles (real only when a finished research run is linked
+// in_workspace to the marketing workspace, illustrative otherwise --
+// there is no live writer of that link yet, so this is realistically always
+// illustrative today; see marketingAttachedResearchRun's own doc comment),
+// prospects read straight from the existing company_customers.accounts
+// read (marketingProspectsTile's own doc comment documents the "prospect"
+// mapping judgment call), an honestly-empty public-reviews tile (no real
+// data source exists and none is invented -- marketingPublicReviewsTile's
+// own doc comment), and a capacity note for the roster's "design lead"
+// (marketingDesignLead's own doc comment). "Draft outreach"/"Draft reply"
+// extend the same POST /v1/workspaces/{id}/drafts route Phase 5b's buttons
+// already use (two new store.CreateDraft template kinds, never a model
+// call) rather than adding a new route -- the plan's own endpoint table
+// lists nothing new for 5d.
 package gateway
 
 import (
@@ -35,6 +51,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,10 +82,9 @@ const workspaceSectionLimit = 10
 
 // WorkspaceView is GET /v1/workspaces/{id}'s payload: the spec's identity,
 // its filtered existing sections (found via in_workspace edges, read-only),
-// and its own control-room tiles for whichever template it names. Only one
-// of Project/Finance/Clients/People is ever set, matching spec.Template;
-// the remaining templates (ideas/research/marketing) get no extra tiles yet
-// — Phase 5c-5d's own job, docs/slices/UI.md Phase 5a's own scoping note.
+// and its own control-room tiles for whichever template it names. Exactly
+// one of Project/Finance/Clients/People/Ideas/Research/Marketing is ever
+// set, matching spec.Template.
 type WorkspaceView struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -80,12 +96,13 @@ type WorkspaceView struct {
 	Meetings []meetingView   `json:"meetings"`
 	Threads  []threadView    `json:"threads"`
 
-	Project  *projectWorkspaceView  `json:"project,omitempty"`
-	Finance  *financeWorkspaceView  `json:"finance,omitempty"`
-	Clients  *clientsWorkspaceView  `json:"clients,omitempty"`
-	People   *peopleWorkspaceView   `json:"people,omitempty"`
-	Ideas    *ideasWorkspaceView    `json:"ideas,omitempty"`
-	Research *researchWorkspaceView `json:"research,omitempty"`
+	Project   *projectWorkspaceView   `json:"project,omitempty"`
+	Finance   *financeWorkspaceView   `json:"finance,omitempty"`
+	Clients   *clientsWorkspaceView   `json:"clients,omitempty"`
+	People    *peopleWorkspaceView    `json:"people,omitempty"`
+	Ideas     *ideasWorkspaceView     `json:"ideas,omitempty"`
+	Research  *researchWorkspaceView  `json:"research,omitempty"`
+	Marketing *marketingWorkspaceView `json:"marketing,omitempty"`
 }
 
 // handleGetWorkspace serves GET /v1/workspaces/{id}. An unknown id (or no
@@ -127,8 +144,8 @@ func (d *Daemon) handleGetWorkspace(w http.ResponseWriter, r *http.Request) {
 		view.Ideas = d.ideasWorkspaceView(ctx)
 	case "research":
 		view.Research = d.researchWorkspaceView(ctx)
-		// marketing: no extra tiles yet (Phase 5d's own job) -- the base
-		// fields above are already a valid, non-crashing shape.
+	case "marketing":
+		view.Marketing = d.marketingWorkspaceView(ctx, spec)
 	}
 	writeJSON(w, http.StatusOK, view)
 }
@@ -1404,14 +1421,26 @@ func (d *Daemon) peopleCrossTeamCallouts(ctx context.Context, issues []linear.Is
 	return out
 }
 
-// ---- People workspace drafts: POST /v1/workspaces/{id}/drafts ----
+// ---- Workspace drafts: POST /v1/workspaces/{id}/drafts ----
+//
+// One route, four kinds (docs/slices/UI.md Phase 5b's team_message/
+// pulse_check, Phase 5d's prospect_outreach/review_reply below): the plan's
+// own endpoint table lists no new route for 5d, so this extends the same
+// POST /v1/workspaces/{id}/drafts body with two more kind values and, since
+// neither is "about a roster team", two more identifying fields alongside
+// Team -- ProspectID (a prospect's own account name, from
+// marketingProspectsTile) and ReviewID (a caller-supplied opaque id; see
+// workspaceReviewReplyBody's own doc comment for why this file never reads
+// or fabricates a review's actual text). Exactly one of Team/ProspectID/
+// ReviewID is meaningful per kind; workspaceDraftForRequest below is the
+// one place that enforces which.
 
-// workspaceDraftRequest is POST /v1/workspaces/{id}/drafts' body
-// (docs/slices/UI.md Phase 5b): kind picks which code-built template fills
-// the new draft, team names the roster team it's about.
+// workspaceDraftRequest is POST /v1/workspaces/{id}/drafts' body.
 type workspaceDraftRequest struct {
-	Kind string `json:"kind"`
-	Team string `json:"team"`
+	Kind       string `json:"kind"`
+	Team       string `json:"team,omitempty"`
+	ProspectID string `json:"prospect_id,omitempty"`
+	ReviewID   string `json:"review_id,omitempty"`
 }
 
 // workspaceTeamMessageBody/workspacePulseCheckBody: docs/slices/UI.md Phase
@@ -1436,27 +1465,73 @@ func workspacePulseCheckBody(team store.Team) (subject, body string) {
 		"Hi " + team.Name + " team — quick pulse check: on a scale of 1 (overloaded) to 5 (plenty of spare capacity), how loaded do you feel this week? Reply with a number, and anything else you want me to know."
 }
 
-// workspaceDraftForRequest resolves req into a store.Draft ready for
-// CreateDraft: the closed kind -> store.Draft.Template mapping
-// (docs/slices/UI.md Phase 5b: POST /v1/workspaces/{id}/drafts {kind:
-// team_message|pulse_check, team}), matching store.draftTemplates' own
-// closed enum (migration 0023 extends it with exactly these two values).
-// An unknown kind, or a team id that doesn't resolve to a roster Team, is
-// an error -- never silently accepted, never silently defaulted.
-func workspaceDraftForRequest(ctx context.Context, st *store.Store, req workspaceDraftRequest) (store.Draft, error) {
-	if st == nil {
-		return store.Draft{}, fmt.Errorf("no store configured")
+// workspaceProspectOutreachBody is "Draft outreach" (docs/slices/UI.md
+// Phase 5d): a code-built body from the prospect's own name and data
+// (never a model call), matching workspaceTeamMessageBody's own posture. To
+// is left blank for the same reason workspaceTeamMessageBody's is: this
+// codebase has no real recipient address for a company_customers.accounts
+// row (the sheet has no contact-email column at all), so the CEO fills one
+// in before "Send for approval".
+func workspaceProspectOutreachBody(p prospectView) (subject, body string) {
+	subject = "Following up — " + p.Name
+	var b strings.Builder
+	fmt.Fprintf(&b, "Hi %s team,\n\n[Add your outreach note here.]\n", p.Name)
+	if p.DaysSinceContact != nil {
+		fmt.Fprintf(&b, "\n(%d days since last contact on record.)\n", int(*p.DaysSinceContact))
 	}
-	team, err := store.Get[store.Team](ctx, st, "seed", req.Team)
-	if err != nil {
-		return store.Draft{}, fmt.Errorf("no such team %q", req.Team)
+	return subject, b.String()
+}
+
+// workspaceReviewReplyBody is "Draft reply" (docs/slices/UI.md Phase 5d):
+// see marketingPublicReviewsTile's own doc comment for why no public-review
+// data source exists in this codebase yet. This function never reads or
+// receives any review's actual text -- doing so would mean either calling a
+// connector that doesn't exist, or inventing review content, both of which
+// this phase's own instructions rule out. It only ever builds a generic,
+// code-built reply shell referencing the caller-supplied reviewID as an
+// opaque label (exactly like workspaceTeamMessageBody's own "[Add your
+// update here.]" placeholder pattern), for the CEO to fill in once they
+// have the real review open elsewhere. This is the "ready whenever a real
+// source exists" mechanism the task asks for: a real public-reviews reader,
+// once one exists, would pass its own review id here unchanged.
+func workspaceReviewReplyBody(reviewID string) (subject, body string) {
+	return "Reply to review " + reviewID,
+		"Hi,\n\nThanks for taking the time to share this. [Add your reply to review " + reviewID + " here.]\n"
+}
+
+// workspaceDraftForRequest resolves req into a store.Draft ready for
+// CreateDraft: the closed kind -> store.Draft.Template mapping (matching
+// store.draftTemplates' own closed enum). An unknown kind, an unresolved
+// team/prospect id, or a blank review id is an error -- never silently
+// accepted, never silently defaulted.
+func (d *Daemon) workspaceDraftForRequest(ctx context.Context, req workspaceDraftRequest) (store.Draft, error) {
+	if d.cfg.Store == nil {
+		return store.Draft{}, fmt.Errorf("no store configured")
 	}
 	var subject, body string
 	switch req.Kind {
-	case "team_message":
-		subject, body = workspaceTeamMessageBody(*team)
-	case "pulse_check":
-		subject, body = workspacePulseCheckBody(*team)
+	case "team_message", "pulse_check":
+		team, err := store.Get[store.Team](ctx, d.cfg.Store, "seed", req.Team)
+		if err != nil {
+			return store.Draft{}, fmt.Errorf("no such team %q", req.Team)
+		}
+		if req.Kind == "team_message" {
+			subject, body = workspaceTeamMessageBody(*team)
+		} else {
+			subject, body = workspacePulseCheckBody(*team)
+		}
+	case "prospect_outreach":
+		prospect, ok := d.marketingFindProspect(ctx, req.ProspectID)
+		if !ok {
+			return store.Draft{}, fmt.Errorf("no such prospect %q", req.ProspectID)
+		}
+		subject, body = workspaceProspectOutreachBody(prospect)
+	case "review_reply":
+		reviewID := strings.TrimSpace(req.ReviewID)
+		if reviewID == "" {
+			return store.Draft{}, fmt.Errorf("review_id is required")
+		}
+		subject, body = workspaceReviewReplyBody(reviewID)
 	default:
 		return store.Draft{}, fmt.Errorf("unknown draft kind %q", req.Kind)
 	}
@@ -1464,14 +1539,14 @@ func workspaceDraftForRequest(ctx context.Context, st *store.Store, req workspac
 }
 
 // handleCreateWorkspaceDraft serves POST /v1/workspaces/{id}/drafts
-// (docs/slices/UI.md Phase 5b): creates a drafts row via store.CreateDraft
-// pre-filled with a code-built template body -- never a model call, and
-// never an approval envelope or a decision (this file's own THE INVARIANT
-// above). The workspace id in the path is validated the same way every
-// other /v1/workspaces/{id} route validates it (a 404 for an unknown
-// workspace) even though the draft itself is really about the team, not
-// the workspace -- consistent with every other route in this file taking
-// its workspace id from the path.
+// (docs/slices/UI.md Phase 5b/5d): creates a drafts row via
+// store.CreateDraft pre-filled with a code-built template body -- never a
+// model call, and never an approval envelope or a decision (this file's own
+// THE INVARIANT above). The workspace id in the path is validated the same
+// way every other /v1/workspaces/{id} route validates it (a 404 for an
+// unknown workspace) even though the draft itself is really about the
+// team/prospect/review, not the workspace -- consistent with every other
+// route in this file taking its workspace id from the path.
 func (d *Daemon) handleCreateWorkspaceDraft(w http.ResponseWriter, r *http.Request) {
 	if d.cfg.Workspaces == nil {
 		http.Error(w, "no such workspace", http.StatusNotFound)
@@ -1487,7 +1562,7 @@ func (d *Daemon) handleCreateWorkspaceDraft(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ctx := r.Context()
-	draft, err := workspaceDraftForRequest(ctx, d.cfg.Store, body)
+	draft, err := d.workspaceDraftForRequest(ctx, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1580,4 +1655,374 @@ func (d *Daemon) researchWorkspaceView(ctx context.Context) *researchWorkspaceVi
 		}
 	}
 	return view
+}
+
+// ---- Marketing workspace (docs/slices/UI.md Phase 5d) ----
+//
+// Trend tiles named by the research run their data came from (illustrative
+// with no run), prospects from the existing company_customers.accounts
+// read, an honestly-empty public-reviews tile, and a capacity note for the
+// roster's "design lead". "Draft outreach"/"Draft reply" reuse the same
+// POST /v1/workspaces/{id}/drafts route Phase 5b's People workspace buttons
+// already added (workspaceDraftForRequest above), with two new
+// store.CreateDraft template kinds -- never a model call, never an
+// approval envelope, never a decision (this file's own THE INVARIANT).
+
+// ---- trend tiles ----
+
+// marketingTrendFacets: which of the research runner's own five fixed
+// facets (research_runner.go's researchFacets: overview, market,
+// competitors, pricing, risks) this phase's trend tiles draw from. The plan
+// (docs/slices/UI.md Phase 5d) names no exact set of tiles, only that "each"
+// one names the run it came from -- this is a documented judgment call,
+// reusing the runner's own established facet vocabulary (rather than
+// inventing new marketing-metric names this codebase has no real source
+// for) and picking the three facets that are actually trend/market-shaped;
+// "overview" and "risks" are not.
+var marketingTrendFacets = []string{"market", "competitors", "pricing"}
+
+// marketingTrendPercentRe finds the first "NN%" or "NN.N%" substring in a
+// research report section, for trendTileValue's best-effort extraction
+// (docs/slices/UI.md Phase 5d: "you may do a best-effort extraction, but do
+// not fabricate a number that isn't traceable to a real run"). This never
+// invents a number: it either finds one that is literally present in the
+// run's own report text, or the tile carries no value at all.
+var marketingTrendPercentRe = regexp.MustCompile(`(\d+(?:\.\d+)?)\s?%`)
+
+// marketingReportSectionRe splits a research report's own text
+// (research_runner.go's researchSectionText: "## <Capitalized facet>\n...")
+// back into per-facet sections.
+var marketingReportSectionRe = regexp.MustCompile(`(?m)^## (\S+)[ \t]*\n`)
+
+// parseReportSections maps each report section's facet (lower-cased) to its
+// own body text, reusing exactly the "## <Capitalized>\n<body>" shape
+// research_runner.go's researchSectionText already writes -- not a second,
+// parallel report format.
+func parseReportSections(reportText string) map[string]string {
+	out := map[string]string{}
+	locs := marketingReportSectionRe.FindAllStringSubmatchIndex(reportText, -1)
+	for i, loc := range locs {
+		facet := strings.ToLower(reportText[loc[2]:loc[3]])
+		start := loc[1]
+		end := len(reportText)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		out[facet] = strings.TrimSpace(reportText[start:end])
+	}
+	return out
+}
+
+// trendTileView is one Marketing trend tile. RunID/RunTopic are set (and
+// State is dashboards.TileOK) only once a finished research run is
+// referenced; with no run, State is dashboards.TileIllustrative and neither
+// is set (docs/slices/UI.md Phase 5d: "With no run they are labelled
+// illustrative"). Value/Unit are set only when marketingTrendPercentRe
+// found a real number in that run's own report section -- never fabricated,
+// and correctly omitted (not zero) when nothing was found.
+type trendTileView struct {
+	Label    string               `json:"label"`
+	State    dashboards.TileState `json:"state"`
+	RunID    string               `json:"run_id,omitempty"`
+	RunTopic string               `json:"run_topic,omitempty"`
+	Value    *float64             `json:"value,omitempty"`
+	Unit     string               `json:"unit,omitempty"`
+}
+
+// marketingAttachedResearchRun resolves the research run (if any) this
+// workspace's trend tiles should reference: the most recently finished
+// research run linked in_workspace to workspaceID via store.LinkInWorkspace
+// with FromType "research" -- the exact same generic in_workspace edge
+// mechanism workspaceSections above already reads for decision/meeting/
+// thread rows (store.LinkInWorkspace's own doc comment already scopes it to
+// "decision/meeting/job/thread/project -> workspace"; this is one more
+// FromType on the same mechanism, not a second one).
+//
+// No writer creates a research -> workspace edge anywhere in this codebase
+// yet (this phase adds none: docs/slices/UI.md's own endpoint table lists
+// nothing for 5d beyond the drafts route, and inventing an "Attach to
+// Marketing" action is out of this phase's scope). This mirrors "decision"
+// -> workspace's own current state on this exact mechanism: a recognized
+// edge type with no live writer either (see workspaceSections' own
+// decisionIDs handling). So in production, until a later phase adds a
+// writer, this always returns ok=false and every trend tile below is
+// illustrative -- exactly what this section's own top-of-section doc
+// comment and docs/slices/UI.md Phase 5d's own text both predict. Tests
+// exercise the "a real run is referenced" path by writing the edge directly
+// with store.AddLink, proving the read side works once a writer exists.
+func (d *Daemon) marketingAttachedResearchRun(ctx context.Context, workspaceID string) (store.ResearchRun, bool) {
+	if d.cfg.Store == nil {
+		return store.ResearchRun{}, false
+	}
+	links, err := d.cfg.Store.LinksTo(ctx, "workspace", workspaceID, store.LinkInWorkspace)
+	if err != nil {
+		return store.ResearchRun{}, false
+	}
+	var best store.ResearchRun
+	found := false
+	for _, l := range links {
+		if l.FromType != "research" {
+			continue
+		}
+		run, err := d.cfg.Store.GetResearchRun(ctx, l.FromID)
+		if err != nil || run.Status != "finished" {
+			continue
+		}
+		if !found || run.FinishedAt.After(best.FinishedAt) {
+			best, found = run, true
+		}
+	}
+	return best, found
+}
+
+func (d *Daemon) marketingTrendTiles(ctx context.Context, workspaceID string) []trendTileView {
+	run, ok := d.marketingAttachedResearchRun(ctx, workspaceID)
+	var sections map[string]string
+	if ok {
+		sections = parseReportSections(run.ReportText)
+	}
+	tiles := make([]trendTileView, 0, len(marketingTrendFacets))
+	for _, facet := range marketingTrendFacets {
+		tv := trendTileView{Label: capitalize(facet), State: dashboards.TileIllustrative}
+		if ok {
+			tv.State = dashboards.TileOK
+			tv.RunID = run.ID
+			tv.RunTopic = run.Topic
+			if section, hasSection := sections[facet]; hasSection {
+				if m := marketingTrendPercentRe.FindStringSubmatch(section); m != nil {
+					if v, perr := strconv.ParseFloat(m[1], 64); perr == nil {
+						tv.Value, tv.Unit = &v, "%"
+					}
+				}
+			}
+		}
+		tiles = append(tiles, tv)
+	}
+	return tiles
+}
+
+// ---- prospects ----
+
+// prospectView is one company_customers.accounts row this phase treats as
+// a prospect rather than an active client. Judgment call (docs/slices/UI.md
+// Phase 5d asks for "Prospects (customers sheet)" with no further
+// definition): the Accounts tab's own documented schema (customers.go's
+// package doc comment: column A name, B health, C open tickets, D NPS, E
+// last contact -- the same column order clientsAccountsTile above already
+// reads by plain index, internal/dashboards/compute.go's own accountColumns
+// const block being unexported there) has no dedicated prospect/customer
+// stage column -- every row is documented as a "customer account". The one
+// signal this codebase already treats specially for a
+// blank health value is clientsAccountsByHealth's own "(unknown)" bucket
+// (internal/dashboards/compute.go): a row with no recorded health status
+// has never been through the health-tracking process an actively monitored
+// customer goes through. This reuses that exact, already-established
+// signal -- an accounts row whose health column is blank -- as its own
+// documented mapping for "prospect", rather than inventing a new sheet
+// column this task has no real data for. Revisit once the sheet gains a
+// real stage/status column of its own.
+type prospectView struct {
+	Name             string   `json:"name"`
+	OpenTickets      float64  `json:"open_tickets,omitempty"`
+	DaysSinceContact *float64 `json:"days_since_contact,omitempty"`
+}
+
+type prospectsTile struct {
+	State dashboards.TileState `json:"state"`
+	Items []prospectView       `json:"items,omitempty"`
+}
+
+// marketingProspectsTile reuses dashboards.Rows over the exact same
+// "company_customers.accounts" function clientsAccountsTile above already
+// reads (Phase 4's existing connector/read -- no new connector, no
+// duplicated fetch logic), filtered to blank-health rows per prospectView's
+// own doc comment.
+func (d *Daemon) marketingProspectsTile(ctx context.Context) prospectsTile {
+	if d.cfg.Compute == nil {
+		return prospectsTile{State: dashboards.TileUnavailable}
+	}
+	rows, state, _ := dashboards.Rows(ctx, d.cfg.Compute, "company_customers.accounts")
+	if state != dashboards.TileOK {
+		return prospectsTile{State: state}
+	}
+	now := d.computeNow()
+	var items []prospectView
+	for _, row := range rows {
+		// Column order: 0 name, 1 health, 2 open tickets, 3 NPS, 4 last
+		// contact -- matching clientsAccountsTile's own reads above exactly.
+		name, ok := cellString(row, 0)
+		if !ok || name == "" {
+			continue
+		}
+		if health, _ := cellString(row, 1); strings.TrimSpace(health) != "" {
+			continue // a recorded health status: an active client, not a prospect
+		}
+		pv := prospectView{Name: name}
+		if tk, ok := cellFloat(row, 2); ok {
+			pv.OpenTickets = tk
+		}
+		if lc, ok := cellString(row, 4); ok {
+			if t, perr := time.Parse("2006-01-02", strings.TrimSpace(lc)); perr == nil {
+				days := now.Sub(t).Hours() / 24
+				pv.DaysSinceContact = &days
+			}
+		}
+		items = append(items, pv)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return prospectsTile{Items: items, State: dashboards.TileOK}
+}
+
+// marketingFindProspect resolves name (POST /v1/workspaces/{id}/drafts'
+// prospect_id, workspaceDraftForRequest above) to a prospectView by a
+// case-insensitive, trimmed name match against marketingProspectsTile's own
+// current read -- the account name is the only identifier the sheet has,
+// the same "name is the key" convention clientOwner above already uses for
+// company_customers.accounts rows. ok is false when the
+// tile isn't ok, or no prospect's name matches.
+func (d *Daemon) marketingFindProspect(ctx context.Context, name string) (prospectView, bool) {
+	target := strings.ToLower(strings.TrimSpace(name))
+	if target == "" {
+		return prospectView{}, false
+	}
+	tile := d.marketingProspectsTile(ctx)
+	if tile.State != dashboards.TileOK {
+		return prospectView{}, false
+	}
+	for _, p := range tile.Items {
+		if strings.ToLower(strings.TrimSpace(p.Name)) == target {
+			return p, true
+		}
+	}
+	return prospectView{}, false
+}
+
+// ---- public reviews ----
+
+// reviewView is a single public review, as this codebase would render one
+// if it ever read any. Nothing today ever populates one -- see
+// marketingPublicReviewsTile's own doc comment.
+type reviewView struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+}
+
+// publicReviewsTile is always empty today (see marketingPublicReviewsTile).
+type publicReviewsTile struct {
+	State dashboards.TileState `json:"state"`
+	Items []reviewView         `json:"items,omitempty"`
+}
+
+// marketingPublicReviewsTile: docs/slices/UI.md Phase 5d asks for "public
+// reviews" to get a "Draft reply" button. Honest treatment (a documented
+// judgment call, per this task's own instructions): no public-reviews data
+// source exists anywhere in this codebase -- no new connector is allowed
+// this phase (unlike prospects above, which at least has a real
+// company_customers.accounts row to point at, there is nothing analogous
+// here), and inventing review content to fill this tile would violate the
+// same "code counts, the model judges" / "never fabricate a number that
+// isn't traceable to a real source" posture every other tile in this file
+// already follows. So this tile always reports dashboards.TileNotConnected
+// with zero items -- the same state a genuinely-missing credential already
+// produces elsewhere in this file, communicating "there is nothing to read
+// yet" rather than silently hiding the gap. The "Draft reply" *mechanism*
+// is still real and tested: workspaceReviewReplyBody above (via
+// workspaceDraftForRequest's "review_reply" case) builds a generic,
+// code-built reply template from a caller-supplied review id, so the whole
+// button-to-draft path is ready to wire up the moment a real public-reviews
+// source exists -- it just has nothing to call it with today.
+func marketingPublicReviewsTile() publicReviewsTile {
+	return publicReviewsTile{State: dashboards.TileNotConnected}
+}
+
+// ---- capacity note ----
+
+// marketingCapacityNoteThreshold: docs/slices/UI.md Phase 5d: "A capacity
+// note appears when the design lead's computed allocation is ≥1.0" -- an
+// inclusive boundary, the opposite direction from Phase 5b's own "free
+// capacity" cutoff (peopleResourceBar above: strictly < 1.0 is free
+// capacity). Exactly 1.0 here already warrants the note; it is not one
+// allocation slot short of it. Confirmed against the plan's own wording
+// rather than assumed, and boundary-tested
+// (TestMarketingCapacityNoteThreshold, workspace_detail_test.go) at exactly
+// 1.0 and exactly one allocation link below it.
+const marketingCapacityNoteThreshold = 1.0
+
+// capacityNoteView is docs/slices/UI.md Phase 5d's capacity note.
+type capacityNoteView struct {
+	PersonName string  `json:"person_name"`
+	Allocation float64 `json:"allocation"`
+}
+
+// marketingDesignLead resolves docs/slices/UI.md Phase 5d's "the design
+// lead". Judgment call: the roster has no dedicated role-code field
+// distinguishing a functional role (design lead, finance lead, ...) from
+// arbitrary free text (store.Person.Role holds strings like "Engineer,
+// ingestion and traversal") -- there is no structured "role kind" this
+// function could switch on. This resolves the design lead as the one
+// roster person whose Role field, case-insensitively trimmed, is exactly
+// "design lead" (twins/ceo/seed/people.yaml's own Quinn: `role: Design
+// lead`) -- a named person the seed data itself identifies by that exact
+// free-text role, per this task's own suggested fallback, rather than a
+// guessed id. Zero or more than one match returns ok=false: this never
+// guesses which person is meant.
+func (d *Daemon) marketingDesignLead(ctx context.Context) (store.Person, bool) {
+	if d.cfg.Store == nil {
+		return store.Person{}, false
+	}
+	people, err := store.List[store.Person](ctx, d.cfg.Store, store.Query{Source: "seed"})
+	if err != nil {
+		return store.Person{}, false
+	}
+	var match store.Person
+	count := 0
+	for _, p := range people {
+		if strings.EqualFold(strings.TrimSpace(p.Role), "design lead") {
+			match, count = p, count+1
+		}
+	}
+	if count != 1 {
+		return store.Person{}, false
+	}
+	return match, true
+}
+
+// marketingCapacityNote computes the design lead's allocation fraction with
+// personAllocationFraction above -- the exact same roster-allocation-sum
+// Phase 5b's People workspace already uses (docs/slices/UI.md Phase 5d:
+// "reuse Phase 5b's own allocation-fraction computation") -- and returns a
+// note only at or above marketingCapacityNoteThreshold. nil (never a
+// zero-value note) when there's no resolvable design lead or their
+// allocation is below the threshold, so the client's own "is there a note"
+// check is a simple presence check.
+func (d *Daemon) marketingCapacityNote(ctx context.Context) *capacityNoteView {
+	lead, ok := d.marketingDesignLead(ctx)
+	if !ok {
+		return nil
+	}
+	fraction := d.personAllocationFraction(ctx, lead.SourceID)
+	if fraction < marketingCapacityNoteThreshold {
+		return nil
+	}
+	return &capacityNoteView{PersonName: lead.Name, Allocation: fraction}
+}
+
+// ---- assembly ----
+
+// marketingWorkspaceView is the marketing-template workspace's control-room
+// tiles.
+type marketingWorkspaceView struct {
+	TrendTiles    []trendTileView   `json:"trend_tiles"`
+	Prospects     prospectsTile     `json:"prospects"`
+	PublicReviews publicReviewsTile `json:"public_reviews"`
+	CapacityNote  *capacityNoteView `json:"capacity_note,omitempty"`
+}
+
+func (d *Daemon) marketingWorkspaceView(ctx context.Context, spec workspaces.Spec) *marketingWorkspaceView {
+	return &marketingWorkspaceView{
+		TrendTiles:    d.marketingTrendTiles(ctx, spec.ID),
+		Prospects:     d.marketingProspectsTile(ctx),
+		PublicReviews: marketingPublicReviewsTile(),
+		CapacityNote:  d.marketingCapacityNote(ctx),
+	}
 }

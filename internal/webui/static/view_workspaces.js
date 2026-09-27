@@ -17,8 +17,14 @@
 // sanctioned exception) -- nothing here ever proposes an envelope or
 // reaches a decision.
 //
-// marketing still renders the Phase 2 placeholder: its real content is
-// Phase 5d's own job.
+// Phase 5d's Marketing template follows the same posture: trend tiles name
+// the research run they came from (illustrative with none), "Draft
+// outreach" and "Draft reply" both only ever create a drafts row
+// (api.createWorkspaceDraft, kinds prospect_outreach/review_reply -- the
+// same route Phase 5b's buttons use, not a new one), and the public-reviews
+// tile always reports not_connected: no real public-reviews data source
+// exists anywhere in this codebase yet, so this file never renders a
+// review row, only the tile's own honest state.
 //
 // The hash route is "workspaces" with an optional two-segment param,
 // "<id>/<sub>" (e.g. "#workspaces/finance/overview", parsed by app.js's
@@ -340,7 +346,7 @@
   async function createTeamDraft(workspaceID, teamID, kind, label) {
     const S = window.appShared;
     try {
-      const draft = await api.createWorkspaceDraft(workspaceID, kind, teamID);
+      const draft = await api.createWorkspaceDraft(workspaceID, kind, { team: teamID });
       S.toast(label + ' drafted.');
       S.go('drafts', get(draft, 'id'));
     } catch (err) {
@@ -638,6 +644,125 @@
       researchColumn('Finished', list(get(rv, 'finished'))));
   }
 
+  // ---- marketing workspace (docs/slices/UI.md Phase 5d) ----
+  //
+  // Trend tiles (illustrative with no research run linked, real once one
+  // is), prospects from the existing company_customers.accounts read with
+  // a "Draft outreach" button, an honestly-empty public-reviews tile with
+  // a "Draft reply" mechanism (a review-id entry, since there is nothing
+  // real to list a row for), and a capacity note for the roster's design
+  // lead.
+
+  function trendTilePanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const value = get(tile, 'value');
+    const unit = get(tile, 'unit') || '';
+    const valueText = (state === 'ok' && typeof value === 'number') ? (fmtNumber(value) + unit) : '—';
+    const sourceLine = (state === 'ok' && get(tile, 'run_topic'))
+      ? h('span', { class: 'muted small' }, 'From: ' + get(tile, 'run_topic'))
+      : h('span', { class: 'muted small' }, 'No research run linked yet.');
+    return h('div', { class: 'panel dashboard-tile' },
+      h('div', { class: 'row-meta' }, get(tile, 'label')),
+      h('div', { class: 'dashboard-tile-value' }, valueText),
+      dashboardStateBadge(window.appShared, state),
+      sourceLine);
+  }
+
+  function trendTilesPanel(tiles) {
+    const S = window.appShared;
+    if (!tiles.length) return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Trends'), S.empty('No trend tiles configured.'));
+    return h('div', { class: 'stack' }, h('div', { class: 'row-meta' }, 'Trends'), h('div', { class: 'dashboard-tiles' }, tiles.map(trendTilePanel)));
+  }
+
+  // createProspectOutreachDraft is "Draft outreach": it only ever creates a
+  // drafts row from the prospect's own real name/data (never a model call)
+  // and opens it in the Drafts editor, exactly like createTeamDraft above.
+  async function createProspectOutreachDraft(workspaceID, prospectName) {
+    const S = window.appShared;
+    try {
+      const draft = await api.createWorkspaceDraft(workspaceID, 'prospect_outreach', { prospect_id: prospectName });
+      S.toast('Outreach drafted.');
+      S.go('drafts', get(draft, 'id'));
+    } catch (err) {
+      S.toast('Could not create the draft: ' + S.errText(err), 'bad');
+    }
+  }
+
+  function prospectsPanel(workspaceID, tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const items = list(get(tile, 'items'));
+    if (state !== 'ok' || !items.length) {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Prospects'), dashboardStateBadge(S, state) || S.empty('No prospects on record.'));
+    }
+    const ul = h('ul', { class: 'rows' });
+    for (const p of items) {
+      const days = get(p, 'days_since_contact');
+      const name = get(p, 'name');
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, name),
+          h('span', { class: 'row-meta' },
+            h('span', { class: 'muted' }, fmtNumber(get(p, 'open_tickets')) + ' open tickets'),
+            typeof days === 'number' ? h('span', { class: 'muted' }, Math.round(days) + 'd since contact') : null)),
+        h('div', { class: 'head-actions' },
+          S.button('Draft outreach', () => createProspectOutreachDraft(workspaceID, name), 'secondary')))));
+    }
+    return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Prospects'), ul);
+  }
+
+  // createReviewReplyDraft is "Draft reply"'s mechanism: it never reads or
+  // invents any review's actual text (internal/gateway/
+  // workspace_detail.go's own doc comment on why not) -- it only ever
+  // builds a generic, code-built reply shell from the review id typed into
+  // the field below, ready for whenever a real public-reviews source
+  // exists to list real rows here instead of this manual entry.
+  async function createReviewReplyDraft(workspaceID, reviewID, msg) {
+    const S = window.appShared;
+    const id = (reviewID || '').trim();
+    if (!id) { replace(msg, S.errorBox('Review id is required', new Error('empty review id'))); return; }
+    try {
+      const draft = await api.createWorkspaceDraft(workspaceID, 'review_reply', { review_id: id });
+      replace(msg, null);
+      S.toast('Reply drafted.');
+      S.go('drafts', get(draft, 'id'));
+    } catch (err) {
+      replace(msg, S.errorBox('Could not create the draft', err));
+    }
+  }
+
+  function publicReviewsPanel(workspaceID, tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const reviewIDInput = h('input', { type: 'text', placeholder: 'Review id', autocomplete: 'off' });
+    const msg = h('div');
+    const draftButton = S.button('Draft reply', () => createReviewReplyDraft(workspaceID, reviewIDInput.value, msg), 'secondary');
+    return h('div', { class: 'panel' },
+      h('div', { class: 'row-meta' }, 'Public reviews'),
+      dashboardStateBadge(S, state) || S.empty('No public reviews on record.'),
+      h('p', { class: 'muted small' }, 'No public-reviews source is connected yet. The reply mechanism below already works: paste a review id to draft a reply shell for it.'),
+      h('div', { class: 'form inline' }, reviewIDInput, draftButton),
+      msg);
+  }
+
+  function capacityNotePanel(note) {
+    if (!note) return null;
+    return h('section', { class: 'panel' },
+      h('h2', null, 'Capacity note'),
+      h('p', null, get(note, 'person_name') + ' (design lead) is at ' + fmtNumber(get(note, 'allocation')) + ' allocation.'));
+  }
+
+  function marketingTiles(view, workspaceID) {
+    const m = get(view, 'marketing');
+    if (!m) return null;
+    return h('div', { class: 'stack' },
+      trendTilesPanel(list(get(m, 'trend_tiles'))),
+      prospectsPanel(workspaceID, get(m, 'prospects')),
+      publicReviewsPanel(workspaceID, get(m, 'public_reviews')),
+      capacityNotePanel(get(m, 'capacity_note')));
+  }
+
   // ---- shared "filtered existing sections": needs-you, meetings, threads ----
 
   function needsYouPanel(items) {
@@ -730,6 +855,7 @@
     else if (template === 'people') tiles = peopleTiles(view, id);
     else if (template === 'ideas') tiles = ideasTiles(view, () => renderWorkspaceDetail(c, spec, sub, gen));
     else if (template === 'research') tiles = researchTiles(view);
+    else if (template === 'marketing') tiles = marketingTiles(view, id);
 
     const body = tiles
       ? h('div', { class: 'stack' }, tiles)

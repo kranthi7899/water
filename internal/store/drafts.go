@@ -18,7 +18,7 @@ import (
 // an envelope (drafts.go in internal/gateway), never to this row.
 type Draft struct {
 	ID           string
-	Template     string // "reply" | "delegation" | "investor_update" | "team_message" | "pulse_check" (see draftTemplates)
+	Template     string // "reply" | "delegation" | "investor_update" | "team_message" | "pulse_check" | "idea_proposal" | "prospect_outreach" | "review_reply" (see draftTemplates)
 	To           string
 	Subject      string
 	Body         string
@@ -34,10 +34,13 @@ type Draft struct {
 // (docs/slices/UI.md Phase 5b's People workspace buttons, migration 0023)
 // are additive to the three Phase 3c originally shipped with; idea_proposal
 // (docs/slices/UI.md Phase 5c's "Propose" button, migration 0024) is
-// additive again.
+// additive again; prospect_outreach and review_reply (docs/slices/UI.md
+// Phase 5d's Marketing workspace "Draft outreach"/"Draft reply" buttons,
+// migration 0025) are additive again.
 var draftTemplates = map[string]bool{
 	"reply": true, "delegation": true, "investor_update": true,
 	"team_message": true, "pulse_check": true, "idea_proposal": true,
+	"prospect_outreach": true, "review_reply": true,
 }
 
 // DraftTemplateLabel is Template's display label (docs/slices/UI.md Phase
@@ -58,6 +61,10 @@ func DraftTemplateLabel(template string) string {
 		return "Pulse check"
 	case "idea_proposal":
 		return "Idea proposal"
+	case "prospect_outreach":
+		return "Prospect outreach"
+	case "review_reply":
+		return "Review reply"
 	default:
 		return ""
 	}

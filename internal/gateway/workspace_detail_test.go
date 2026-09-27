@@ -93,6 +93,8 @@ const wsTestNow = "2026-09-27T00:00:00Z"
 //     twins/ceo/workspaces/clients.yaml.
 //   - "people": the people-template workspace (Phase 5b), mirroring
 //     twins/ceo/workspaces/people.yaml.
+//   - "marketing": the marketing-template workspace (Phase 5d), mirroring
+//     twins/ceo/workspaces/marketing.yaml.
 func wsWorkspacesFixture(t *testing.T) *workspaces.Registry {
 	t.Helper()
 	fsys := fstest.MapFS{
@@ -128,6 +130,12 @@ id: people
 name: People
 template: people
 source: roster
+`)},
+		"twins/t/workspaces/marketing.yaml": &fstest.MapFile{Data: []byte(`
+id: marketing
+name: Marketing
+template: marketing
+source: company_customers
 `)},
 	}
 	reg, err := workspaces.LoadRegistry(fsys, "t")
@@ -273,6 +281,9 @@ func TestWorkspaceDetailRoutesNeverWriteADecision(t *testing.T) {
 		{"people team_message draft", "POST", "/v1/workspaces/people/drafts", `{"kind":"team_message","team":"crawler"}`},
 		{"people pulse_check draft", "POST", "/v1/workspaces/people/drafts", `{"kind":"pulse_check","team":"crawler"}`},
 		{"people draft, unknown kind", "POST", "/v1/workspaces/people/drafts", `{"kind":"newsletter","team":"crawler"}`},
+		{"marketing", "GET", "/v1/workspaces/marketing", ""},
+		{"marketing prospect_outreach draft, unknown prospect", "POST", "/v1/workspaces/marketing/drafts", `{"kind":"prospect_outreach","prospect_id":"acme"}`},
+		{"marketing review_reply draft", "POST", "/v1/workspaces/marketing/drafts", `{"kind":"review_reply","review_id":"rev-1"}`},
 		{"unknown id (404)", "GET", "/v1/workspaces/does-not-exist", ""},
 	}
 	for _, tc := range table {
@@ -1078,5 +1089,340 @@ func TestCreateWorkspaceDraftUnknownWorkspaceIs404(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// ---- Marketing workspace (docs/slices/UI.md Phase 5d) ----
+
+// TestMarketingWorkspaceExactFixtureValues pins the Marketing template's
+// shape to exact fixture values: no research run is linked in_workspace, so
+// every trend tile must be illustrative; company_customers.accounts has one
+// healthy account (Acme, excluded) and two blank-health rows (prospects,
+// included, sorted by name); no roster person has role "Design lead", so
+// there is no capacity note; public reviews always report not_connected
+// with no items.
+func TestMarketingWorkspaceExactFixtureValues(t *testing.T) {
+	h := newHarness(t)
+	now, _ := time.Parse(time.RFC3339, wsTestNow)
+
+	inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
+		return wsJSONResult(map[string]any{"rows": [][]any{
+			{"Acme", "healthy", 1.0, 9.0, "2026-09-20"},
+			{"Northstar", "", 4.0, nil, "2026-08-01"},
+			{"Fenwick", "", 0.0, nil, "2026-09-10"},
+		}})
+	})
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+
+	status, body := wsGet(t, h.srv.URL, "/v1/workspaces/marketing", h.token)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	mk := body["marketing"].(map[string]any)
+
+	trend := mk["trend_tiles"].([]any)
+	if len(trend) != 3 {
+		t.Fatalf("trend_tiles = %+v, want 3", trend)
+	}
+	for _, raw := range trend {
+		tile := raw.(map[string]any)
+		if tile["state"] != "illustrative" {
+			t.Errorf("trend tile %+v: state = %v, want illustrative (no research run linked)", tile, tile["state"])
+		}
+		if _, has := tile["run_id"]; has {
+			t.Errorf("trend tile %+v has run_id set with no run linked", tile)
+		}
+	}
+
+	prospects := mk["prospects"].(map[string]any)
+	if prospects["state"] != "ok" {
+		t.Fatalf("prospects.state = %v", prospects["state"])
+	}
+	items := prospects["items"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("prospects.items = %+v, want 2 (blank-health rows only)", items)
+	}
+	fenwick := items[0].(map[string]any) // sorted by name: Fenwick before Northstar
+	if fenwick["name"] != "Fenwick" {
+		t.Fatalf("prospects.items[0] = %+v, want Fenwick", fenwick)
+	}
+	if _, hasTickets := fenwick["open_tickets"]; hasTickets {
+		t.Fatalf("Fenwick open_tickets = %v, want omitted (0)", fenwick["open_tickets"])
+	}
+	if got := fenwick["days_since_contact"].(float64); got != 17 {
+		t.Fatalf("Fenwick days_since_contact = %v, want 17 (2026-09-10 to 2026-09-27)", got)
+	}
+	north := items[1].(map[string]any)
+	if north["name"] != "Northstar" || north["open_tickets"].(float64) != 4 {
+		t.Fatalf("prospects.items[1] = %+v, want Northstar with open_tickets 4", north)
+	}
+
+	reviews := mk["public_reviews"].(map[string]any)
+	if reviews["state"] != "not_connected" {
+		t.Fatalf("public_reviews.state = %v, want not_connected (no data source exists)", reviews["state"])
+	}
+	if _, hasItems := reviews["items"]; hasItems {
+		t.Fatalf("public_reviews.items = %v, want omitted/empty -- no fabricated reviews", reviews["items"])
+	}
+
+	if _, hasNote := mk["capacity_note"]; hasNote {
+		t.Fatalf("capacity_note = %v, want omitted (no roster person has role \"Design lead\")", mk["capacity_note"])
+	}
+}
+
+// TestMarketingTrendTilesReferenceRealRun is the positive case for the
+// in_workspace mechanism marketingAttachedResearchRun documents: once a
+// finished research run is linked to the marketing workspace (store.AddLink
+// with FromType "research" -- no production writer creates this edge yet,
+// so a test writes it directly, exactly like marketingAttachedResearchRun's
+// own doc comment says), every trend tile whose facet has a matching report
+// section switches to "ok" and names that run; the "market" section's own
+// "42%" is extracted as a real, traceable value.
+func TestMarketingTrendTilesReferenceRealRun(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	now, _ := time.Parse(time.RFC3339, wsTestNow)
+
+	idea, err := h.st.CreateIdea(ctx, store.Idea{Title: "On-device transcription", Stage: "explored"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := "## Market\nGrowing at 42% year over year.\n\n\n## Competitors\nThree main competitors, no clear leader.\n\n\n## Pricing\nNo pricing changes this quarter.\n"
+	run, err := h.st.CreateResearchRun(ctx, store.ResearchRun{
+		IdeaID: idea.ID, Topic: "On-device transcription", Status: "finished",
+		ReportText: report, FinishedAt: now.Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.st.AddLink(ctx, store.Link{Kind: store.LinkInWorkspace, FromType: "research", FromID: run.ID, ToType: "workspace", ToID: "marketing"}); err != nil {
+		t.Fatal(err)
+	}
+
+	inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
+		return wsJSONResult(map[string]any{"rows": [][]any{}})
+	})
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+
+	status, body := wsGet(t, h.srv.URL, "/v1/workspaces/marketing", h.token)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	mk := body["marketing"].(map[string]any)
+	trend := mk["trend_tiles"].([]any)
+	if len(trend) != 3 {
+		t.Fatalf("trend_tiles = %+v, want 3", trend)
+	}
+	byLabel := map[string]map[string]any{}
+	for _, raw := range trend {
+		tile := raw.(map[string]any)
+		byLabel[tile["label"].(string)] = tile
+	}
+	market, ok := byLabel["Market"]
+	if !ok {
+		t.Fatalf("no Market trend tile in %+v", trend)
+	}
+	if market["state"] != "ok" {
+		t.Fatalf("Market tile state = %v, want ok (a finished run is linked)", market["state"])
+	}
+	if market["run_id"] != run.ID {
+		t.Fatalf("Market tile run_id = %v, want %v", market["run_id"], run.ID)
+	}
+	if market["run_topic"] != run.Topic {
+		t.Fatalf("Market tile run_topic = %v, want %v", market["run_topic"], run.Topic)
+	}
+	if got := market["value"].(float64); got != 42 {
+		t.Fatalf("Market tile value = %v, want 42 (extracted from the run's own report text)", got)
+	}
+	if market["unit"] != "%" {
+		t.Fatalf("Market tile unit = %v, want %%", market["unit"])
+	}
+
+	for _, label := range []string{"Competitors", "Pricing"} {
+		tile, ok := byLabel[label]
+		if !ok {
+			t.Fatalf("no %s trend tile in %+v", label, trend)
+		}
+		if tile["state"] != "ok" || tile["run_id"] != run.ID {
+			t.Fatalf("%s tile = %+v, want state ok and run_id %v (no fabricated number required)", label, tile, run.ID)
+		}
+		if _, hasValue := tile["value"]; hasValue {
+			t.Fatalf("%s tile value = %v, want omitted (no percentage in that section's text)", label, tile["value"])
+		}
+	}
+}
+
+// TestMarketingCapacityNoteThreshold is the plan's own named boundary
+// (docs/slices/UI.md Phase 5d: "the design lead's computed allocation is
+// >=1.0"): exactly 1.0 fires, one allocation link short of it does not.
+func TestMarketingCapacityNoteThreshold(t *testing.T) {
+	setup := func(t *testing.T, fraction float64) (status int, body map[string]any) {
+		h := newHarness(t)
+		ctx := context.Background()
+		now, _ := time.Parse(time.RFC3339, wsTestNow)
+		if err := h.st.Upsert(ctx, &store.Person{Meta: store.Meta{Source: "seed", SourceID: "quinn"}, Name: "Quinn", Role: "Design lead"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.st.Upsert(ctx, &store.Project{Meta: store.Meta{Source: "seed", SourceID: "halcyon-rollout"}, Name: "Halcyon rollout", StartAt: mustDate(t, "2026-08-01")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.st.AddLink(ctx, store.Link{Kind: store.LinkAllocated, FromType: "person", FromID: "quinn", ToType: "project", ToID: "halcyon-rollout", Fraction: fraction}); err != nil {
+			t.Fatal(err)
+		}
+		inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
+			return wsJSONResult(map[string]any{"rows": [][]any{}})
+		})
+		h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+		h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+		return wsGet(t, h.srv.URL, "/v1/workspaces/marketing", h.token)
+	}
+
+	t.Run("exactly 1.0 fires", func(t *testing.T) {
+		status, body := setup(t, 1.0)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d", status)
+		}
+		mk := body["marketing"].(map[string]any)
+		note, ok := mk["capacity_note"].(map[string]any)
+		if !ok {
+			t.Fatalf("capacity_note missing at exactly 1.0: %+v", mk)
+		}
+		if note["person_name"] != "Quinn" || note["allocation"].(float64) != 1.0 {
+			t.Fatalf("capacity_note = %+v, want Quinn at 1.0", note)
+		}
+	})
+
+	t.Run("below 1.0 does not fire", func(t *testing.T) {
+		status, body := setup(t, 0.99)
+		if status != http.StatusOK {
+			t.Fatalf("status = %d", status)
+		}
+		mk := body["marketing"].(map[string]any)
+		if _, has := mk["capacity_note"]; has {
+			t.Fatalf("capacity_note = %v, want omitted below the 1.0 threshold", mk["capacity_note"])
+		}
+	})
+}
+
+// TestCreateWorkspaceDraftProspectOutreach is "Draft outreach" (docs/
+// slices/UI.md Phase 5d): a prospect resolved from the real
+// company_customers.accounts fixture, a code-built body naming the
+// prospect, never a model call.
+func TestCreateWorkspaceDraftProspectOutreach(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	now, _ := time.Parse(time.RFC3339, wsTestNow)
+	inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
+		return wsJSONResult(map[string]any{"rows": [][]any{
+			{"Fenwick", "", 2.0, nil, "2026-09-10"},
+		}})
+	})
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+
+	status, body := wsPost(t, h.srv.URL, "/v1/workspaces/marketing/drafts", `{"kind":"prospect_outreach","prospect_id":"Fenwick"}`, h.token)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if body["template"] != "prospect_outreach" {
+		t.Fatalf("template = %v, want prospect_outreach", body["template"])
+	}
+	subj, _ := body["subject"].(string)
+	if !strings.Contains(subj, "Fenwick") {
+		t.Fatalf("subject = %q, want it to name the prospect", subj)
+	}
+	bodyText, _ := body["body"].(string)
+	if !strings.Contains(bodyText, "Fenwick") {
+		t.Fatalf("body = %q, want it to name the prospect", bodyText)
+	}
+	if !strings.Contains(bodyText, "17 days") {
+		t.Fatalf("body = %q, want it to cite the real days-since-contact number (17, 2026-09-10 to 2026-09-27)", bodyText)
+	}
+
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 1 {
+		t.Fatalf("drafts = %+v, want exactly 1", drafts)
+	}
+}
+
+func TestCreateWorkspaceDraftProspectOutreachUnknownProspectIs400(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	now, _ := time.Parse(time.RFC3339, wsTestNow)
+	inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
+		return wsJSONResult(map[string]any{"rows": [][]any{}})
+	})
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+
+	resp := do(t, h.srv.URL, "POST", "/v1/workspaces/marketing/drafts", `{"kind":"prospect_outreach","prospect_id":"does-not-exist"}`, h.token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unknown prospect", resp.StatusCode)
+	}
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 0 {
+		t.Fatalf("an unknown prospect must never create a draft, got %+v", drafts)
+	}
+}
+
+// TestCreateWorkspaceDraftReviewReply is "Draft reply"'s mechanism (docs/
+// slices/UI.md Phase 5d): built and tested even though no real
+// public-reviews source exists yet (marketingPublicReviewsTile's own doc
+// comment) -- a caller-supplied review id builds a generic, code-built
+// reply template, never any fabricated review text.
+func TestCreateWorkspaceDraftReviewReply(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+
+	status, body := wsPost(t, h.srv.URL, "/v1/workspaces/marketing/drafts", `{"kind":"review_reply","review_id":"rev-42"}`, h.token)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if body["template"] != "review_reply" {
+		t.Fatalf("template = %v, want review_reply", body["template"])
+	}
+	bodyText, _ := body["body"].(string)
+	if !strings.Contains(bodyText, "rev-42") {
+		t.Fatalf("body = %q, want it to reference the review id", bodyText)
+	}
+	if strings.Contains(strings.ToLower(bodyText), "stars") || strings.Contains(bodyText, "\"") {
+		t.Fatalf("body = %q, looks like it might contain fabricated review content", bodyText)
+	}
+
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 1 {
+		t.Fatalf("drafts = %+v, want exactly 1", drafts)
+	}
+}
+
+func TestCreateWorkspaceDraftReviewReplyBlankIDIs400(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+
+	resp := do(t, h.srv.URL, "POST", "/v1/workspaces/marketing/drafts", `{"kind":"review_reply","review_id":""}`, h.token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for a blank review_id", resp.StatusCode)
+	}
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 0 {
+		t.Fatalf("a blank review_id must never create a draft, got %+v", drafts)
 	}
 }

@@ -35,12 +35,15 @@ func TestCreateDraftRoundTrip(t *testing.T) {
 // team_message and pulse_check alongside the three Phase 3c template
 // values, exercised here exactly like TestCreateDraftRoundTrip does for
 // "reply". Phase 5c's own idea_proposal template (migration 0024, the
-// Ideas workspace's "Propose" button) is exercised the same way.
+// Ideas workspace's "Propose" button) and Phase 5d's own
+// prospect_outreach/review_reply templates (migration 0025, the Marketing
+// workspace's "Draft outreach"/"Draft reply" buttons) are exercised the
+// same way.
 func TestCreateDraftAcceptsThePeopleWorkspaceTemplates(t *testing.T) {
 	s, _ := openTemp(t)
 	ctx := context.Background()
 
-	for _, template := range []string{"team_message", "pulse_check", "idea_proposal"} {
+	for _, template := range []string{"team_message", "pulse_check", "idea_proposal", "prospect_outreach", "review_reply"} {
 		d, err := s.CreateDraft(ctx, Draft{Template: template, Subject: "s", Body: "b"})
 		if err != nil {
 			t.Fatalf("%s: %v", template, err)

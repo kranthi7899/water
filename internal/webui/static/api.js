@@ -117,8 +117,11 @@
     workspace: (id) => request('GET', '/v1/workspaces/' + enc(id)),
     // Phase 5b: the People workspace's "Message a team"/"Send pulse check"
     // buttons -- creates a drafts row (store.CreateDraft), never sends
-    // anything itself.
-    createWorkspaceDraft: (id, kind, team) => request('POST', '/v1/workspaces/' + enc(id) + '/drafts', { kind, team }),
+    // anything itself. Phase 5d's Marketing workspace reuses this exact
+    // route with two more kinds (prospect_outreach, review_reply) and
+    // fields (prospect_id, review_id) instead of team -- no new route, so
+    // this takes a plain fields object rather than a fixed team parameter.
+    createWorkspaceDraft: (id, kind, fields) => request('POST', '/v1/workspaces/' + enc(id) + '/drafts', Object.assign({ kind }, fields)),
     dashboards: () => request('GET', '/v1/dashboards'),
     // Phase 4: one dashboard's actual computed tiles.
     dashboard: (id) => request('GET', '/v1/dashboards/' + enc(id)),
