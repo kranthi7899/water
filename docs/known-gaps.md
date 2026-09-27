@@ -688,16 +688,20 @@ any daemon started from this binary unless a real send is intended.
   write succeeds; a skipped/failed recap (no durable form) is evicted by
   a new `sweepRecaps`/`RunRecapSweep` after 24h, mirroring the turn-table
   sweep this same review already added.
-- Swift: a mid-`startCapture` audio-device change landing in the narrow
+- ~~Swift: a mid-`startCapture` audio-device change landing in the narrow
   synchronous window before `MeetingController`'s `state` is set to
-  `.active` is silently dropped instead of tearing down/notifying — the
-  mic can go dead with no user-visible signal.
-- Swift: `VoiceSession.startCapture` (`HoldToTalk.swift`) would silently
-  swallow a *synchronous* `.error` from `SpeechCapture.start`. Not
-  live-exploitable today (both real conformers, `ParakeetCapture` and
-  `OnDeviceSpeechCapture`, always dispatch via `DispatchQueue.main.async`),
-  but worth a `SpeechCapture` protocol contract note if a future
-  conformer is added that could call back synchronously.
+  `.active` is silently dropped~~ — **fixed 2026-09-27**: `onInterrupted`/
+  `onRestarted`'s guard now also accepts `.starting`, handling that window
+  exactly like `.active` already does. No automated test (`Sources/Water`
+  has no test target reaching this file, same as the `RecognitionStream`
+  fix below); verified by code review plus the full gate suite.
+- ~~Swift: `VoiceSession.startCapture` (`HoldToTalk.swift`) would silently
+  swallow a *synchronous* `.error` from `SpeechCapture.start`~~ — **fixed
+  2026-09-27**: `state` now moves to `.listening` before calling
+  `capture.start`, with a guard afterward that skips announcing
+  "listening" if a synchronous callback already tore the hold down.
+  `startCaptureHandlesASynchronousErrorCallback` (`HoldToTalkTests.swift`)
+  proves it with a fake `SpeechCapture` that calls back synchronously.
 - The Swift meeting-capture data race this pass fixed (`RecognitionStream`
   in `MeetingController.swift`) has no automated regression test —
   `Sources/Water` (the AppKit/AVFoundation/Carbon glue) has no test target
