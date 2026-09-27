@@ -20,6 +20,33 @@ import (
 	"water/internal/twins"
 )
 
+// TestMain isolates every test in this package from the owner's real
+// ~/.water: several tests below (TestBuildTwinDepsFSFailsLoudlyOnBad*File)
+// pass buildTwinDepsFS a fixture fsys but still id it realTwinID, which
+// resolves twinStorePath/twinAuditPath through config.Home() — and
+// buildTwinDepsFS opens the store (applying any pending migration) before
+// most of those tests' own bad file ever gets checked, since the decision
+// registry is the only check that runs ahead of store.Open. Without this,
+// running this package's tests on a machine with a real ~/.water would
+// open (and migrate) the owner's actual database, which CLAUDE.md's "never
+// touch ~/.water" rule forbids outright. Setting WATER_HOME once here, for
+// the whole package, is the single point that guarantees this regardless
+// of whether a given test remembers to isolate itself — a test that also
+// calls its own t.Setenv("WATER_HOME", ...) (e.g.
+// TestDemoTwinNeverTouchesRealStore) still works fine layered on top of
+// this, since t.Setenv restores to this temp dir afterward, never to the
+// real one.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "water-cli-test-home")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("WATER_HOME", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // minimalCEOManifestYAML is just enough of twins/ceo/twin.yaml's shape for
 // twins.Load to accept it; these tests care only about the decision
 // registry's own validation, so no connectors are declared.
@@ -106,6 +133,49 @@ tests:
 	}
 	if !strings.Contains(err.Error(), "intent registry") {
 		t.Fatalf("buildTwinDepsFS error = %q, want it to name the intent registry", err.Error())
+	}
+}
+
+// TestBuildTwinDepsFSFailsLoudlyOnBadWorkspaceFile is internal/workspaces'
+// own version of the same rule (docs/slices/UI.md Phase 1a): a malformed
+// twins/<id>/workspaces/*.yaml must stop startup before the store is even
+// opened, exactly like a bad twin.yaml, decisions or intents file does.
+func TestBuildTwinDepsFSFailsLoudlyOnBadWorkspaceFile(t *testing.T) {
+	fsys := fstest.MapFS{
+		"twins/ceo/twin.yaml": &fstest.MapFile{Data: []byte(minimalCEOManifestYAML)},
+		// template is not one of the closed set; this must fail to
+		// validate, not be silently dropped or treated as a valid template.
+		"twins/ceo/workspaces/broken.yaml": &fstest.MapFile{Data: []byte("id: broken\nname: Broken\ntemplate: not_a_real_template\nsource: roster\n")},
+	}
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "", "")
+	if err == nil {
+		t.Fatal("buildTwinDepsFS: expected an error from a malformed workspace file, got nil")
+	}
+	if !strings.Contains(err.Error(), "workspace registry") {
+		t.Fatalf("buildTwinDepsFS error = %q, want it to name the workspace registry", err.Error())
+	}
+}
+
+// TestBuildTwinDepsFSFailsLoudlyOnBadDashboardFile is internal/dashboards'
+// own version: an unknown metric id in a dashboard spec must stop startup
+// the same way.
+func TestBuildTwinDepsFSFailsLoudlyOnBadDashboardFile(t *testing.T) {
+	fsys := fstest.MapFS{
+		"twins/ceo/twin.yaml": &fstest.MapFile{Data: []byte(minimalCEOManifestYAML)},
+		"twins/ceo/dashboards/finance.yaml": &fstest.MapFile{Data: []byte(`
+name: Finance
+source: company_finance
+metrics: [cash_position, monthly_burn, made_up_metric]
+breakdown: spend_by_application
+callout: worst_app_margin
+`)},
+	}
+	_, err := buildTwinDepsFS(fsys, realTwinID, "", "", "")
+	if err == nil {
+		t.Fatal("buildTwinDepsFS: expected an error from a malformed dashboard file, got nil")
+	}
+	if !strings.Contains(err.Error(), "dashboard registry") {
+		t.Fatalf("buildTwinDepsFS error = %q, want it to name the dashboard registry", err.Error())
 	}
 }
 

@@ -1,0 +1,10 @@
+# Domain workspace: People, sourced from the roster (internal/roster).
+# No membership rule yet: this workspace's own data (the resource bar,
+# team tiles, load) comes straight from the roster itself, per twin
+# (docs/slices/UI.md Phase 5b), not from records that need a deterministic
+# "belongs to People" check. A later phase can add one (e.g. decision_types
+# for people-ops decisions) without a schema change.
+id: people
+name: People
+template: people
+source: roster

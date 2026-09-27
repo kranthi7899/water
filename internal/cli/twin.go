@@ -25,6 +25,7 @@ import (
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
 	"water/internal/connectors/research"
+	"water/internal/dashboards"
 	"water/internal/decider"
 	"water/internal/decisions"
 	"water/internal/gate"
@@ -32,11 +33,13 @@ import (
 	"water/internal/nervous/propose"
 	"water/internal/nervous/reflex"
 	"water/internal/nervous/render"
+	"water/internal/recordlinks"
 	"water/internal/roster"
 	"water/internal/store"
 	"water/internal/twinlink"
 	"water/internal/twins"
 	"water/internal/vault"
+	"water/internal/workspaces"
 )
 
 // realTwinID and demoTwinID are the only two twins/<id> directories the CLI
@@ -124,6 +127,14 @@ type twinDeps struct {
 	intents   *intents.Registry
 	style     *render.Style
 	roleMD    string
+	// workspaces and dashboards (docs/slices/UI.md Phase 1a) are the
+	// loaded twins/<id>/workspaces/*.yaml and twins/<id>/dashboards/*.yaml
+	// registries. Phase 1a adds no endpoint that reads them yet — Phase 2's
+	// GET /v1/workspaces and GET /v1/dashboards are what will — but they're
+	// already validated and loaded here so a bad file fails loudly at
+	// startup now, not whenever that endpoint eventually lands.
+	workspaces *workspaces.Registry
+	dashboards *dashboards.Registry
 }
 
 func (d *twinDeps) Close() {
@@ -331,6 +342,56 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 		st.Close()
 		return nil, fmt.Errorf("roster: %w", err)
 	}
+	// The workspace registry (twins/<id>/workspaces/*.yaml,
+	// internal/workspaces) is additive and optional the same way the roster
+	// is — a missing directory is an empty registry, not an error — but a
+	// present, malformed spec fails loudly here, before anything else opens.
+	// Sync upserts one workspaces row per loaded spec; idempotent, safe to
+	// re-run on every daemon startup.
+	wsReg, err := workspaces.LoadRegistry(fsys, id)
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("workspace registry: %w", err)
+	}
+	if err := wsReg.Sync(context.Background(), st); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("workspace registry: %w", err)
+	}
+	// The dashboard registry (twins/<id>/dashboards/*.yaml,
+	// internal/dashboards) is spec-only in this phase — no compute, no
+	// endpoint — but loads and validates here for the same fail-loudly
+	// reason: a bad or invented metric/breakdown/callout id must stop
+	// startup now, not silently surface once Phase 4 tries to compute it.
+	dashReg, err := dashboards.LoadRegistry(fsys, id)
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("dashboard registry: %w", err)
+	}
+	// Derived for_project/in_workspace links for the roster's own clients —
+	// the one record kind Phase 1a's data is actually materialized into the
+	// store at startup. A Linear issue has no equivalent hook yet: per
+	// docs/CONTEXT.md's "no standing context-accumulation layer" amendment,
+	// issues are fetched live through Gate.Invoke and never upserted into
+	// the store, so recordlinks.ForProjectFromIssue/InWorkspaceForIssue have
+	// no daemon-startup call site to join here; a later phase (a dashboard
+	// compute call, or a future sync) should call them at the point it
+	// actually fetches issues. Idempotent: safe to re-run on every startup,
+	// the same posture roster.Load and wsReg.Sync already have.
+	seedClients, err := store.List[store.Client](context.Background(), st, store.Query{Source: "seed"})
+	if err != nil {
+		st.Close()
+		return nil, fmt.Errorf("workspace links: %w", err)
+	}
+	for _, c := range seedClients {
+		if err := recordlinks.ForProjectFromClient(context.Background(), st, c); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("workspace links: for_project: %w", err)
+		}
+		if err := recordlinks.InWorkspaceForClient(context.Background(), st, wsReg, c); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("workspace links: in_workspace: %w", err)
+		}
+	}
 	reg, err := buildCEORegistryModel(id, st, mailAddress, signatureName, githubRepo, m.ModelFor(twins.TierFast))
 	if err != nil {
 		st.Close()
@@ -362,7 +423,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 		st.Close()
 		return nil, err
 	}
-	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, intents: intentsReg, style: style, roleMD: loadRoleMD(id)}, nil
+	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, intents: intentsReg, style: style, roleMD: loadRoleMD(id), workspaces: wsReg, dashboards: dashReg}, nil
 }
 
 // buildDecisionsTrigger wires internal/decisions' classification-trigger

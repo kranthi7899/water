@@ -1,0 +1,10 @@
+# Finance dashboard spec (Phase 1a: spec only, no compute — Phase 4 wires
+# these ids to real compute functions). docs/slices/UI.md Phase 4:
+# metrics are cash position, monthly burn and runway; the breakdown is
+# spend by application; the callout is the application losing the most
+# relative to its revenue.
+name: Finance
+source: company_finance
+metrics: [cash_position, monthly_burn, runway_months]
+breakdown: spend_by_application
+callout: worst_app_margin

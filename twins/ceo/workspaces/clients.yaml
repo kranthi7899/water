@@ -1,0 +1,8 @@
+# Domain workspace: Clients, sourced from company_customers. Every roster
+# client belongs here — the plan's own example for this rule
+# (docs/slices/UI.md Phase 1a: "clients: all for the clients workspace").
+id: clients
+name: Clients
+template: clients
+source: company_customers
+clients: all

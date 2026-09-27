@@ -1,0 +1,13 @@
+# Domain workspace: Ideas. Judgment call (Phase 1a): docs/slices/UI.md's
+# own `ideas` table (id, title, gist, stage, provenance, simulated) doesn't
+# exist until Phase 1d, so there is nothing today an `ideas` source kind
+# could name — internal/workspaces' closed source list has no "ideas"
+# entry. Sourcing this workspace from `research` for now (the research
+# runner, Phase 5c, is what actually produces ideas' evidence) is the
+# closest existing source kind; Phase 1d should revisit this once the
+# ideas table is real, most likely replacing it with a dedicated source
+# kind of its own. No membership rule yet, for the same reason.
+id: ideas
+name: Ideas
+template: ideas
+source: research

@@ -1,0 +1,8 @@
+# Project workspace: Water (this repo's own team), twins/ceo/seed/people.yaml's
+# "water" team, Linear key WAT. Membership is deterministic: a Linear issue
+# whose team key is WAT belongs here (internal/recordlinks.InWorkspace).
+id: water
+name: Water
+template: project
+source: linear_team:WAT
+teams: [WAT]
