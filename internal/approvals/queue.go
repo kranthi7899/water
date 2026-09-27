@@ -454,6 +454,46 @@ func (q *Queue) Decide(ctx context.Context, id string, a Answer) (Envelope, erro
 	return q.Get(ctx, id)
 }
 
+// Reject denies a pending envelope with a caller-supplied reason: the same
+// pending -> denied transition, expiry check and audit trail as Decide's own
+// no/ambiguous path, factored out so a caller with a fixed reason that isn't
+// "the CEO answered no" (docs/slices/UI.md Phase 3a's request-changes
+// endpoint uses "changes requested") doesn't have to fake an Answer to get
+// there. Same preconditions as Decide: id must be Pending -- an envelope
+// already past its expiry is expired instead, exactly like Decide -- and a
+// lost compare-and-swap race reports the current envelope with an error
+// rather than a denial that didn't actually apply.
+func (q *Queue) Reject(ctx context.Context, id, reason string) (Envelope, error) {
+	e, err := q.Get(ctx, id)
+	if err != nil {
+		return Envelope{}, err
+	}
+	if e.Status != Pending {
+		return e, fmt.Errorf("approvals: %s is %s, not pending", id, e.Status)
+	}
+	now := q.Now().UTC()
+	if !now.Before(e.ExpiresAt) {
+		if err := q.expire(ctx, id, e.Action, Pending); err != nil {
+			return Envelope{}, err
+		}
+		return q.getAfter(ctx, id, ErrExpired)
+	}
+	if h := q.beforeTransition; h != nil {
+		h()
+	}
+	ok, err := q.st.TransitionApproval(ctx, id, string(Pending), string(Denied), reason, now)
+	if err != nil {
+		return Envelope{}, err
+	}
+	if !ok {
+		return q.getAfter(ctx, id, fmt.Errorf("approvals: %s changed while deciding; this answer was not applied", id))
+	}
+	if _, err := q.log.Append(audit.Record{Kind: audit.KindDenial, Function: e.Action, EnvelopeID: id, Origin: e.Origin, Reason: reason, ArgsHash: e.PayloadHash}); err != nil {
+		return Envelope{}, err
+	}
+	return q.Get(ctx, id)
+}
+
 // Edit voids a pending or approved envelope and proposes the edited payload
 // as a new pending envelope that needs its own decision.
 func (q *Queue) Edit(ctx context.Context, id string, payload map[string]any) (Envelope, error) {

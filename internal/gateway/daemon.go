@@ -357,6 +357,7 @@ func (d *Daemon) Mux() http.Handler {
 	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
 	// Workspace UI (Slice V-ui, docs/slices/V.md §5).
 	mux.Handle("POST /v1/approvals/{id}/edit", d.auth(d.handleEditApproval))
+	mux.Handle("POST /v1/approvals/{id}/request-changes", d.auth(d.handleRequestChanges))
 	mux.Handle("POST /v1/decisions/{id}/stage", d.auth(d.handleStageDecision))
 	mux.Handle("POST /v1/decisions/{id}/dismiss", d.auth(d.handleDismissDecision))
 	mux.Handle("GET /v1/threads", d.auth(d.handleListThreads))

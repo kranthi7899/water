@@ -86,6 +86,11 @@
     // Edit voids the envelope and answers {voided, envelope}: the new,
     // pending one needs its own yes. Nothing runs by editing.
     editApproval: (id, payloadHash, payload) => request('POST', '/v1/approvals/' + enc(id) + '/edit', { payload_hash: payloadHash, payload }),
+    // Phase 3a: a person-request approval's "Request changes" button. Denies
+    // the original (reason "changes requested") and proposes a fresh
+    // gmail.send_message reply to the requester; nothing is sent by this
+    // call itself.
+    requestChanges: (id, note) => request('POST', '/v1/approvals/' + enc(id) + '/request-changes', { note }),
     threads: () => request('GET', '/v1/threads'),
     createThread: (title) => request('POST', '/v1/threads', { title }),
     anchorThread: (type, id) => request('POST', '/v1/threads/anchor', { anchor_type: type, anchor_id: id }),

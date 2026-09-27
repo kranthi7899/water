@@ -239,6 +239,13 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .row-sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
 
+/* Today's kind icon + origin line (docs/slices/UI.md Phase 3a). .row-line
+   wraps the glyph and .row-main in one flex row without touching .row
+   itself (block, shared by every other list in the app). */
+.row-line { display: flex; align-items: flex-start; gap: 8px; }
+.row-kind { flex: none; width: 1.2em; text-align: center; line-height: 1.4; }
+.row-origin { font-size: 12px; overflow-wrap: anywhere; }
+
 .badge {
   display: inline-block;
   padding: 1px 7px;
@@ -346,6 +353,51 @@ figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .kv dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 details summary { cursor: pointer; color: var(--muted); }
+
+/* ---------- Approvals queue additions (docs/slices/UI.md Phase 3a) ---------- */
+
+/* W's recipient warnings (finding 23): an amber box on the approval card,
+   the same amber the read-back/notice boxes already use elsewhere. */
+.warnings-box {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  color: var(--warn);
+  font-size: 13px;
+}
+
+/* The trail (staged -> approved -> sent -> reply): a plain row of labeled
+   steps, the current one highlighted. Text/borders only, no images. */
+.trail { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; font-size: 12px; }
+.trail-step {
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.trail-step.current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+/* The person-request card's initials avatar and "Requested by" line. */
+.requester { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* The agent-draft card's gist and risk phrase lines. */
+.gist { overflow-wrap: anywhere; }
+.risk-phrase { color: var(--muted); font-size: 12px; }
 
 /* ---------- forms and buttons ---------- */
 

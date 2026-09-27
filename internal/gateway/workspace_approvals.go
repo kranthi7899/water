@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"water/internal/approvals"
+	"water/internal/gate"
+	"water/internal/store"
 )
 
 // approvalStatusSets maps GET /v1/approvals?status= to the envelope
@@ -93,11 +95,7 @@ func (d *Daemon) listApprovalsFiltered(w http.ResponseWriter, r *http.Request) {
 	if len(envs) > limit {
 		envs = envs[:limit]
 	}
-	out := make([]ApprovalView, len(envs))
-	for i, e := range envs {
-		out[i] = viewOf(e)
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, d.approvalViews(ctx, envs))
 }
 
 // approvalKindMatches reports whether action ("connector.function") is
@@ -206,4 +204,102 @@ func (d *Daemon) handleEditApproval(w http.ResponseWriter, r *http.Request) {
 		voided = current
 	}
 	writeJSON(w, http.StatusOK, approvalEditResponse{Voided: viewOf(voided), Envelope: viewOf(next)})
+}
+
+// requestChangesRequest is POST /v1/approvals/{id}/request-changes's body.
+type requestChangesRequest struct {
+	Note string `json:"note"`
+}
+
+// requestChangesResponse answers with both envelopes the endpoint touched:
+// the original, now denied, and the new reply proposed to the requester.
+type requestChangesResponse struct {
+	Denied   ApprovalView `json:"denied"`
+	Envelope ApprovalView `json:"envelope"`
+}
+
+// handleRequestChanges is docs/slices/UI.md Phase 3a/U15's "Request
+// changes" button on a person-request approval card: the CEO isn't ready to
+// answer the request either way and wants to send the requester a note back
+// instead.
+//
+// Ordering is check-then-mutate, never the reverse: the requester's roster
+// address is resolved FIRST, and only once that succeeds does anything get
+// denied or proposed. A person-request approval with no resolvable
+// requester (RequestedBy is "" or names nobody in the roster) or a
+// requester with no email on file answers 409 and changes nothing --
+// exactly the failure mode a partial "denied the original, then couldn't
+// tell them" would be worse than.
+//
+// Once the check passes: the original is denied with the fixed reason
+// "changes requested" (approvals.Queue.Reject -- not Decide, since this is
+// not the CEO answering the person's request either way), then a brand-new
+// gmail.send_message envelope carrying the CEO's note is proposed to that
+// address, gate-routed and approval-gated exactly like every other outward
+// action. Nothing is sent by this endpoint itself.
+func (d *Daemon) handleRequestChanges(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var body requestChangesRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxWorkspaceBody)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	note := strings.TrimSpace(body.Note)
+	if note == "" {
+		http.Error(w, "note is required", http.StatusBadRequest)
+		return
+	}
+	ctx := r.Context()
+	if err := d.cfg.Approvals.ExpireStale(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	current, err := d.cfg.Approvals.Get(ctx, id)
+	if errors.Is(err, approvals.ErrNotFound) {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if current.Status != approvals.Pending {
+		http.Error(w, "approval "+id+" is "+string(current.Status)+" and can no longer have changes requested", http.StatusConflict)
+		return
+	}
+	// Fail closed, before anything is mutated: resolve the requester's
+	// roster address first.
+	if current.RequestedBy == "" {
+		http.Error(w, "this approval has no requester to send changes back to", http.StatusConflict)
+		return
+	}
+	person, err := store.Get[store.Person](ctx, d.cfg.Store, "seed", current.RequestedBy)
+	if err != nil {
+		http.Error(w, "the requester is not in the roster", http.StatusConflict)
+		return
+	}
+	addr := person.Identity("email")
+	if addr == "" {
+		http.Error(w, person.Name+" has no email address on file", http.StatusConflict)
+		return
+	}
+	denied, err := d.cfg.Approvals.Reject(ctx, id, "changes requested")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	payload := map[string]any{"to": []string{addr}, "subject": "Changes requested", "body": note}
+	env, err := d.cfg.Approvals.Propose(ctx, approvals.Envelope{
+		Action: "gmail.send_message", Payload: payload, Origin: string(gate.P0),
+		Risk: string(functionRisk(d.cfg.Registry, "gmail.send_message")),
+	})
+	if err != nil {
+		// The original is already denied; there is no undo for that (the
+		// same posture handleEditApproval's own comment documents for its
+		// void-then-propose step), so this surfaces the failure plainly
+		// rather than pretending nothing happened.
+		http.Error(w, "denied the original, but proposing the reply failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, requestChangesResponse{Denied: viewOf(denied), Envelope: d.approvalView(ctx, env)})
 }

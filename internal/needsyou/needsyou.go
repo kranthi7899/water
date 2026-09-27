@@ -39,6 +39,20 @@ type Item struct {
 	// notifications and the web UI's chips share one server-computed value.
 	Priority Priority
 
+	// Origin is Phase 3a's one-line "where this came from" note ("From
+	// Meridian renewal", "Requested by Lee", "Built from an outside email"),
+	// computed once here — see origin.go's itemOrigin — from the decision
+	// card or approval envelope this Item was built from. "" when none of
+	// origin.go's three cases apply. Always server-built: Today never
+	// guesses this client-side.
+	Origin string
+	// OriginKind mirrors approvals.Envelope.OriginKind ("agent_draft" |
+	// "person_request") for an approval item, and is "" for a decision
+	// item. It rides alongside Origin (Phase 3a) so Today's kind icon can
+	// tell an agent-drafted approval from a person's request without
+	// parsing Origin's text.
+	OriginKind string
+
 	// sourceItemIDs is a decision card's SourceItemIDs, kept (unexported,
 	// so never serialized into Today's JSON) for Tick's involves links.
 	sourceItemIDs []string
@@ -96,6 +110,18 @@ func Compute(ctx context.Context, src DecisionSource, q *approvals.Queue, st *st
 	if err != nil {
 		return nil, fmt.Errorf("needsyou: dismissed card ids: %w", err)
 	}
+	// cardTitles resolves an approval's SourceCardID to that card's own
+	// title (itemFromEnvelope's Origin, "From <decision>"): built from every
+	// merged card, not just kept -- a card dismissed from Today or below
+	// minSeverity is still a perfectly good answer to "what decision did
+	// this approval come from".
+	cardTitles := make(map[string]string, len(cards))
+	for _, c := range cards {
+		if c != nil {
+			cardTitles[c.ID] = cardTitle(c)
+		}
+	}
+
 	var kept []*decisions.Card
 	for _, c := range cards {
 		if c == nil || dismissed[c.ID] || c.Severity < minSeverity {
@@ -122,9 +148,42 @@ func Compute(ctx context.Context, src DecisionSource, q *approvals.Queue, st *st
 		out = append(out, itemFromCard(c, now))
 	}
 	for _, e := range envelopes {
-		out = append(out, itemFromEnvelope(e, now))
+		// Best-effort: an unresolvable or absent requester just means no
+		// "Requested by" line, never a failed Compute call (a roster lookup
+		// is not something the CEO should ever see "needs you" itself fail
+		// over).
+		name := requesterName(ctx, st, e.RequestedBy)
+		out = append(out, itemFromEnvelope(e, now, cardTitles[e.SourceCardID], name))
 	}
 	return out, nil
+}
+
+// cardTitle is a decision card's own display title (its Lead, falling back
+// to Question) -- shared by itemFromCard's Title and Compute's cardTitles
+// map, so "From <decision>" never disagrees with what Today calls the same
+// card when it appears there directly.
+func cardTitle(c *decisions.Card) string {
+	if c.Lead != "" {
+		return c.Lead
+	}
+	return c.Question
+}
+
+// requesterName resolves a person-request approval's RequestedBy (a roster
+// person id, e.g. "lee") to that person's display name via the roster's
+// "people" table (internal/roster). "" on any miss -- an empty, malformed
+// or absent identities value, an id no longer in the roster -- which is a
+// resolution miss, not a caller-visible error (the same posture
+// store.Person.Identity documents for its own lookups).
+func requesterName(ctx context.Context, st *store.Store, requestedBy string) string {
+	if requestedBy == "" {
+		return ""
+	}
+	p, err := store.Get[store.Person](ctx, st, "seed", requestedBy)
+	if err != nil {
+		return ""
+	}
+	return p.Name
 }
 
 // itemFromCard maps a decision card to an Item. Card carries no creation
@@ -132,20 +191,20 @@ func Compute(ctx context.Context, src DecisionSource, q *approvals.Queue, st *st
 // persisted — decisions/card.go's own doc comment), so CreatedAt is set to
 // now: when this Compute call observed the card, not when it first existed.
 func itemFromCard(c *decisions.Card, now time.Time) Item {
-	title := c.Lead
-	if title == "" {
-		title = c.Question
-	}
 	return Item{
 		Kind:      KindDecision,
 		ID:        c.ID,
-		Title:     title,
+		Title:     cardTitle(c),
 		Severity:  c.Severity,
 		Deadline:  c.Deadline,
 		Readiness: string(c.Readiness),
 		Untrusted: c.Untrusted,
 		CreatedAt: now,
 		Priority:  DecisionPriority(c.Severity, c.Deadline, now),
+		// A decision card never traces to another card and has no
+		// requester concept, so its only possible Origin is origin.go's
+		// third case: untrusted, with nothing more specific to name.
+		Origin: itemOrigin("", "", c.Untrusted),
 
 		sourceItemIDs: append([]string(nil), c.SourceItemIDs...),
 	}
@@ -158,13 +217,19 @@ func itemFromCard(c *decisions.Card, now time.Time) Item {
 // high or a money-shaped payload is High; Envelope carries no deadline
 // today, so the "deadline <= 3 days -> Urgent" half of the rule never fires
 // here yet (there is nothing to read it from).
-func itemFromEnvelope(e approvals.Envelope, now time.Time) Item {
+func itemFromEnvelope(e approvals.Envelope, now time.Time, sourceCardTitle, requestedByName string) Item {
 	return Item{
-		Kind:      KindApproval,
-		ID:        e.ID,
-		Title:     e.Action,
-		CreatedAt: e.CreatedAt,
-		Priority:  ApprovalPriority(e.Risk == "high", PayloadLooksLikeMoney(e.Payload), nil, now),
+		Kind:       KindApproval,
+		ID:         e.ID,
+		Title:      e.Action,
+		CreatedAt:  e.CreatedAt,
+		Priority:   ApprovalPriority(e.Risk == "high", PayloadLooksLikeMoney(e.Payload), nil, now),
+		OriginKind: e.OriginKind,
+		// An approval has no untrusted signal of its own (Envelope carries
+		// no such field): its Origin is either "From <decision>" (it traces
+		// to one via SourceCardID) or "Requested by <name>" (it's a person
+		// request), never origin.go's untrusted case.
+		Origin: itemOrigin(sourceCardTitle, requestedByName, false),
 	}
 }
 

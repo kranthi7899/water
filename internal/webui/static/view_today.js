@@ -24,18 +24,22 @@
       const id = get(it, 'ID', 'id');
       const deadline = get(it, 'Deadline', 'deadline');
       const readiness = get(it, 'Readiness', 'readiness');
+      const origin = get(it, 'Origin', 'origin');
       ul.appendChild(h('li', null, h('button', {
         type: 'button', class: 'row ' + S.priorityClass(it),
         on: { click: () => S.go(kind === 'approval' ? 'approvals' : 'decisions', id) },
       },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(it, 'Title', 'title') || id),
-        h('span', { class: 'row-meta' },
-          S.badge(kind === 'approval' ? 'Approval' : 'Decision', kind),
-          readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, S.readinessLabel(readiness)) : null,
-          get(it, 'Untrusted', 'untrusted') ? S.extGlyph() : null,
-          S.dueBadge(deadline),
-          kind === 'approval' ? h('span', { class: 'muted' }, 'Waiting ' + fmtAgo(get(it, 'CreatedAt', 'created_at')).replace(' ago', '')) : null)))));
+      h('span', { class: 'row-line' },
+        h('span', { class: 'row-kind', title: kind === 'approval' ? 'Approval' : 'Decision' }, S.kindGlyph(it)),
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(it, 'Title', 'title') || id),
+          origin ? h('span', { class: 'row-origin muted' }, origin) : null,
+          h('span', { class: 'row-meta' },
+            S.badge(kind === 'approval' ? 'Approval' : 'Decision', kind),
+            readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, S.readinessLabel(readiness)) : null,
+            get(it, 'Untrusted', 'untrusted') ? S.extGlyph() : null,
+            S.dueBadge(deadline),
+            kind === 'approval' ? h('span', { class: 'muted' }, 'Waiting ' + fmtAgo(get(it, 'CreatedAt', 'created_at')).replace(' ago', '')) : null))))));
     }
     needs.appendChild(ul);
 

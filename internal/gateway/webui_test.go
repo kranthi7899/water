@@ -89,7 +89,7 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		t.Errorf("api.js has %d '/edit' suffixes and %d %s; want exactly the one approval edit route", n, m, editRoute)
 	}
 	// Every other quoted path suffix api.js appends to an id is one of these.
-	suffixes := map[string]bool{"'/stage'": true, "'/dismiss'": true, "'/decision'": true, "'/edit'": true, "'/messages'": true, "'/cancel'": true}
+	suffixes := map[string]bool{"'/stage'": true, "'/dismiss'": true, "'/decision'": true, "'/edit'": true, "'/messages'": true, "'/cancel'": true, "'/request-changes'": true}
 	for _, m := range regexp.MustCompile(`\+ '(/[^']*)'`).FindAllStringSubmatch(src, -1) {
 		if lit := "'" + m[1] + "'"; !suffixes[lit] {
 			t.Errorf("api.js appends %s to a path, which is not on the UI's allowlist", lit)
@@ -133,5 +133,22 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		if strings.Contains(string(b), "/v1/") || strings.Contains(string(b), "fetch(") {
 			t.Errorf("%s calls the API directly; every call goes through api.js", f)
 		}
+	}
+}
+
+// TestApprovalsViewRendersWarnings is docs/slices/UI.md Phase 3a's finding
+// 23: W's Envelope.Warnings must render visibly on the web approval card as
+// an amber box, not only through the CLI/voice read-back
+// (internal/approvals/readback.go). This pins that view_approvals.js's own
+// source actually reads the envelope's warnings field, rather than only
+// app.js's shared renderApprovalDetail doing so -- the Approvals queue's
+// dense rows flag a warned approval before it's even opened.
+func TestApprovalsViewRendersWarnings(t *testing.T) {
+	b, err := webui.ReadFile("view_approvals.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "warnings") {
+		t.Error("view_approvals.js must reference an envelope's warnings (finding 23's amber box)")
 	}
 }

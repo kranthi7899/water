@@ -215,6 +215,11 @@ func (d *Daemon) handleStageDecision(w http.ResponseWriter, r *http.Request) {
 		Action: chosen.Function, Payload: payload, Origin: string(gate.P0),
 		Risk:         string(functionRisk(d.cfg.Registry, chosen.Function)),
 		EvidenceRefs: card.SourceItemIDs,
+		// SourceCardID names the decision this envelope was staged from
+		// (docs/slices/UI.md Phase 1b's field, wired up here for the first
+		// time in Phase 3a): the Approvals queue's "From <decision>" line
+		// has nothing to resolve without it.
+		SourceCardID: id,
 	})
 	if err != nil {
 		http.Error(w, "staging refused: "+err.Error(), http.StatusInternalServerError)

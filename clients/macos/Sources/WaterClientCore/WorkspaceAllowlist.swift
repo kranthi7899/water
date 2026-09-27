@@ -76,6 +76,9 @@ public enum WorkspaceAllowlist {
         // one; nothing runs). Added by hand here, in api.js and in the Go
         // pin test.
         route("POST", "/v1/approvals/{id}/edit"),
+        // Phase 3a: a person-request approval's "Request changes" button.
+        // Added by hand here, in api.js and in the Go pin test.
+        route("POST", "/v1/approvals/{id}/request-changes"),
         route("GET", "/v1/threads"),
         route("POST", "/v1/threads"),
         route("POST", "/v1/threads/anchor"),

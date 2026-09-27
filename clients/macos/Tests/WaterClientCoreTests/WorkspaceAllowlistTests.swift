@@ -37,6 +37,7 @@ import Testing
             ("GET", "water://app/v1/approvals/env_ab12", "/v1/approvals/env_ab12"),
             ("POST", "water://app/v1/approvals/env_ab12/decision", "/v1/approvals/env_ab12/decision"),
             ("POST", "water://app/v1/approvals/env_ab12/edit", "/v1/approvals/env_ab12/edit"),
+            ("POST", "water://app/v1/approvals/env_ab12/request-changes", "/v1/approvals/env_ab12/request-changes"),
             ("GET", "water://app/v1/threads", "/v1/threads"),
             ("POST", "water://app/v1/threads", "/v1/threads"),
             ("POST", "water://app/v1/threads/anchor", "/v1/threads/anchor"),
@@ -284,6 +285,17 @@ import Testing
         for url in ["water://app/v1/turns", "water://app/v1/turns?thread_id=thr_1", "water://app/v1/turns/thr_1"] {
             #expect(!decide("POST", url).isAllowed, "\(url)")
         }
+    }
+
+    /// Phase 3a: request-changes is reachable, POST only, on one approval
+    /// id, and takes no query.
+    @Test func requestChangesIsPostOnlyOnOneApproval() {
+        #expect(allowed("POST", "water://app/v1/approvals/env_1/request-changes") == "/v1/approvals/env_1/request-changes")
+        #expect(!decide("GET", "water://app/v1/approvals/env_1/request-changes").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/request-changes").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/env_1/request-changes/x").isAllowed)
+        #expect(!decide("POST", "water://app/v1/approvals/env_1/request-changes?x=1").isAllowed)
+        #expect(!decide("POST", "water://app/v1/decisions/card-1/request-changes").isAllowed)
     }
 
     // MARK: script messages

@@ -55,13 +55,57 @@ type ApprovalView struct {
 	approvals.Envelope
 	ReadBack string `json:"read_back"`
 	Summary  string `json:"summary"`
+
+	// The fields below are docs/slices/UI.md Phase 3a's additions for the
+	// Approvals queue's dense rows and card. Trail, Gist and RiskPhrase are
+	// pure functions of e alone (approval_extras.go), computed here exactly
+	// like ReadBack and Summary above. SourceCardTitle, RequestedByName and
+	// RequesterInitials need a store/roster lookup Daemon.approvalView(s)
+	// (not viewOf, which has no ctx) fills in afterward; a caller that only
+	// ever uses viewOf directly gets "" for all three, same as an envelope
+	// with nothing to resolve.
+
+	// Trail is Envelope.Trail(), computed fresh (never persisted, same as
+	// Warnings): "" for a Denied/Expired envelope, exactly as Trail()
+	// documents.
+	Trail string `json:"trail,omitempty"`
+	// SourceCardTitle is the decision card SourceCardID names, resolved
+	// fresh at read time -- "" when SourceCardID is "" or that card can no
+	// longer be found ("From <decision>"; omitted rather than shown empty).
+	SourceCardTitle string `json:"source_card_title,omitempty"`
+	// RequestedByName is RequestedBy resolved to the roster person's
+	// display name ("Requested by <name>"); "" when RequestedBy is "" or
+	// doesn't resolve.
+	RequestedByName string `json:"requested_by_name,omitempty"`
+	// RequesterInitials is Initials(RequestedByName), alongside it so the
+	// client never has to compute the avatar itself; "" whenever
+	// RequestedByName is "".
+	RequesterInitials string `json:"requester_initials,omitempty"`
+	// Gist is a mail-shaped envelope's one-sentence body summary (Gist,
+	// above); "" for a non-mail action or an empty body.
+	Gist string `json:"gist,omitempty"`
+	// RiskPhrase is Risk rendered in words plus a short reason clause
+	// (RiskPhrase, above), e.g. "Medium risk · external recipient, new
+	// commitment".
+	RiskPhrase string `json:"risk_phrase,omitempty"`
 }
 
 func viewOf(e approvals.Envelope) ApprovalView {
 	if e.ID == "" {
 		return ApprovalView{Envelope: e}
 	}
-	return ApprovalView{Envelope: e, ReadBack: approvals.ReadBack(e), Summary: approvals.Summary(e)}
+	return ApprovalView{
+		Envelope: e, ReadBack: approvals.ReadBack(e), Summary: approvals.Summary(e),
+		Trail: string(e.Trail()), Gist: Gist(bodyOf(e.Payload)), RiskPhrase: RiskPhrase(e.Risk),
+	}
+}
+
+// bodyOf reads a mail-shaped envelope's "body" payload key as a string;
+// "" for anything else (a non-mail action, a missing key, a non-string
+// value), so Gist never panics on an unexpected payload shape.
+func bodyOf(payload map[string]any) string {
+	s, _ := payload["body"].(string)
+	return s
 }
 
 // handleTurn streams one turn as NDJSON: ack, queued?, delta*, sentence*,
@@ -320,11 +364,7 @@ func (d *Daemon) handleListApprovals(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	out := make([]ApprovalView, len(envs))
-	for i, e := range envs {
-		out[i] = viewOf(e)
-	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, d.approvalViews(r.Context(), envs))
 }
 
 // handleGetApproval answers one envelope, in any status, as an ApprovalView:
@@ -344,7 +384,7 @@ func (d *Daemon) handleGetApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, viewOf(e))
+	writeJSON(w, http.StatusOK, d.approvalView(r.Context(), e))
 }
 
 // handleDecideApproval requires the payload hash the client was shown, and
@@ -378,7 +418,7 @@ func (d *Daemon) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
-	result := DecisionResult{Envelope: viewOf(out.Envelope), Answer: out.Answer.String(), Executed: out.Executed, Output: out.Output}
+	result := DecisionResult{Envelope: d.approvalView(r.Context(), out.Envelope), Answer: out.Answer.String(), Executed: out.Executed, Output: out.Output}
 	if out.Err != nil {
 		result.Error = out.Err.Error()
 		result.OutcomeUnknown = out.OutcomeUnknown

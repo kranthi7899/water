@@ -150,6 +150,83 @@ func TestGetTodayReturnsNeedsYouAndSchedule(t *testing.T) {
 	}
 }
 
+// TestGetTodayCarriesItemOrigin confirms needsyou.Item.Origin (Phase 3a)
+// actually reaches the wire: an untrusted decision card's Item comes back
+// with the "Built from an outside email" note, under the same "Origin" key
+// existing needs-you clients already read (get(it, 'Origin', 'origin') in
+// view_today.js).
+func TestGetTodayCarriesItemOrigin(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	q := approvals.NewQueue(st, log)
+	m, err := twins.Parse([]byte("id: t\nname: Test twin\nusage: {window: 1h, model_calls: 50, auto_model_calls: 10}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := connectors.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := gate.New(gate.Config{Manifest: m, Registry: reg, Approvals: q, Audit: log, Vault: vault.NewMemory(), Store: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	src := &fakeDecisionSource{cards: []*decisions.Card{
+		{ID: "card-untrusted", Severity: 3, Lead: "An external ask", Untrusted: true},
+	}}
+	svc := needsyou.NewService(src, q, st, 2, 0)
+	if err := svc.Tick(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	clients, err := LoadClients(filepath.Join(dir, "clients.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := clients.EnsureCLI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := New(Config{
+		Manifest: m, Store: st, Audit: log, Approvals: q, Gate: g, Registry: reg, Backend: backend.NewFake("fake"),
+		Clients: clients, SocketPath: "unused-in-http-tests.sock", Nervous: testNervous(t, m, st), NeedsYou: svc,
+	})
+	srv := httptest.NewServer(d.Mux())
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/today", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var raw struct {
+		NeedsYou []map[string]any `json:"needs_you"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.NeedsYou) != 1 {
+		t.Fatalf("needs_you = %+v, want exactly one item", raw.NeedsYou)
+	}
+	if got := raw.NeedsYou[0]["Origin"]; got != "Built from an outside email" {
+		t.Fatalf("Origin = %v, want %q", got, "Built from an outside email")
+	}
+}
+
 // doTodayGet issues GET /v1/today with the given bearer token (empty means
 // no Authorization header at all) and returns the response status code.
 func doTodayGet(t *testing.T, baseURL, token string) int {

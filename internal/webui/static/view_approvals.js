@@ -8,6 +8,24 @@
   const { h, replace, get, list } = window.dom;
   const api = window.api;
 
+  // priorityRank/lessForQueue mirror internal/approvals.PriorityRank/
+  // LessForQueue (docs/slices/UI.md Phase 3a) client-side, the same way
+  // app.js's decisionPriorityClass already mirrors needsyou.DecisionPriority:
+  // the Go function is the small, directly-testable, canonical rule (see its
+  // own doc comment and internal/approvals/sort_test.go); this is its JS
+  // twin, since the Approvals queue's dense rows are sorted in the browser,
+  // not by the server.
+  function priorityRank(p) { return p === 'urgent' ? 0 : p === 'high' ? 1 : 2; }
+  function lessForQueue(a, b) {
+    const ra = priorityRank(get(a, 'priority')), rb = priorityRank(get(b, 'priority'));
+    if (ra !== rb) return ra - rb;
+    const ta = Date.parse(get(a, 'deadline') || ''), tb = Date.parse(get(b, 'deadline') || '');
+    const az = isNaN(ta), bz = isNaN(tb);
+    if (az !== bz) return az ? 1 : -1; // the one with a deadline sorts first
+    if (!az && ta !== tb) return ta - tb;
+    return String(get(a, 'created_at') || '').localeCompare(String(get(b, 'created_at') || ''));
+  }
+
   async function viewApprovals(c, param, gen) {
     const S = window.appShared;
     const tabs = h('div', { class: 'tabs', role: 'tablist' });
@@ -28,10 +46,23 @@
     ]);
     if (!S.current(gen)) return;
     const items = list(envs);
+    // Dense rows sorted by priority then deadline (docs/slices/UI.md Phase
+    // 3a), not the server's own created_at order.
+    items.sort(lessForQueue);
     if (S.state.approvalTab === 'pending') S.setCount('approvals', items.length);
     const ul = h('ul', { class: 'rows' });
     if (!items.length) listPane.appendChild(S.empty(S.state.approvalTab === 'pending' ? 'No approvals waiting.' : 'Nothing decided yet.'));
-    for (const e of items) ul.appendChild(S.approvalRow(e, get(e, 'id') === param, 'approvals'));
+    for (const e of items) {
+      const row = S.approvalRow(e, get(e, 'id') === param, 'approvals');
+      // W's recipient warnings (finding 23): flagged on the row too, not
+      // only the amber box on the card, so a warned approval stands out
+      // before it's even opened.
+      if (list(get(e, 'warnings')).length) {
+        const meta = row.querySelector('.row-meta');
+        if (meta) meta.appendChild(S.badge('Warning', 'warn'));
+      }
+      ul.appendChild(row);
+    }
     listPane.appendChild(ul);
   }
 

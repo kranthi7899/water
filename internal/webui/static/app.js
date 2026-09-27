@@ -192,6 +192,18 @@
     return p === 'urgent' ? 'p-urgent' : p === 'high' ? 'p-high' : 'p-normal';
   }
 
+  // kindGlyph picks a plain Unicode glyph for a Today row's kind
+  // (docs/slices/UI.md Phase 3a: "a kind icon... pick sensible ones per
+  // Item.Kind/whatever richer kind concept exists"): a decision card is
+  // "◆"; an approval is "✉" (an outward action awaiting send) unless it's a
+  // person's own request (OriginKind "person_request", U15), which reads
+  // "☞" instead, so a request FOR you never looks like a message Water is
+  // about to send.
+  function kindGlyph(it) {
+    if (get(it, 'Kind', 'kind') !== 'approval') return '◆';
+    return get(it, 'OriginKind', 'origin_kind') === 'person_request' ? '☞' : '✉';
+  }
+
   // readinessLabel is only ever called for a non-ready state (Today and the
   // decision card both check readiness !== 'ready' first): "ready" itself
   // is shown by omission, not a badge (docs/slices/UI.md Phase 0b).
@@ -423,16 +435,28 @@
 
   function approvalRow(e, selected, view) {
     const id = get(e, 'id');
-    return h('li', null, h('button', {
-      type: 'button', class: 'row' + (selected ? ' selected' : ''), on: { click: () => go(view, id) },
-    },
-    h('span', { class: 'row-main' },
+    // Phase 3a's "agent-draft card"/"person-request card" origin line: the
+    // decision this was staged from, or who's asking, server-built
+    // (source_card_title/requested_by_name -- never guessed here), omitted
+    // entirely rather than shown empty when neither resolves.
+    const sourceTitle = get(e, 'source_card_title');
+    const requestedByName = get(e, 'requested_by_name');
+    const originLine = sourceTitle ? 'From ' + sourceTitle : requestedByName ? 'Requested by ' + requestedByName : '';
+    const avatar = requestedByName ? h('span', { class: 'avatar', title: requestedByName }, get(e, 'requester_initials') || '?') : null;
+    const main = h('span', { class: 'row-main' },
       h('span', { class: 'row-title' }, get(e, 'action') || id),
-      h('span', { class: 'row-sub' }, get(e, 'summary') || ''),
+      originLine ? h('span', { class: 'row-origin muted' }, originLine) : null,
+      // gist (the body's one-sentence summary) when there is one; the plain
+      // list summary otherwise (a non-mail action, or an empty body).
+      h('span', { class: 'row-sub' }, get(e, 'gist') || get(e, 'summary') || ''),
+      get(e, 'risk_phrase') ? h('span', { class: 'risk-phrase' }, get(e, 'risk_phrase')) : null,
       h('span', { class: 'row-meta' },
         statusBadge(e),
         get(e, 'risk') ? badge(riskLabel(get(e, 'risk')), 'risk-' + get(e, 'risk')) : null,
-        h('span', { class: 'muted' }, fmtAgo(get(e, 'created_at')))))));
+        h('span', { class: 'muted' }, fmtAgo(get(e, 'created_at')))));
+    return h('li', null, h('button', {
+      type: 'button', class: 'row' + (selected ? ' selected' : ''), on: { click: () => go(view, id) },
+    }, avatar ? h('span', { class: 'row-line' }, avatar, main) : main));
   }
 
   // pendingDrafts is D2-A: the pending envelopes whose action is an outward
@@ -442,6 +466,77 @@
     const all = [].concat(...lists.map(list));
     all.sort((a, b) => String(get(a, 'created_at')).localeCompare(String(get(b, 'created_at'))));
     return all;
+  }
+
+  // TRAIL_STEPS mirrors approvals.Envelope.Trail's four stages
+  // (docs/slices/UI.md Phase 3a): a plain row of labeled steps, the current
+  // one highlighted -- text and CSS only, no images.
+  const TRAIL_STEPS = [['staged', 'Staged'], ['approved', 'Approved'], ['sent', 'Sent'], ['reply', 'Reply']];
+
+  function trailRow(stage) {
+    if (!stage) return null;
+    return h('div', { class: 'trail' }, TRAIL_STEPS.map(([key, label]) =>
+      h('span', { class: 'trail-step' + (key === stage ? ' current' : '') }, label)));
+  }
+
+  // warningsBox is W's recipient warnings (finding 23) as a visible amber
+  // box on the approval card: today Envelope.Warnings is only spoken/shown
+  // via the CLI/voice read-back (internal/approvals/readback.go's
+  // warningLine, folded into read_back's own text); this is that same list,
+  // rendered separately so it can't be missed by skimming the read-back
+  // paragraph. null when there are none (a decided envelope never carries
+  // them either -- Queue.withWarnings only computes them for pending/
+  // approved).
+  function warningsBox(env) {
+    const warnings = list(get(env, 'warnings'));
+    if (!warnings.length) return null;
+    return h('div', { class: 'warnings-box', role: 'alert' },
+      h('strong', null, 'Warning: '), warnings.join(' '));
+  }
+
+  // requesterInfo is the person-request card's "Requested by <name>" line
+  // with an initials avatar (docs/slices/UI.md Phase 3a); null for an
+  // agent-drafted envelope (requested_by_name is only ever set when the
+  // server resolved one).
+  function requesterInfo(env) {
+    const name = get(env, 'requested_by_name');
+    if (!name) return null;
+    return h('div', { class: 'requester' },
+      h('span', { class: 'avatar', title: name }, get(env, 'requester_initials') || '?'),
+      h('span', null, 'Requested by ' + name));
+  }
+
+  // requestChangesForm is the person-request card's inline note field (no
+  // modal/dialog library, plain DOM): submitting calls the new
+  // request-changes endpoint, which denies the original and proposes a
+  // fresh reply -- onSent re-renders the card so it shows the now-denied
+  // original.
+  function requestChangesForm(env, requesterName, onSent, onCancel) {
+    const form = h('div', { class: 'form' }, h('h3', null, 'Request changes'),
+      h('p', { class: 'muted small' }, 'Sends your notes back to ' + requesterName + '.'));
+    const note = h('textarea', { rows: 4, placeholder: 'What needs to change?' });
+    const msg = h('div');
+    const send = button('Send note', async () => {
+      const text = note.value.trim();
+      if (!text) {
+        replace(msg, h('div', { class: 'error' }, 'A note is required.'));
+        return;
+      }
+      send.disabled = true;
+      try {
+        await api.requestChanges(get(env, 'id'), text);
+        toast('Sent. The original was denied; your note is on its way.', 'warn');
+        refreshCounts();
+        onSent();
+      } catch (err) {
+        send.disabled = false;
+        replace(msg, errorBox(err.status === 409 ? 'This could not be sent' : 'Could not send your note', err));
+      }
+    }, 'primary');
+    form.appendChild(note);
+    form.appendChild(msg);
+    form.appendChild(h('div', { class: 'actions' }, send, button('Cancel', onCancel, 'ghost')));
+    return form;
   }
 
   async function renderApprovalDetail(pane, id, gen, view) {
@@ -468,6 +563,9 @@
     }
     const refs = list(get(env, 'evidence_refs'));
 
+    const requesterName = get(env, 'requested_by_name');
+    const isPersonRequest = get(env, 'origin_kind') === 'person_request';
+
     const actions = h('div', { class: 'actions' });
     const threadBtn = button('Open a thread about this', () => openThreadAbout('approval', id));
     let reset = () => replace(actions, threadBtn);
@@ -478,11 +576,26 @@
           armed(button(isOutward(action) ? 'Yes, send it' : 'Yes, approve and run', () => decide('yes'), 'primary')),
           button('Not yet', () => reset(), 'ghost'));
       }, 'primary');
-      const edit = button('Edit', () => {
-        replace(out, editForm(env, (next) => go(view, get(next, 'id')), () => replace(out)));
-      });
       const deny = button('Deny', () => decide('no'), 'danger');
-      reset = () => replace(actions, approve, edit, deny, threadBtn);
+      // U11 (kept exactly as before, both branches): Approve… -> the exact
+      // read-back -> "Yes, send it"/"Yes, approve and run", armed only
+      // after 600ms (armed()). The only thing that changes per card is the
+      // middle button: a person-request card's own "Request changes"
+      // (U15/Phase 3a) in place of Edit, since editing someone else's
+      // request payload isn't the point -- sending them a note is.
+      if (isPersonRequest) {
+        const requestChanges = button('Request changes', () => {
+          replace(out, requestChangesForm(env, requesterName || 'them', () => {
+            if (current(gen)) renderApprovalDetail(pane, id, gen, view);
+          }, () => replace(out)));
+        }, 'secondary', { title: 'Sends your notes back to ' + (requesterName || 'them') });
+        reset = () => replace(actions, approve, requestChanges, deny, threadBtn);
+      } else {
+        const edit = button('Edit', () => {
+          replace(out, editForm(env, (next) => go(view, get(next, 'id')), () => replace(out)));
+        });
+        reset = () => replace(actions, approve, edit, deny, threadBtn);
+      }
     }
     reset();
 
@@ -504,6 +617,8 @@
       }
     }
 
+    const sourceCardTitle = get(env, 'source_card_title');
+
     replace(pane,
       h('article', { class: 'approval' },
         h('header', { class: 'card-head' },
@@ -513,10 +628,14 @@
             get(env, 'risk') ? badge(riskLabel(get(env, 'risk')), 'risk-' + get(env, 'risk')) : null,
             h('span', { class: 'muted' }, 'Created ' + fmtDate(get(env, 'created_at'))),
             pending && expires ? h('span', { class: 'muted' }, 'Expires ' + fmtAgo(expires)) : null)),
+        sourceCardTitle ? h('p', { class: 'muted small' }, 'From ' + sourceCardTitle) : null,
+        requesterInfo(env),
+        trailRow(get(env, 'trail')),
         h('section', { class: 'card-sec' },
           h('h3', null, 'Read-back'),
           h('p', { class: 'muted small' }, 'Written by Water from the exact payload this approval is bound to.'),
           h('div', { class: 'readback' }, get(env, 'read_back') || '')),
+        warningsBox(env),
         get(env, 'reason') ? h('p', { class: 'muted' }, 'Reason: ' + get(env, 'reason')) : null,
         actions,
         out,
@@ -829,7 +948,7 @@
   window.appShared = {
     state, DEFAULT_WORKSPACE_SUB,
     toast, errText, errorBox, badge, armed, button, header, empty, setCount, current,
-    isOutward, statusLabel, statusBadge, riskLabel, actionLabel, dueBadge, extGlyph,
+    isOutward, statusLabel, statusBadge, riskLabel, actionLabel, dueBadge, extGlyph, kindGlyph,
     decisionPriorityClass, deadlineDays, priorityClass, readinessLabel,
     go, goWorkspace, render, openThreadAbout,
     payloadFields, fieldsOf, kindOf, payloadInputs, editForm, decisionResult,
