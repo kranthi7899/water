@@ -757,6 +757,26 @@ any daemon started from this binary unless a real send is intended.
   already carry) — will need correcting once real data lands and the
   actual sheet layout is known.
 
+## Found in Slice UI, Phase 5b (2026-09-27)
+
+- **No team/company budget concept exists in the roster at any
+  granularity.** The People workspace's "budget left" tile reuses the
+  Finance dashboard's company-wide `cash_position` figure instead — real
+  cash, not a per-team budget. `people.yaml`'s `company:` block
+  (headcount, blended hourly cost) isn't even persisted by
+  `roster.Write` today. A real fix needs actual roster schema, not a
+  workaround in the workspace handler.
+- **Hours-this-week has no project-end cutoff.** Roster tracks a
+  project's `TargetAt` but no completion flag, so a person's allocation
+  keeps counting toward "hours this week" even after their project's
+  target date has passed.
+- **Draft `To` is always empty for `team_message`/`pulse_check`
+  drafts** — no roster person has a populated email identity yet, so
+  guessing a recipient was avoided rather than risking a wrong one.
+- **No pulse-response storage exists yet.** `peopleStrain`'s
+  `pulseAnswers` parameter is always `nil` today; the signature is
+  ready for a later phase to wire in real answers.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
