@@ -83,6 +83,15 @@ func Compute(ctx context.Context, src DecisionSource, q *approvals.Queue, st *st
 	if err != nil {
 		return nil, fmt.Errorf("needsyou: decision source: %w", err)
 	}
+	// A persisted decision_records row is authoritative over whatever the
+	// live classifier just computed for the same card id (decisions.Merge,
+	// docs/slices/UI.md Phase 1c, U13) -- the same merge GET /v1/decisions
+	// applies, so "needs you" and the decisions list never disagree about
+	// which version of a card is current.
+	cards, err = decisions.MergeFromStore(ctx, st, cards)
+	if err != nil {
+		return nil, fmt.Errorf("needsyou: merging decision records: %w", err)
+	}
 	dismissed, err := st.DismissedCardIDs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("needsyou: dismissed card ids: %w", err)

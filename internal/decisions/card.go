@@ -34,11 +34,90 @@ type Card struct {
 	Readiness      Readiness
 	SourceItemIDs  []string // "source:source_id" of the item(s) decided on
 	Untrusted      bool
+
+	// TeamSignal is what named people are reported to have said or asked
+	// for about this decision (docs/slices/UI.md Phase 1c). It has no
+	// computed source today: a computed card leaves it empty, and a
+	// persisted decisions_records row (U13) is the only way it's populated,
+	// which is why every entry naming a fictional person must set
+	// Simulated (U8) -- nothing here enforces that at the type level.
+	TeamSignal []Signal
+
+	// ActionSuggestions is the UI-facing view of what can be done about
+	// this card: one entry per proposable action, with a short, fixed
+	// sentence built by code (never the model), never containing a
+	// recipient, address or other payload value. For a computed card these
+	// derive 1:1 from StagedActions (see build.go's buildActionSuggestions);
+	// for a record-sourced card they come from whatever the persisted
+	// record itself specifies. Options (below) is unchanged by this field:
+	// ActionSuggestions is additive, a different view of what can be done,
+	// not a replacement for the underlying decision-options data.
+	ActionSuggestions []Suggestion
 }
+
+// Signal is one team member's reported status on a decision
+// (docs/slices/UI.md Phase 1c, "Team signal"). Simulated is U8's rule: true
+// for anything a fictional person is reported to have said or asked for.
+type Signal struct {
+	Person    string
+	Status    string
+	Simulated bool
+}
+
+// Suggestion is one card action as the UI shows it: an icon, a short
+// code-built sentence, and (once "Review" is chosen) the function and
+// payload that action would run. Sentence is never model-written and never
+// interpolates a recipient, address or other payload value -- see
+// suggestionSentence in build.go for the per-function template table.
+type Suggestion struct {
+	ID         string
+	Icon       string
+	Sentence   string
+	Function   string
+	Payload    map[string]any
+	Actionable bool
+}
+
+// EvidenceKind is Evidence's closed icon-selection enum (docs/slices/UI.md
+// Phase 1c). It is not free text: ValidEvidenceKind is the single place
+// that decides membership, so anywhere Evidence.Kind is set can validate
+// against it.
+const (
+	EvidenceKindMoney    = "money"
+	EvidenceKindCustomer = "customer"
+	EvidenceKindIssue    = "issue"
+	EvidenceKindMail     = "mail"
+	EvidenceKindCalendar = "calendar"
+	EvidenceKindResearch = "research"
+)
+
+var validEvidenceKinds = map[string]bool{
+	"":                true, // no icon -- most evidence today, unclassified
+	EvidenceKindMoney: true, EvidenceKindCustomer: true, EvidenceKindIssue: true,
+	EvidenceKindMail: true, EvidenceKindCalendar: true, EvidenceKindResearch: true,
+}
+
+// ValidEvidenceKind reports whether k is "" or one of Evidence's closed set
+// of icon kinds.
+func ValidEvidenceKind(k string) bool { return validEvidenceKinds[k] }
 
 type Evidence struct {
 	Text   string
 	Source string // e.g. "gmail:msg-abc123", "code:runway_calc"
+
+	// Kind selects which icon the UI shows next to this evidence line; ""
+	// means no icon. Must be one of ValidEvidenceKind's closed set.
+	Kind string
+
+	// Untrusted marks this specific evidence line as attacker-reachable
+	// content. It is distinct from Card.Untrusted (the card-level
+	// aggregate, set from Meta.External/NeedResult.External since Slice C):
+	// decisions.Merge is what actually populates this field today, when it
+	// appends a card_evidence_extra row that was itself marked untrusted
+	// (docs/slices/UI.md Phase 1c). Evidence build.go produces directly
+	// (the item itself, a fetched record) leaves this at its zero value;
+	// Card.Untrusted remains the authoritative aggregate either way.
+	Untrusted bool
 }
 
 type Option struct {
@@ -67,14 +146,22 @@ const (
 // does not say where it came from.
 var ErrUnsourced = errors.New("decisions: unsourced figure")
 
+// ErrInvalidEvidenceKind is returned by Validate for an Evidence.Kind value
+// outside ValidEvidenceKind's closed set.
+var ErrInvalidEvidenceKind = errors.New("decisions: invalid evidence kind")
+
 // Validate enforces the card's hard invariant: every Evidence entry and
 // every Defaults value names a non-empty source, and every Parameters key
-// starts from a sourced default. It reports every violation at once.
+// starts from a sourced default. It also enforces Evidence.Kind's closed
+// set. It reports every violation at once.
 func (c *Card) Validate() error {
 	var errs []error
 	for i, e := range c.Evidence {
 		if strings.TrimSpace(e.Source) == "" {
 			errs = append(errs, fmt.Errorf("%w: evidence[%d] %q has no source", ErrUnsourced, i, clip(e.Text, 40)))
+		}
+		if !ValidEvidenceKind(e.Kind) {
+			errs = append(errs, fmt.Errorf("%w: evidence[%d] has kind %q", ErrInvalidEvidenceKind, i, e.Kind))
 		}
 	}
 	for _, k := range sortedKeys(c.Defaults) {
@@ -96,17 +183,24 @@ func (c *Card) Validate() error {
 // figures nobody can trace.
 func (c *Card) quarantine() {
 	var kept []Evidence
-	dropped := 0
+	dropped, badKind := 0, 0
 	for _, e := range c.Evidence {
 		if strings.TrimSpace(e.Source) == "" {
 			dropped++
 			continue
+		}
+		if !ValidEvidenceKind(e.Kind) {
+			e.Kind = ""
+			badKind++
 		}
 		kept = append(kept, e)
 	}
 	c.Evidence = kept
 	if dropped > 0 {
 		c.Gaps = append(c.Gaps, fmt.Sprintf("%d evidence item(s) were dropped because they had no source.", dropped))
+	}
+	if badKind > 0 {
+		c.Gaps = append(c.Gaps, fmt.Sprintf("%d evidence item(s) had an unrecognized icon and were shown without one.", badKind))
 	}
 	for _, k := range sortedKeys(c.Defaults) {
 		if strings.TrimSpace(c.DefaultSources[k]) == "" {

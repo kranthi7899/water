@@ -13,16 +13,23 @@ import (
 )
 
 // handleListDecisions runs the classification-trigger orchestration over
-// today's candidate items and returns every card it built, ranked by
-// severity then deadline (decisions.Rank). A nil Decisions (no registry
-// configured) reports an empty list rather than an error, matching how a
-// twin with no decision types simply has nothing to show.
+// today's candidate items, merges in any persisted decision_records and
+// card_evidence_extra rows (decisions.Merge, U13 -- see mergeWithRecords),
+// and returns every resulting card, ranked by severity then deadline
+// (decisions.Rank). A nil Decisions (no registry configured) still shows
+// persisted records: a demo-seeded or pinned card doesn't depend on the
+// live classifier being configured at all.
 func (d *Daemon) handleListDecisions(w http.ResponseWriter, r *http.Request) {
-	if d.cfg.Decisions == nil {
-		writeJSON(w, http.StatusOK, []*decisions.Card{})
-		return
+	var computed []*decisions.Card
+	if d.cfg.Decisions != nil {
+		var err error
+		computed, err = d.cfg.Decisions.Run(r.Context(), time.Now())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
-	cards, err := d.cfg.Decisions.Run(r.Context(), time.Now())
+	cards, err := d.mergeWithRecords(r.Context(), computed)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -187,4 +194,14 @@ func (d *Daemon) handleEmailDecisionReport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "approval_id": env.ID})
+}
+
+// mergeWithRecords is decisions.MergeFromStore over this daemon's store
+// (docs/slices/UI.md Phase 1c, U13): a persisted decision_records row wins
+// over a computed card sharing its id, and card_evidence_extra rows are
+// appended to whichever version wins. needsyou.Compute merges the same way
+// over the same store, so a persisted record overrides the live
+// classifier's card in both places.
+func (d *Daemon) mergeWithRecords(ctx context.Context, computed []*decisions.Card) ([]*decisions.Card, error) {
+	return decisions.MergeFromStore(ctx, d.cfg.Store, computed)
 }

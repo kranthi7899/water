@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -168,6 +169,7 @@ func (b *Builder) Build(ctx context.Context, item store.Record, c Classification
 	for _, a := range t.StagedActions {
 		card.StagedActions = append(card.StagedActions, StagedAction{Function: a, Actionable: actionable(b.Registry.Manifest(), a)})
 	}
+	card.ActionSuggestions = buildActionSuggestions(card.ID, card.StagedActions)
 
 	if text, at := deadlineSource(item); text != "" {
 		card.Deadline = extractDeadline(text, at, time.Local)
@@ -358,6 +360,68 @@ func actionable(m *twins.Manifest, fn string) bool {
 func cardID(typeID, ref string) string {
 	sum := sha256.Sum256([]byte(typeID + "\x00" + ref))
 	return "card-" + hex.EncodeToString(sum[:])[:16]
+}
+
+// suggestionTemplate is one function's fixed, code-built Suggestion text
+// (docs/slices/UI.md Phase 1c): a short icon and sentence, named by function
+// so it's trivial to extend. Sentence must never mention a recipient,
+// address or other payload value -- that's what makes it safe to show
+// before the CEO has chosen to Review the action.
+type suggestionTemplate struct {
+	Icon     string
+	Sentence string
+}
+
+// suggestionTemplates is the per-function sentence table. An unmapped
+// function (one the manifest or a future connector adds before this table
+// is extended) falls back to genericSuggestionTemplate rather than failing
+// or improvising text from the payload.
+var suggestionTemplates = map[string]suggestionTemplate{
+	"gmail.send_message":        {Icon: EvidenceKindMail, Sentence: "Send an email"},
+	"gmail.draft_message":       {Icon: EvidenceKindMail, Sentence: "Draft an email"},
+	"gcal.create_event":         {Icon: EvidenceKindCalendar, Sentence: "Create a calendar event"},
+	"gcal.move_event":           {Icon: EvidenceKindCalendar, Sentence: "Move a calendar event"},
+	"linear.set_issue_priority": {Icon: EvidenceKindIssue, Sentence: "Change an issue's priority"},
+	"linear.create_comment":     {Icon: EvidenceKindIssue, Sentence: "Add a comment"},
+}
+
+// genericSuggestionTemplate is the fallback for any staged-action function
+// not yet named in suggestionTemplates.
+var genericSuggestionTemplate = suggestionTemplate{Sentence: "Take this action"}
+
+// buildActionSuggestions derives a computed card's ActionSuggestions 1:1
+// from its StagedActions (docs/slices/UI.md Phase 1c). Sentence comes only
+// from suggestionTemplates, keyed by function -- never from Payload, so a
+// staged action's recipient or any other argument can never leak into the
+// text shown before Review. ID is sha256(cardID + index), the same
+// hash-and-truncate shape cardID itself uses.
+func buildActionSuggestions(cardID string, staged []StagedAction) []Suggestion {
+	if len(staged) == 0 {
+		return nil
+	}
+	out := make([]Suggestion, 0, len(staged))
+	for i, a := range staged {
+		tmpl, ok := suggestionTemplates[a.Function]
+		if !ok {
+			tmpl = genericSuggestionTemplate
+		}
+		out = append(out, Suggestion{
+			ID:         suggestionID(cardID, i),
+			Icon:       tmpl.Icon,
+			Sentence:   tmpl.Sentence,
+			Function:   a.Function,
+			Payload:    a.Payload,
+			Actionable: a.Actionable,
+		})
+	}
+	return out
+}
+
+// suggestionID names one computed suggestion: sha256(cardID + "\x00" +
+// index), hex, truncated the same way cardID() truncates its own hash.
+func suggestionID(cardID string, index int) string {
+	sum := sha256.Sum256([]byte(cardID + "\x00" + strconv.Itoa(index)))
+	return "sugg-" + hex.EncodeToString(sum[:])[:16]
 }
 
 func humanize(s string) string { return strings.ReplaceAll(s, "_", " ") }

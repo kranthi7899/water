@@ -103,6 +103,43 @@ func TestComputeExcludesDismissedCard(t *testing.T) {
 	}
 }
 
+// TestComputeAppliesDecisionRecordOverride is Phase 1c's (U13) wiring test
+// for needsyou: a persisted decision_records row for a card id must
+// override what the live DecisionSource just computed for that same id,
+// exactly as GET /v1/decisions does (both call decisions.MergeFromStore).
+func TestComputeAppliesDecisionRecordOverride(t *testing.T) {
+	st, q := harness(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	src := &fakeSource{cards: []*decisions.Card{
+		{ID: "c-1", Severity: 3, Lead: "computed lead"},
+	}}
+
+	seeded := &decisions.Card{ID: "c-1", Severity: 5, Lead: "pinned lead, higher severity"}
+	cardJSON, err := decisions.EncodeCardRecord(seeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDecisionRecord(ctx, store.DecisionRecord{CardID: "c-1", CardJSON: cardJSON, Provenance: "demo_seed"}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := Compute(ctx, src, q, st, now, 2, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want exactly 1", items)
+	}
+	if items[0].Title != seeded.Lead {
+		t.Fatalf("Title = %q, want the persisted record's own lead %q (the record must override the computed card)", items[0].Title, seeded.Lead)
+	}
+	if items[0].Severity != seeded.Severity {
+		t.Fatalf("Severity = %d, want the record's %d", items[0].Severity, seeded.Severity)
+	}
+}
+
 func TestComputeSeverityThreshold(t *testing.T) {
 	st, q := harness(t)
 	ctx := context.Background()

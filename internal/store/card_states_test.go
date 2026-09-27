@@ -82,6 +82,53 @@ func TestDismissedCardIDsExcludesStaged(t *testing.T) {
 	}
 }
 
+// TestDismissRegressionAfterCardActionStatesSplit is Phase 1c's regression
+// check (docs/slices/UI.md): card_action_states now owns staging, but
+// dismiss must still be exactly what it was before that split -- same
+// table, same accessors (SetCardState/GetCardState/DismissedCardIDs), same
+// semantics. A dismissed card reads back as dismissed and appears in
+// DismissedCardIDs; nothing about dismiss reads or writes
+// card_action_states.
+func TestDismissRegressionAfterCardActionStatesSplit(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+
+	cs := CardState{CardID: "card-dismiss-regress", Status: "dismissed", Reason: "handled elsewhere"}
+	if err := s.SetCardState(ctx, cs); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetCardState(ctx, "card-dismiss-regress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "dismissed" || got.Reason != "handled elsewhere" {
+		t.Fatalf("got = %+v, want dismiss's pre-split shape untouched", got)
+	}
+	ids, err := s.DismissedCardIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ids["card-dismiss-regress"] {
+		t.Fatalf("DismissedCardIDs = %+v, want card-dismiss-regress", ids)
+	}
+
+	// Staging a different card's action (the new table) must not surface as
+	// a dismissal, and must not appear in card_states at all.
+	if err := s.SetCardActionState(ctx, CardActionState{CardID: "card-other", ActionID: "gmail.send_message", Status: "staged", ApprovalID: "env_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetCardState(ctx, "card-other"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("card_action_states write leaked into card_states: %v", err)
+	}
+	ids2, err := s.DismissedCardIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids2["card-other"] {
+		t.Fatal("a staged action must never read back as dismissed")
+	}
+}
+
 // TestRepointCardStateMovesOnlyStagedCardsOnTheOldEnvelope: an approval
 // edit re-points the staged card from the voided envelope to the new one;
 // a dismissed card that happens to name the same envelope, and a staged
