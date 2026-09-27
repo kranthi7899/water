@@ -165,3 +165,112 @@ func TestApprovalTransitionIsCompareAndSet(t *testing.T) {
 		t.Fatal("status check constraint missing")
 	}
 }
+
+// TestApprovalPhase1bMetadataRoundTrips: the Phase 1b columns (migration
+// 0018_approval_trail.sql) round-trip through InsertApproval/GetApproval,
+// with the nullable ones (deadline) reading back as a zero time.Time when
+// never set, the same convention decided_at/executed_at already use.
+func TestApprovalPhase1bMetadataRoundTrips(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	deadline := ts(20)
+	row := ApprovalRow{
+		ID: "env2", Action: "gmail.send_message", Payload: `{"to":"a"}`, PayloadHash: "h2", Origin: "p0", Status: "pending",
+		CreatedAt: ts(1), ExpiresAt: ts(2),
+		OriginKind: "person_request", RequestedBy: "lee", Kind: "money", SourceCardID: "card_1", Priority: "urgent",
+		Deadline: deadline, Provenance: "demo_seed",
+	}
+	if err := s.InsertApproval(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetApproval(ctx, "env2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OriginKind != "person_request" || got.RequestedBy != "lee" || got.Kind != "money" ||
+		got.SourceCardID != "card_1" || got.Priority != "urgent" || got.Provenance != "demo_seed" {
+		t.Fatalf("metadata did not round-trip: %+v", got)
+	}
+	if !got.Deadline.Equal(deadline) {
+		t.Fatalf("deadline = %v, want %v", got.Deadline, deadline)
+	}
+	if got.ThreadRef != "" || !got.SentAt.IsZero() || !got.RepliedAt.IsZero() || got.ReplyRef != "" {
+		t.Fatalf("trail fields not at their defaults: %+v", got)
+	}
+
+	// A bare ApprovalRow with no Phase 1b fields set inserts OriginKind's Go
+	// zero value literally ("") -- InsertApproval always lists the column
+	// explicitly, so SQLite's own column-level DEFAULT ('agent_draft') never
+	// applies to a fresh INSERT; it only backfills rows that existed before
+	// migration 0018 ran. Defaulting OriginKind to "agent_draft" for a new
+	// envelope is approvals.Queue.Propose's job (see
+	// TestApprovalMetadataRoundTrips in package approvals), one layer up
+	// from here.
+	bare := ApprovalRow{ID: "env3", Action: "notes.save_note", Payload: `{}`, PayloadHash: "h3", Origin: "p0", Status: "pending", CreatedAt: ts(1), ExpiresAt: ts(2)}
+	if err := s.InsertApproval(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	gotBare, err := s.GetApproval(ctx, "env3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBare.OriginKind != "" {
+		t.Fatalf("bare row origin_kind = %q, want the Go zero value (\"\"), unmapped through the SQL default", gotBare.OriginKind)
+	}
+	if !gotBare.Deadline.IsZero() {
+		t.Fatalf("bare row deadline = %v, want zero", gotBare.Deadline)
+	}
+}
+
+// TestMarkApprovalSentAndReplied: MarkApprovalSent sets sent_at and, when
+// given one, thread_ref; MarkApprovalReplied then finds that approval by
+// thread_ref and sets replied_at/reply_ref. A thread_ref that matches no
+// approval is a no-op, not an error.
+func TestMarkApprovalSentAndReplied(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	row := ApprovalRow{ID: "env4", Action: "gmail.send_message", Payload: `{}`, PayloadHash: "h4", Origin: "p0", Status: "approved", CreatedAt: ts(1), ExpiresAt: ts(2)}
+	if err := s.InsertApproval(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	sentAt := ts(3)
+	if err := s.MarkApprovalSent(ctx, "env4", "thread_abc", sentAt); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetApproval(ctx, "env4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ThreadRef != "thread_abc" || !got.SentAt.Equal(sentAt) {
+		t.Fatalf("after MarkApprovalSent: %+v", got)
+	}
+	if !got.RepliedAt.IsZero() || got.ReplyRef != "" {
+		t.Fatalf("MarkApprovalSent set reply fields: %+v", got)
+	}
+
+	// A reply on an unrelated thread touches nothing.
+	if err := s.MarkApprovalReplied(ctx, "thread_unrelated", "msg_x", ts(4)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetApproval(ctx, "env4"); !got.RepliedAt.IsZero() {
+		t.Fatalf("an unrelated thread's reply matched: %+v", got)
+	}
+
+	repliedAt := ts(5)
+	if err := s.MarkApprovalReplied(ctx, "thread_abc", "msg_1", repliedAt); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetApproval(ctx, "env4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.RepliedAt.Equal(repliedAt) || got.ReplyRef != "msg_1" {
+		t.Fatalf("after MarkApprovalReplied: %+v", got)
+	}
+
+	// An empty thread_ref (never sent, or a non-Gmail action) matches
+	// nothing -- it must never be treated as "no filter".
+	if err := s.MarkApprovalReplied(ctx, "", "msg_2", ts(6)); err != nil {
+		t.Fatal(err)
+	}
+}

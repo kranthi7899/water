@@ -421,6 +421,48 @@ func TestMailCursorPersistedAfterSuccess(t *testing.T) {
 	}
 }
 
+// TestMailTickMarksApprovalReplied (docs/slices/UI.md Phase 1b): the mail
+// tick is one of the two places Water learns about an inbound message, so it
+// must call store.MarkApprovalReplied for every message the call returns.
+// An approval whose thread_ref matches gets replied_at/reply_ref set; a
+// message on an unrelated thread touches nothing; and the events tick (which
+// shares the same tick() code path) must never do this even if fn happened
+// to look similar.
+func TestMailTickMarksApprovalReplied(t *testing.T) {
+	r := newRig(t)
+	r.connect(t)
+	if err := r.st.InsertApproval(context.Background(), store.ApprovalRow{
+		ID: "env_sent", Action: "gmail.send_message", Payload: `{}`, PayloadHash: "h", Origin: "p0", Status: "executed",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.MarkApprovalSent(context.Background(), "env_sent", "thread_watching", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r.incrMail.setOutput(map[string]any{
+		"history_id": "1",
+		"messages": []map[string]any{
+			{"id": "msg_reply", "threadId": "thread_watching"},
+			{"id": "msg_other", "threadId": "thread_unrelated"},
+		},
+	})
+	ref := watersync.New(watersync.Config{
+		Gate: r.g, Vault: r.v, Store: r.st, Service: fake.MailService, Account: fake.MailAccount,
+		EventsFunction: "fake_calendar.list_events", MailFunction: "fake_incr_mail.list_messages",
+		EventsArgs: noArgs, MailArgs: cursorArgs,
+		Logf: r.logf,
+	})
+	ref.RunOnceMail(context.Background())
+	got, err := r.st.GetApproval(context.Background(), "env_sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepliedAt.IsZero() || got.ReplyRef != "msg_reply" {
+		t.Fatalf("approval not marked replied: %+v", got)
+	}
+}
+
 // TestExpiredCursorIsClearedAndNextTickReseeds is the fallback contract: a
 // sentinel "cursor expired" error deletes the stored cursor (surfacing
 // through the gate's returned error via errors.Is, per gate.go's

@@ -24,6 +24,7 @@ import (
 	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
+	"water/internal/connectors/requests"
 	"water/internal/connectors/research"
 	"water/internal/dashboards"
 	"water/internal/decider"
@@ -215,6 +216,11 @@ func loadRoleMD(id string) string {
 // no credential and no API key. buildCEORegistry registers it with the
 // CLI's default model; callers that run the twin use buildCEORegistryModel
 // with the manifest's fast model. Validation-only callers never invoke it.
+//
+// requests (requests.respond) is registered for every CEO twin, real and
+// demo: like display, it has no network, credential or side effect beyond
+// recording the CEO's already-approved answer text (internal/connectors/
+// requests, docs/slices/UI.md Phase 1b, U15).
 func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName, githubRepo string) (*connectors.Registry, error) {
 	return buildCEORegistryModel(id, st, mailAddress, signatureName, githubRepo, "")
 }
@@ -226,7 +232,7 @@ func buildCEORegistryModel(id string, st *store.Store, mailAddress, signatureNam
 	gm.SetSignatureName(signatureName)
 	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress),
 		twinlink.NewSender(id, st), twinlink.NewInbox(st), display.New(),
-		research.New(research.CLIRunner{Model: researchModel})}
+		research.New(research.CLIRunner{Model: researchModel}), requests.New()}
 	if id == demoTwinID {
 		cs = append(cs,
 			fake.NewGitHub(fake.DefaultGitHubPRs(), fake.DefaultGitHubIssues()),

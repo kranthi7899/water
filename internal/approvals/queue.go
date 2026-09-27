@@ -51,6 +51,84 @@ type Envelope struct {
 	// the Queue recomputes them on every read (see RecipientChecker), so
 	// they are always current and never something a caller can set.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// OriginKind through Provenance are Phase 1b's approval metadata and
+	// derived-trail fields (docs/slices/UI.md). None of them are part of
+	// PayloadHash: PayloadHash only ever hashes Payload (see PayloadHash
+	// below), so editing any of these can never change, or be mistaken for
+	// changing, the thing the CEO is actually approving. See
+	// TestPayloadHash_UnchangedByPhase1bMetadata.
+	OriginKind   string    `json:"origin_kind"`  // "agent_draft"|"person_request" (U21)
+	RequestedBy  string    `json:"requested_by"` // a roster person id, for a person request
+	Kind         string    `json:"kind"`         // "email"|"money"|"signature"|"flag"|"message", for icon choice
+	SourceCardID string    `json:"source_card_id"`
+	Priority     string    `json:"priority"`
+	Deadline     time.Time `json:"deadline"`
+	ThreadRef    string    `json:"thread_ref"` // the Gmail threadId a send executed into
+	SentAt       time.Time `json:"sent_at"`    // when the action executed (the trail's "sent" stage)
+	RepliedAt    time.Time `json:"replied_at"` // when an inbound message on ThreadRef arrived
+	ReplyRef     string    `json:"reply_ref"`  // that inbound message's own id
+	Provenance   string    `json:"provenance"` // "" or "demo_seed" (U21)
+}
+
+// Origin-kind values for Envelope.OriginKind (U21). The zero value defaults
+// to OriginKindAgentDraft at Propose, so every pre-1b envelope (proposed
+// only by the model, never by a person) reads back correctly.
+const (
+	OriginKindAgentDraft    = "agent_draft"
+	OriginKindPersonRequest = "person_request"
+)
+
+// Kind values for Envelope.Kind, used only for icon choice (docs/slices/UI.md
+// Phase 1b).
+const (
+	KindEmail     = "email"
+	KindMoney     = "money"
+	KindSignature = "signature"
+	KindFlag      = "flag"
+	KindMessage   = "message"
+)
+
+// TrailStage is where the derived approval status trail (docs/slices/UI.md
+// Phase 1b) currently reads: staged -> approved -> sent -> reply. It is
+// never a stored column -- Envelope.Trail computes it fresh from Status plus
+// SentAt/RepliedAt every time it's asked, the same way Warnings is computed
+// fresh from the recipient checks rather than stored.
+type TrailStage string
+
+const (
+	TrailStaged   TrailStage = "staged"
+	TrailApproved TrailStage = "approved"
+	TrailSent     TrailStage = "sent"
+	TrailReply    TrailStage = "reply"
+)
+
+// Trail computes e's position on the derived status trail. Denied and
+// Expired are terminal, non-trail outcomes and Trail returns "" for them; a
+// caller showing the trail falls back to Status directly in that case.
+// "sent" and "reply" are only ever reported when the timestamp that stage
+// actually means is set -- never guessed from Status alone -- so an Executed
+// envelope whose SentAt was never recorded (there should be none once
+// decideAndExecute always calls store.MarkApprovalSent, but an envelope
+// executed before this migration landed has no sent_at) also reads back as
+// "", not as a stage it cannot actually prove.
+func (e Envelope) Trail() TrailStage {
+	switch e.Status {
+	case Pending:
+		return TrailStaged
+	case Approved:
+		return TrailApproved
+	case Executed:
+		if e.SentAt.IsZero() {
+			return ""
+		}
+		if !e.RepliedAt.IsZero() {
+			return TrailReply
+		}
+		return TrailSent
+	default:
+		return ""
+	}
 }
 
 var (
@@ -63,6 +141,60 @@ var (
 
 // DefaultTTL bounds how long an unanswered or unused approval lives.
 const DefaultTTL = 15 * time.Minute
+
+// RequestTTL is the longer TTL ttlFor gives a demo-seeded or person-request
+// envelope instead of DefaultTTL's 15 minutes (docs/slices/UI.md Phase 1b,
+// finding 21): a demo-seeded envelope of any kind must survive an entire
+// scripted walkthrough rather than expiring mid-demo, and a real person
+// request (U15) may reasonably sit waiting on the CEO's attention for days,
+// not minutes.
+const RequestTTL = 7 * 24 * time.Hour
+
+// ttlFor is the TTL Propose gives e when it doesn't already set ExpiresAt
+// itself: RequestTTL for a demo-seeded envelope of any origin_kind, or for
+// any person-request envelope (demo or not); DefaultTTL otherwise. This is
+// an OR, by design: finding 21's demo-survival need and U15's person-request
+// need are two independent reasons for a longer TTL, not one combined
+// condition -- a demo-seeded agent draft (finding 21 alone) and a live,
+// non-demo person request (U15 alone) both need it.
+func ttlFor(e Envelope) time.Duration {
+	if e.Provenance == "demo_seed" || e.OriginKind == OriginKindPersonRequest {
+		return RequestTTL
+	}
+	return DefaultTTL
+}
+
+// functionKind maps an outward action to the Kind (docs/slices/UI.md Phase
+// 1b: email|money|signature|flag|message, for icon choice) a proposed
+// envelope gets when the caller doesn't set Kind itself. Consulted by
+// deriveKind only when e.Kind == "".
+var functionKind = map[string]string{
+	"gmail.send_message":  KindEmail,
+	"gmail.draft_message": KindEmail,
+	// linear.set_issue_priority would map to KindFlag (docs/slices/UI.md
+	// U4), but internal/connectors/linear has no set_issue_priority
+	// function yet -- add the entry once U4 adds it.
+}
+
+// deriveKind is Propose's Kind lookup, run only when the caller left Kind
+// "". functionKind covers every action with one fixed kind. requests.respond
+// (U15's person-request connector) has no fixed kind: what's being asked for
+// varies per request (money, a signature, ...), and this package has no
+// structured view of that beyond the free-text payload ProposeRequest's
+// caller already built. So a ProposeRequest caller that knows better should
+// set Envelope.Kind itself (e.g. "money" for a budget-reallocation ask)
+// before calling; deriveKind's "message" is only the safe fallback per
+// docs/slices/UI.md Phase 1b when it doesn't. Anything else unmapped
+// defaults to "", the same as the kind column's own default.
+func deriveKind(action string) string {
+	if k, ok := functionKind[action]; ok {
+		return k
+	}
+	if action == "requests.respond" {
+		return KindMessage
+	}
+	return ""
+}
 
 type Queue struct {
 	st  *store.Store
@@ -125,9 +257,15 @@ func (q *Queue) Propose(ctx context.Context, e Envelope) (Envelope, error) {
 	if _, err := q.recipients.Check(ctx, e.Action, e.Payload); err != nil {
 		return Envelope{}, err
 	}
+	if e.OriginKind == "" {
+		e.OriginKind = OriginKindAgentDraft
+	}
+	if e.Kind == "" {
+		e.Kind = deriveKind(e.Action)
+	}
 	now := q.Now().UTC()
 	if e.ExpiresAt.IsZero() {
-		e.ExpiresAt = now.Add(DefaultTTL)
+		e.ExpiresAt = now.Add(ttlFor(e))
 	}
 	if !e.ExpiresAt.After(now) {
 		return Envelope{}, ErrExpired
@@ -148,11 +286,33 @@ func (q *Queue) Propose(ctx context.Context, e Envelope) (Envelope, error) {
 		return Envelope{}, err
 	}
 	row := store.ApprovalRow{ID: e.ID, Action: e.Action, Recipient: e.Recipient, Payload: string(body), PayloadHash: e.PayloadHash,
-		EvidenceRefs: e.EvidenceRefs, Risk: e.Risk, Origin: e.Origin, Status: string(Pending), CreatedAt: now, ExpiresAt: e.ExpiresAt.UTC()}
+		EvidenceRefs: e.EvidenceRefs, Risk: e.Risk, Origin: e.Origin, Status: string(Pending), CreatedAt: now, ExpiresAt: e.ExpiresAt.UTC(),
+		OriginKind: e.OriginKind, RequestedBy: e.RequestedBy, Kind: e.Kind, SourceCardID: e.SourceCardID, Priority: e.Priority,
+		Deadline: e.Deadline, Provenance: e.Provenance}
 	if err := q.st.InsertApproval(ctx, row); err != nil {
 		return Envelope{}, err
 	}
 	return q.Get(ctx, e.ID)
+}
+
+// ProposeRequest proposes a person-request approval (U15): the CEO is being
+// asked to answer someone else's request (e.g. Lee's budget-reallocation
+// ask), not asked to approve an outward action. It forces
+// Action="requests.respond" and OriginKind=OriginKindPersonRequest, and
+// requires RequestedBy (the requester's roster person id) -- everything else
+// (Payload, Origin, Risk, Kind, SourceCardID, Priority, Deadline, Provenance)
+// is the caller's, exactly like Propose. Approving the result executes
+// requests.respond through Gate.Invoke like any other envelope: it records
+// the answer already sitting in Payload and sends nothing (see
+// internal/connectors/requests). The gate stays the only execution path;
+// there is no separate code path for a person request's approval.
+func (q *Queue) ProposeRequest(ctx context.Context, e Envelope) (Envelope, error) {
+	if e.RequestedBy == "" {
+		return Envelope{}, errors.New("approvals: ProposeRequest requires RequestedBy")
+	}
+	e.Action = "requests.respond"
+	e.OriginKind = OriginKindPersonRequest
+	return q.Propose(ctx, e)
 }
 
 // Get loads an envelope and checks that its stored payload still hashes to
@@ -174,7 +334,9 @@ func (q *Queue) Get(ctx context.Context, id string) (Envelope, error) {
 
 func fromRow(r store.ApprovalRow) (Envelope, error) {
 	e := Envelope{ID: r.ID, Action: r.Action, Recipient: r.Recipient, EvidenceRefs: r.EvidenceRefs, Risk: r.Risk, Origin: r.Origin,
-		ExpiresAt: r.ExpiresAt, PayloadHash: r.PayloadHash, Status: Status(r.Status), Reason: r.Reason, CreatedAt: r.CreatedAt}
+		ExpiresAt: r.ExpiresAt, PayloadHash: r.PayloadHash, Status: Status(r.Status), Reason: r.Reason, CreatedAt: r.CreatedAt,
+		OriginKind: r.OriginKind, RequestedBy: r.RequestedBy, Kind: r.Kind, SourceCardID: r.SourceCardID, Priority: r.Priority,
+		Deadline: r.Deadline, ThreadRef: r.ThreadRef, SentAt: r.SentAt, RepliedAt: r.RepliedAt, ReplyRef: r.ReplyRef, Provenance: r.Provenance}
 	if err := decodeJSON(r.Payload, &e.Payload); err != nil {
 		return Envelope{}, fmt.Errorf("%w: %v", ErrTampered, err)
 	}

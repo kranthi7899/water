@@ -113,6 +113,17 @@ connectors:
   - name: research
     functions:
       - {name: web, level: R, rate: {max: 20, per: 1h}}
+  # requests.respond (internal/connectors/requests, docs/slices/UI.md Phase
+  # 1b, U15) records the CEO's answer to a person request (a budget
+  # reallocation ask, a signature ask, ...) once approved. No network, no
+  # credential, no outward call: approvals.Queue.ProposeRequest builds the
+  # envelope with the exact answer text already in its payload, so this only
+  # ever runs after the CEO approved that exact text word for word. Level A
+  # per U15's decision, so it always requires an approved envelope like any
+  # other outward-shaped action, even though nothing here actually goes out.
+  - name: requests
+    functions:
+      - {name: respond, level: A, rate: {max: 30, per: 1h}}
 
 # Only functions that read (never draft or act) may run unattended in the
 # background sync (internal/sync); get_message and the Drive functions stay

@@ -27,6 +27,7 @@ import (
 	"water/internal/connectors/google/gsheets"
 	"water/internal/connectors/hubspot"
 	"water/internal/connectors/linear"
+	"water/internal/connectors/requests"
 	"water/internal/connectors/research"
 	"water/internal/gate"
 	"water/internal/gate/permit"
@@ -181,7 +182,8 @@ func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
 	}
 	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
 		twinlink.NewSender("ceo", nil), twinlink.NewInbox(nil), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New(), display.New(),
-		research.New(nil)) // research.web: never invoked here (a nil runner refuses)
+		research.New(nil), // research.web: never invoked here (a nil runner refuses)
+		requests.New())
 	if err != nil {
 		t.Fatal(err)
 	}

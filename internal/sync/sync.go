@@ -436,12 +436,40 @@ func (r *Refresher) tick(ctx context.Context, fn, cursorKey, cursorField string,
 		// would skip what it cut (gcal's windowed seed past max events).
 		r.cfg.Logf("sync: %s: output truncated, cursor %s not advanced", fn, cursorKey)
 	}
+	if fn == r.cfg.MailFunction && r.cfg.Store != nil {
+		r.markApprovalReplies(ctx, res.Output)
+	}
 	if r.cfg.Store == nil || cursorField == "" {
 		return
 	}
 	if next, ok := stringField(res.Output, cursorField); ok && next != "" {
 		if err := r.cfg.Store.SetCursor(ctx, cursorKey, next); err != nil {
 			r.cfg.Logf("sync: %s: persisting cursor %s: %v", fn, cursorKey, err)
+		}
+	}
+}
+
+// markApprovalReplies is the mail tick's own point of learning about inbound
+// messages (docs/slices/UI.md Phase 1b): for each message the call just
+// returned, if it landed on a thread Water sent from (an approval's
+// thread_ref, set once by decideAndExecute when a gmail.send_message
+// executes), record it as that approval's reply via
+// store.MarkApprovalReplied. A no-op for every message that matches no
+// approval, which is most inbound mail.
+func (r *Refresher) markApprovalReplies(ctx context.Context, raw json.RawMessage) {
+	var out struct {
+		Messages []struct {
+			ID       string `json:"id"`
+			ThreadID string `json:"threadId"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return
+	}
+	now := r.cfg.Now()
+	for _, m := range out.Messages {
+		if err := r.cfg.Store.MarkApprovalReplied(ctx, m.ThreadID, m.ID, now); err != nil {
+			r.cfg.Logf("sync: marking approval replied for thread %q: %v", m.ThreadID, err)
 		}
 	}
 }

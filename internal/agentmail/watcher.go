@@ -190,6 +190,15 @@ func (w *Watcher) loadCursor(ctx context.Context) (string, error) {
 // trade-off for a background triage feed, the same one sync.Refresher's
 // own ticks already make for an ordinary failed connector call.
 func (w *Watcher) triage(ctx context.Context, m rawMessage) {
+	// This is also the natural point the agent mailbox learns of an inbound
+	// message: if it landed on a thread Water sent from (an approval's
+	// thread_ref, set once by decideAndExecute when a gmail.send_message
+	// executes), record it as that approval's reply (docs/slices/UI.md
+	// Phase 1b). A no-op, not an error, when nothing matches -- most inbound
+	// mail here is not a reply to anything Water sent.
+	if err := w.cfg.Store.MarkApprovalReplied(ctx, m.ThreadID, m.ID, w.cfg.Now()); err != nil {
+		w.cfg.Logf("agentmail: marking approval replied for thread %q: %v", m.ThreadID, err)
+	}
 	item := &store.Message{From: m.From, Subject: m.Subject, Body: m.Body}
 	c, err := w.cfg.Classifier.Classify(ctx, item)
 	if err != nil {

@@ -67,6 +67,12 @@ connectors:
   - name: research
     functions:
       - {name: web, level: R, rate: {max: 20, per: 1h}}
+  # requests.respond (internal/connectors/requests, docs/slices/UI.md Phase
+  # 1b, U15) records the CEO's answer to a person request once approved. No
+  # network, no credential, no outward call. Same in demo and production.
+  - name: requests
+    functions:
+      - {name: respond, level: A, rate: {max: 30, per: 1h}}
 
 # Same as production: only functions that read (never draft or act) may run
 # unattended in the background sync. The fake connectors are not on this

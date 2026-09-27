@@ -441,3 +441,38 @@ func TestStagedForwardOutlivesTheInteractiveTTLAndIsRestagedAfterExpiry(t *testi
 		t.Fatalf("a forward the CEO declined was staged again: %+v", pending)
 	}
 }
+
+// TestWatcherTickMarksApprovalReplied (docs/slices/UI.md Phase 1b): the
+// agent mailbox's own inbound-triage watcher is the other of the two places
+// Water learns about an inbound message, so triage must call
+// store.MarkApprovalReplied for every message it sees, whatever the
+// classifier then does with it. An approval whose thread_ref matches the
+// message's thread gets replied_at/reply_ref set; an unrelated thread
+// touches nothing.
+func TestWatcherTickMarksApprovalReplied(t *testing.T) {
+	r := newRig(t)
+	r.connect(t)
+	ctx := context.Background()
+	if err := r.st.InsertApproval(ctx, store.ApprovalRow{
+		ID: "env_sent", Action: "gmail.send_message", Payload: `{}`, PayloadHash: "h", Origin: "p0", Status: "executed",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.st.MarkApprovalSent(ctx, "env_sent", "thread_watching", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r.mbox.output = rawOutput(t, "10",
+		map[string]any{"id": "msg_reply", "threadId": "thread_watching", "from": "dana@acme.com", "subject": "Re: Extension", "body": "Sounds good."},
+		map[string]any{"id": "msg_other", "threadId": "thread_unrelated", "from": "dana@acme.com", "subject": "Hi", "body": "b"},
+	)
+	w := newWatcher(r, &fakeClassifier{}, "")
+	w.Tick(ctx)
+	got, err := r.st.GetApproval(ctx, "env_sent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepliedAt.IsZero() || got.ReplyRef != "msg_reply" {
+		t.Fatalf("approval not marked replied: %+v", got)
+	}
+}

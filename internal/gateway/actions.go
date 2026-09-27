@@ -141,6 +141,16 @@ func (d *Daemon) decideAndExecute(ctx context.Context, id, payloadHash, reply st
 		if cur, gerr := d.cfg.Approvals.Get(execCtx, id); gerr == nil && cur.Status == approvals.Approved {
 			_, _ = d.cfg.Approvals.Abandon(execCtx, id, "execution refused: "+ierr.Error())
 		}
+	} else {
+		// Executed: the derived trail's "sent" stage (approvals.Envelope.
+		// Trail, docs/slices/UI.md Phase 1b) reads sent_at, and a Gmail send
+		// also gets its thread_ref, so a later inbound reply on that thread
+		// can be matched back to this approval (store.MarkApprovalReplied,
+		// wired into sync's mail tick and agentmail's watcher). Best-effort:
+		// this is trail bookkeeping, not the execution itself, which already
+		// succeeded and must be reported as such either way.
+		threadRef := gmailThreadRefFromOutput(e.Action, res.Output)
+		_ = d.cfg.Store.MarkApprovalSent(execCtx, e.ID, threadRef, d.cfg.Approvals.Now())
 	}
 	latest, gerr := d.cfg.Approvals.Get(execCtx, id)
 	if gerr != nil {
@@ -176,4 +186,24 @@ func (d *Daemon) DecideBound(ctx context.Context, id, payloadHash, reply string)
 		errText = out.Err.Error()
 	}
 	return nervous.DecisionOutcome{Status: string(out.Envelope.Status), Executed: out.Executed, Error: errText}, nil
+}
+
+// gmailThreadRefFromOutput reads the Gmail thread id out of a successful
+// gmail.send_message execution's output (gmail's own writeMessageOutput
+// type, unexported, but its JSON shape includes "thread_id" -- the same
+// independent-decode approach internal/agentmail's rawMessage already takes
+// against gmail's list_messages output), so decideAndExecute can persist it
+// onto the approval as thread_ref (docs/slices/UI.md Phase 1b). Every other
+// action's envelope keeps thread_ref "" (the column's own default).
+func gmailThreadRefFromOutput(action string, output json.RawMessage) string {
+	if action != "gmail.send_message" || len(output) == 0 {
+		return ""
+	}
+	var out struct {
+		ThreadID string `json:"thread_id"`
+	}
+	if err := json.Unmarshal(output, &out); err != nil {
+		return ""
+	}
+	return out.ThreadID
 }
