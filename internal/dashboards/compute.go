@@ -204,6 +204,16 @@ func isNotConnected(err error) bool {
 	return false
 }
 
+// IsNotConnected exports isNotConnected's own gate-DenyError/
+// gsheets.ErrCustomersNotConfigured classification for a caller outside
+// this package that needs the exact same "not_connected" detection this
+// registry's own tiles use — docs/slices/UI.md Phase 5a's workspace
+// control-room tiles (internal/gateway's new workspace-detail handler),
+// which reuse this rather than inventing a second not-connected check for
+// e.g. a missing GitHub credential. See isNotConnected's own doc comment
+// for exactly which two error shapes this matches.
+func IsNotConnected(err error) bool { return isNotConnected(err) }
+
 // classify turns a fetch error into a tile state.
 func classify(err error) TileState {
 	if err == nil {
@@ -295,6 +305,39 @@ func median(xs []float64) float64 {
 		return s[n/2]
 	}
 	return (s[n/2-1] + s[n/2]) / 2
+}
+
+// ---- exported reuse for Phase 5a's workspace control-room tiles ----
+//
+// docs/slices/UI.md Phase 5a reuses this package's own gated, cached,
+// classified fetch (fetchJSON/classify above) for the Finance and Clients
+// workspace tiles, rather than inventing a second fetch/cache/classify
+// mechanism in internal/gateway: Rows gives the same raw-grid shape
+// financeSpendBreakdown/clientsAccounts/clientsSilentAccountCallout above
+// already fetch (company_finance.outstanding_invoices,
+// company_customers.accounts, ...), and Issues gives the same
+// linear.list_issues read deliveryIssues above already fetches (so a
+// project workspace's Linear-based tiles share the Delivery dashboard's own
+// Cache entry, not a second gated call). Both are read-only: neither writes
+// anything and neither can create a decision.
+
+// Rows fetches fn's output as raw sheet rows (the shape every no-argument,
+// "return every row" gsheets function uses — sheetRows above), through the
+// same Gate.Invoke/Cache/classify path fetchJSON gives this package's own
+// metric/breakdown/callout functions.
+func Rows(ctx context.Context, co *Compute, fn string) ([][]any, TileState, error) {
+	v, err := fetchJSON[sheetRows](ctx, co, fn)
+	return v.Rows, classify(err), err
+}
+
+// Issues fetches linear.list_issues the same cached, gated way
+// deliveryIssues does, so a Phase 5a project workspace's Linear-based tiles
+// (progress share, building-now, blocked issues) share one cached call with
+// any open Delivery dashboard within Cache.TTL, rather than doubling the
+// gated read.
+func Issues(ctx context.Context, co *Compute) ([]linear.Issue, TileState, error) {
+	v, err := deliveryIssues(ctx, co)
+	return v, classify(err), err
 }
 
 // ---- Finance ----

@@ -52,6 +52,8 @@ import Testing
             ("GET", "water://app/v1/meetings?upcoming=1&limit=10", "/v1/meetings?upcoming=1&limit=10"),
             // Slice UI Phase 2.
             ("GET", "water://app/v1/workspaces", "/v1/workspaces"),
+            // Slice UI Phase 5a: one workspace's own control-room tiles.
+            ("GET", "water://app/v1/workspaces/crawler", "/v1/workspaces/crawler"),
             ("GET", "water://app/v1/dashboards", "/v1/dashboards"),
             // Slice UI Phase 4: one dashboard's computed tiles.
             ("GET", "water://app/v1/dashboards/finance", "/v1/dashboards/finance"),
@@ -118,6 +120,7 @@ import Testing
         #expect(!decide("POST", "water://app/ui/index.html").isAllowed)
         #expect(!decide("get", "water://app/v1/today").isAllowed)
         #expect(!decide("POST", "water://app/v1/workspaces").isAllowed)
+        #expect(!decide("POST", "water://app/v1/workspaces/crawler").isAllowed)
         #expect(!decide("POST", "water://app/v1/dashboards").isAllowed)
         #expect(!decide("POST", "water://app/v1/dashboards/finance").isAllowed)
         #expect(!decide("GET", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)
@@ -196,6 +199,8 @@ import Testing
     @Test func badIDsAndAssetNamesAreDenied() {
         #expect(!decide("GET", "water://app/v1/threads/thr.1").isAllowed)
         #expect(!decide("GET", "water://app/v1/threads/thr:1").isAllowed)
+        #expect(!decide("GET", "water://app/v1/workspaces/crawler.1").isAllowed)
+        #expect(!decide("GET", "water://app/v1/workspaces/crawler/sub").isAllowed) // two segments: not a daemon route
         #expect(!decide("GET", "water://app/v1/threads/" + String(repeating: "a", count: 129)).isAllowed)
         #expect(decide("GET", "water://app/v1/threads/" + String(repeating: "a", count: 128)).isAllowed)
         #expect(!decide("GET", "water://app/ui/app.json").isAllowed)
@@ -227,6 +232,7 @@ import Testing
         #expect(!decide("POST", "water://app/v1/threads/thr_1/messages?x=y").isAllowed)
         #expect(!decide("GET", "water://app/v1/approvals/env_1?status=all").isAllowed)
         #expect(!decide("GET", "water://app/v1/workspaces?x=1").isAllowed)
+        #expect(!decide("GET", "water://app/v1/workspaces/crawler?x=1").isAllowed)
         #expect(!decide("GET", "water://app/v1/dashboards?x=1").isAllowed)
     }
 

@@ -112,6 +112,9 @@
     // Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
     // disclosure ({id, name, template, source} / {id, name, source}).
     workspaces: () => request('GET', '/v1/workspaces'),
+    // Phase 5a: one workspace's filtered existing sections plus its own
+    // control-room tiles (internal/gateway/workspace_detail.go).
+    workspace: (id) => request('GET', '/v1/workspaces/' + enc(id)),
     dashboards: () => request('GET', '/v1/dashboards'),
     // Phase 4: one dashboard's actual computed tiles.
     dashboard: (id) => request('GET', '/v1/dashboards/' + enc(id)),

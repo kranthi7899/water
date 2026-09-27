@@ -1,10 +1,15 @@
 // view_workspaces.js: the Workspaces sidebar disclosure and its main-pane
-// view (docs/slices/UI.md Phase 2). This phase only builds the routing
-// shape and a placeholder render for one workspace's page — the six full
-// views are Phase 3's job and a real per-workspace page (finance, a
-// project, ...) is Phase 5's — so this file stays deliberately small:
-// enough to list what twins/<id>/workspaces/*.yaml loaded and navigate,
-// nothing about a workspace's actual content.
+// view (docs/slices/UI.md Phase 2's routing shape, Phase 5a's real
+// project/finance/clients content). A workspace's page is its filtered
+// existing sections (needs-you rows, recent meetings and threads) plus its
+// own control-room tiles from api.workspace(id)
+// (internal/gateway/workspace_detail.go's WorkspaceView) -- every number
+// here is read-only and this file never proposes, stages or decides
+// anything; it only opens a decision/approval/meeting/thread the CEO
+// already has, exactly like Today's own rows do.
+//
+// people/ideas/research/marketing templates still render the Phase 2
+// placeholder: their real content is Phase 5b-5d's own job.
 //
 // The hash route is "workspaces" with an optional two-segment param,
 // "<id>/<sub>" (e.g. "#workspaces/finance/overview", parsed by app.js's
@@ -16,7 +21,7 @@
 'use strict';
 
 (function () {
-  const { h, replace, get, list } = window.dom;
+  const { h, replace, get, list, fmtDay, fmtDate } = window.dom;
   const api = window.api;
 
   // SUBS is every sub-page this phase's placeholder knows how to switch
@@ -46,7 +51,8 @@
       replace(c, S.header('Workspaces', ''), S.errorBox('Could not open this workspace', new Error('No workspace named "' + id + '"')));
       return;
     }
-    replace(c, S.header(get(spec, 'name') || id, workspaceSubtitle(spec)), workspaceDetail(spec, sub || S.DEFAULT_WORKSPACE_SUB));
+    replace(c, S.header(get(spec, 'name') || id, workspaceSubtitle(spec)), h('p', { class: 'loading' }, 'Loading…'));
+    await renderWorkspaceDetail(c, spec, sub || S.DEFAULT_WORKSPACE_SUB, gen);
   }
 
   function workspaceSubtitle(spec) {
@@ -71,9 +77,300 @@
     return h('div', { class: 'panel' }, ul);
   }
 
-  function workspaceDetail(spec, sub) {
+  // ---- tile state badges ----
+  //
+  // Two badge functions, not one: a Finance/Clients tile reused straight
+  // from internal/dashboards.DashboardView reads "Not connected"
+  // (mirroring view_dashboards.js's own stateBadge exactly, for the same
+  // tile shape), but a GitHub-sourced tile's not_connected state is this
+  // phase's own "Connect GitHub" wording (docs/slices/UI.md Phase 5a) --
+  // the same tile state, a different, more actionable label for a
+  // different underlying cause.
+  function dashboardStateBadge(S, tileState) {
+    switch (tileState) {
+      case 'ok': return null;
+      case 'not_connected': return S.badge('Not connected', 'warn');
+      case 'unavailable': return S.badge('Unavailable', 'status-denied');
+      case 'illustrative': return S.badge('Illustrative', '');
+      default: return S.badge(String(tileState || ''), '');
+    }
+  }
+
+  function githubStateBadge(S, tileState) {
+    switch (tileState) {
+      case 'ok': return null;
+      case 'not_connected': return S.badge('Connect GitHub', 'warn');
+      case 'unavailable': return S.badge('Unavailable', 'status-denied');
+      default: return S.badge(String(tileState || ''), '');
+    }
+  }
+
+  function fmtNumber(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '—';
+    const r = Math.round(n * 100) / 100;
+    return String(r);
+  }
+
+  function metricBox(label, tile, state, badgeFn) {
+    return h('div', { class: 'panel dashboard-tile' },
+      h('div', { class: 'row-meta' }, label),
+      h('div', { class: 'dashboard-tile-value' }, state === 'ok' ? fmtNumber(get(tile, 'value')) : '—'),
+      badgeFn(window.appShared, state));
+  }
+
+  // ---- project workspace ----
+
+  function progressPanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const target = get(tile, 'target_at');
+    const sub = target ? 'Target ' + fmtDay(target) : 'No target date on record';
+    if (state !== 'ok') {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Progress'), dashboardStateBadge(S, state) || S.empty('No progress data yet.'));
+    }
+    const done = get(tile, 'done') || 0;
+    const total = get(tile, 'total') || 0;
+    return h('div', { class: 'panel' },
+      h('div', { class: 'row-meta' }, 'Progress · ' + sub),
+      h('progress', { value: done, max: Math.max(total, 1) }),
+      h('div', { class: 'muted' }, total > 0 ? (done + ' of ' + total + ' issues done') : 'No issues on this team yet.'));
+  }
+
+  function buildingNowPanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const items = list(get(tile, 'items'));
+    if (state !== 'ok' || !items.length) {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Building now'), dashboardStateBadge(S, state) || S.empty('Nothing in progress.'));
+    }
+    const ul = h('ul', { class: 'rows' });
+    for (const it of items) {
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(it, 'identifier') + ' ' + get(it, 'title'))))));
+    }
+    return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Building now'), ul);
+  }
+
+  function commitBarsPanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    if (state !== 'ok') {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Commits, last 4 weeks'), githubStateBadge(S, state) || S.empty('No commit data.'));
+    }
+    const weeks = list(get(tile, 'weeks'));
+    const max = Math.max(1, ...weeks.map((n) => Number(n) || 0));
+    const bars = h('div', { class: 'commit-bars' });
+    weeks.forEach((n, i) => {
+      bars.appendChild(h('div', { class: 'commit-bar' },
+        h('meter', { min: 0, max: max, value: Number(n) || 0, low: 0, high: max, optimum: max }),
+        h('span', { class: 'muted small' }, String(n))));
+    });
+    return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Commits, last 4 weeks (oldest first)'), bars);
+  }
+
+  function projectTiles(view) {
+    const p = get(view, 'project');
+    if (!p) return null;
+    const openPRsState = get(get(p, 'open_prs'), 'state');
+    const mergedState = get(get(p, 'merged_this_week'), 'state');
+    return h('div', { class: 'stack' },
+      progressPanel(get(p, 'progress')),
+      h('div', { class: 'dashboard-tiles' },
+        metricBox('Open PRs', get(p, 'open_prs'), openPRsState, githubStateBadge),
+        metricBox('Merged this week', get(p, 'merged_this_week'), mergedState, githubStateBadge),
+        metricBox('Blocked issues', get(p, 'blocked_issues'), get(get(p, 'blocked_issues'), 'state'), dashboardStateBadge)),
+      buildingNowPanel(get(p, 'building_now')),
+      commitBarsPanel(get(p, 'commit_bars')));
+  }
+
+  // ---- finance / clients workspace (reuse the Dashboard tile shape) ----
+
+  function dashboardMetricsRow(dashboardView) {
+    const metrics = list(get(dashboardView, 'metrics'));
+    if (!metrics.length) return null;
+    return h('div', { class: 'dashboard-tiles' }, metrics.map((m) =>
+      metricBox(metricLabel(get(m, 'id')), m, get(m, 'state'), dashboardStateBadge)));
+  }
+
+  function metricLabel(id) {
+    const words = String(id || '').split('_');
+    return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  }
+
+  function calloutPanel(dashboardView) {
+    const S = window.appShared;
+    const c = get(dashboardView, 'callout');
+    const state = get(c, 'state');
+    if (state !== 'ok') {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Callout'), dashboardStateBadge(S, state) || S.empty('No callout yet.'));
+    }
+    return h('div', { class: 'panel' },
+      h('div', { class: 'row-meta' }, 'Callout'),
+      h('div', { class: 'row-title' }, get(c, 'title') || ''),
+      h('p', null, get(c, 'detail') || ''));
+  }
+
+  function invoicesPanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const items = list(get(tile, 'items'));
+    if (state !== 'ok' || !items.length) {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Invoices'), dashboardStateBadge(S, state) || S.empty('No outstanding invoices.'));
+    }
+    const ul = h('ul', { class: 'rows' });
+    for (const it of items) {
+      const aging = get(it, 'aging_days');
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(it, 'account')),
+          h('span', { class: 'row-meta' },
+            h('span', { class: 'muted' }, '$' + fmtNumber(get(it, 'amount_usd'))),
+            h('span', { class: 'muted' }, get(it, 'status') || ''),
+            typeof aging === 'number' ? h('span', { class: 'muted' }, Math.round(aging) + 'd outstanding') : null)))));
+    }
+    return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Invoices'), ul);
+  }
+
+  function vendorsPanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const items = list(get(tile, 'items'));
+    if (state !== 'ok' || !items.length) {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Vendor renewals'), dashboardStateBadge(S, state) || S.empty('No vendors on record.'));
+    }
+    const ul = h('ul', { class: 'rows' });
+    for (const v of items) {
+      const renewal = get(v, 'renewal_at');
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(v, 'name')),
+          h('span', { class: 'row-meta' },
+            h('span', { class: 'muted' }, '$' + fmtNumber(get(v, 'monthly_usd')) + '/mo'),
+            renewal ? h('span', { class: 'muted' }, 'Renews ' + fmtDay(renewal)) : null)))));
+    }
+    return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Vendor renewals'), ul);
+  }
+
+  function financeTiles(view) {
+    const f = get(view, 'finance');
+    if (!f) return null;
+    const dv = get(f, 'dashboard');
+    return h('div', { class: 'stack' },
+      dashboardMetricsRow(dv),
+      calloutPanel(dv),
+      invoicesPanel(get(f, 'invoices')),
+      vendorsPanel(get(f, 'vendors')));
+  }
+
+  function accountsPanel(tile) {
+    const S = window.appShared;
+    const state = get(tile, 'state');
+    const items = list(get(tile, 'items'));
+    if (state !== 'ok' || !items.length) {
+      return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Accounts'), dashboardStateBadge(S, state) || S.empty('No accounts on record.'));
+    }
+    const ul = h('ul', { class: 'rows' });
+    for (const a of items) {
+      const days = get(a, 'days_since_contact');
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(a, 'name')),
+          h('span', { class: 'row-meta' },
+            get(a, 'health') ? S.badge(get(a, 'health')) : null,
+            h('span', { class: 'muted' }, fmtNumber(get(a, 'open_tickets')) + ' open tickets'),
+            typeof days === 'number' ? h('span', { class: 'muted' }, Math.round(days) + 'd since contact') : null,
+            get(a, 'outstanding_usd') ? h('span', { class: 'muted' }, '$' + fmtNumber(get(a, 'outstanding_usd')) + ' outstanding') : null,
+            get(a, 'owner_name') ? h('span', { class: 'muted' }, 'Owner: ' + get(a, 'owner_name')) : null)))));
+    }
+    return h('div', { class: 'panel' }, h('div', { class: 'row-meta' }, 'Accounts'), ul);
+  }
+
+  function clientsTiles(view) {
+    const cl = get(view, 'clients');
+    if (!cl) return null;
+    const dv = get(cl, 'dashboard');
+    return h('div', { class: 'stack' },
+      dashboardMetricsRow(dv),
+      calloutPanel(dv),
+      accountsPanel(get(cl, 'accounts')));
+  }
+
+  // ---- shared "filtered existing sections": needs-you, meetings, threads ----
+
+  function needsYouPanel(items) {
+    const S = window.appShared;
+    const panel = h('section', { class: 'panel' }, h('h2', null, 'Needs you'));
+    if (!items.length) { panel.appendChild(S.empty('Nothing here needs you right now.')); return panel; }
+    const ul = h('ul', { class: 'rows' });
+    for (const it of items) {
+      const kind = get(it, 'Kind', 'kind');
+      const id = get(it, 'ID', 'id');
+      ul.appendChild(h('li', null, h('button', {
+        type: 'button', class: 'row ' + S.priorityClass(it),
+        on: { click: () => S.go(kind === 'approval' ? 'approvals' : 'decisions', id) },
+      },
+      h('span', { class: 'row-line' },
+        h('span', { class: 'row-kind' }, S.kindGlyph(it)),
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(it, 'Title', 'title') || id),
+          h('span', { class: 'row-meta' }, S.dueBadge(get(it, 'Deadline', 'deadline'))))))));
+    }
+    panel.appendChild(ul);
+    return panel;
+  }
+
+  function meetingsPanel(items) {
+    const S = window.appShared;
+    const panel = h('section', { class: 'panel' }, h('h2', null, 'Recent meetings'));
+    if (!items.length) { panel.appendChild(S.empty('No meetings linked to this workspace yet.')); return panel; }
+    const ul = h('ul', { class: 'rows' });
+    for (const m of items) {
+      const id = get(m, 'session_id');
+      ul.appendChild(h('li', null, h('button', {
+        type: 'button', class: 'row', on: { click: () => S.go('meetings', id) },
+      },
+      h('span', { class: 'row-main' },
+        h('span', { class: 'row-title' }, get(m, 'event_title') || 'Meeting'),
+        h('span', { class: 'row-meta' }, h('span', { class: 'muted' }, fmtDate(get(m, 'started_at'))))))));
+    }
+    panel.appendChild(ul);
+    return panel;
+  }
+
+  function threadsPanel(items) {
+    const S = window.appShared;
+    const panel = h('section', { class: 'panel' }, h('h2', null, 'Recent threads'));
+    if (!items.length) { panel.appendChild(S.empty('No threads linked to this workspace yet.')); return panel; }
+    const ul = h('ul', { class: 'rows' });
+    for (const t of items) {
+      const id = get(t, 'id');
+      const label = get(t, 'anchor_label') || 'Unanchored';
+      ul.appendChild(h('li', null, h('button', {
+        type: 'button', class: 'row', on: { click: () => S.go('threads', id) },
+      },
+      h('span', { class: 'row-main' },
+        h('span', { class: 'row-title' }, get(t, 'title') || label),
+        h('span', { class: 'row-meta' }, h('span', { class: 'muted' }, label))))));
+    }
+    panel.appendChild(ul);
+    return panel;
+  }
+
+  // ---- assembly ----
+
+  async function renderWorkspaceDetail(c, spec, sub, gen) {
     const S = window.appShared;
     const id = get(spec, 'id');
+    let view;
+    try {
+      view = await api.workspace(id);
+    } catch (err) {
+      if (S.current(gen)) replace(c, S.header(get(spec, 'name') || id, workspaceSubtitle(spec)), S.errorBox('Could not load this workspace', err));
+      return;
+    }
+    if (!S.current(gen)) return;
+
     const tabs = h('div', { class: 'tabs', role: 'tablist' });
     for (const s of SUBS) {
       tabs.appendChild(h('button', {
@@ -82,10 +379,22 @@
         on: { click: () => S.goWorkspace(id, s.id) },
       }, s.label));
     }
-    return h('div', { class: 'stack' },
-      tabs,
-      h('section', { class: 'panel' },
-        S.empty('The full ' + (get(spec, 'template') || '') + ' workspace view is not built yet (docs/slices/UI.md Phase 5). This page only confirms routing and navigation.')));
+
+    const template = get(view, 'template') || get(spec, 'template');
+    let tiles = null;
+    if (template === 'project') tiles = projectTiles(view);
+    else if (template === 'finance') tiles = financeTiles(view);
+    else if (template === 'clients') tiles = clientsTiles(view);
+
+    const body = tiles
+      ? h('div', { class: 'stack' }, tiles)
+      : h('section', { class: 'panel' }, S.empty('The full ' + template + ' workspace view is not built yet (docs/slices/UI.md Phase 5b-5d). This page only confirms routing and navigation.'));
+
+    replace(c, S.header(get(view, 'name') || get(spec, 'name') || id, workspaceSubtitle(spec)),
+      tabs, body,
+      needsYouPanel(list(get(view, 'needs_you'))),
+      meetingsPanel(list(get(view, 'meetings'))),
+      threadsPanel(list(get(view, 'threads'))));
   }
 
   // renderNavList fills the sidebar's Workspaces disclosure (index.html's

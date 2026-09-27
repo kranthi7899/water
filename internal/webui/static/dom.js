@@ -6,10 +6,17 @@
 'use strict';
 
 (function () {
-  // Attributes that can never carry script or a URL.
+  // Attributes that can never carry script or a URL. max/min/low/high/
+  // optimum (docs/slices/UI.md Phase 5a) are plain numbers for <progress>/
+  // <meter> -- the project workspace's progress bar renders with one of
+  // those elements, never a styled div. 'style' is never added here: an
+  // inline style is exactly the kind of attacker-controlled-looking-safe
+  // surface this allowlist exists to keep out, so it stays excluded even as
+  // this set grows (TestSafeAttrsStillRefusesStyle, dom_test.go, pins this).
   const SAFE_ATTRS = new Set([
     'type', 'title', 'role', 'tabindex', 'placeholder', 'rows', 'cols', 'name',
     'for', 'id', 'lang', 'dir', 'maxlength', 'autocomplete', 'spellcheck', 'datetime',
+    'max', 'min', 'low', 'high', 'optimum',
   ]);
   const BOOL_PROPS = new Set(['disabled', 'hidden', 'checked', 'readOnly', 'required']);
 

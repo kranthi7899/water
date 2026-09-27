@@ -267,6 +267,36 @@ func TestNoRawPills(t *testing.T) {
 	}
 }
 
+// TestDOMSafeAttrsHasMeterAttrsButNeverStyle is docs/slices/UI.md Phase 5a's
+// own regression test: dom.js's SAFE_ATTRS gains max/min/low/high/optimum
+// (for <progress>/<meter> -- the project workspace's progress bar) but must
+// still never allow 'style'. The forbidden-construct scan above
+// ("unsafe setAttribute") only catches a literal setAttribute('style', ...)
+// call site; dom.js's own setAttr always calls setAttribute(k, ...) with the
+// variable k, so a 'style' string hidden inside the SAFE_ATTRS array itself
+// would slip past that scan. This reads SAFE_ATTRS's own definition
+// directly instead.
+func TestDOMSafeAttrsHasMeterAttrsButNeverStyle(t *testing.T) {
+	b, err := ReadFile("dom.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	m := regexp.MustCompile(`(?s)SAFE_ATTRS\s*=\s*new Set\(\[(.*?)\]\)`).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatal("SAFE_ATTRS definition not found in dom.js")
+	}
+	body := m[1]
+	for _, want := range []string{"max", "min", "low", "high", "optimum"} {
+		if !regexp.MustCompile(`'` + want + `'`).MatchString(body) {
+			t.Errorf("SAFE_ATTRS is missing %q: %s", want, body)
+		}
+	}
+	if regexp.MustCompile(`'style'`).MatchString(body) {
+		t.Fatalf("SAFE_ATTRS must never allow 'style': %s", body)
+	}
+}
+
 // TestIndexMetaCSPMatchesTheHeader keeps index.html's <meta> copy of the
 // policy in step with the header.
 func TestIndexMetaCSPMatchesTheHeader(t *testing.T) {

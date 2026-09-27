@@ -30,6 +30,7 @@ connectors:
     functions:
       - {name: list_prs, level: R}
       - {name: list_issues, level: R}
+      - {name: list_commits, level: R}
 `
 
 func noSleep(context.Context, time.Duration) error { return nil }
@@ -266,6 +267,98 @@ func TestListIssuesFiltersAndExcludesPRs(t *testing.T) {
 	}
 	if issues[0].Number != 5 {
 		t.Fatalf("issue = %+v", issues[0])
+	}
+}
+
+// ---- commits ----
+
+// commitPageJSON is one httptest fixture page of GitHub's own "List
+// commits" wire shape (raw JSON, not wireCommit{} literals: wireCommit's
+// Author/Commit fields are anonymous nested structs, awkward to construct
+// as Go composite literals outside this package — raw JSON matching
+// GitHub's real response is both simpler and a closer fixture of the real
+// API anyway).
+func commitPageJSON(sha, authorLogin, commitAuthorName, date, message, url string) string {
+	authorField := "null"
+	if authorLogin != "" {
+		authorField = fmt.Sprintf(`{"login":%q}`, authorLogin)
+	}
+	return fmt.Sprintf(`{"sha":%q,"commit":{"author":{"name":%q,"date":%q},"message":%q},"author":%s,"html_url":%q}`,
+		sha, commitAuthorName, date, message, authorField, url)
+}
+
+func TestListCommitsFollowsLinkHeaderPaginationAndUsesGitHubLoginWhenKnown(t *testing.T) {
+	pages := []string{
+		"[" + commitPageJSON("sha1", "alice", "Alice Author", "2026-09-20T10:00:00Z", "first page commit", "https://github.com/owner/repo/commit/sha1") + "]",
+		"[" + commitPageJSON("sha2", "", "Bob Nogithub", "2026-09-21T10:00:00Z", "second page commit (no matched github account)", "https://github.com/owner/repo/commit/sha2") + "]",
+	}
+	var srv *httptest.Server
+	calls := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer ghp_testtoken1234567890" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		page := 0
+		if r.URL.Query().Get("page2") == "1" {
+			page = 1
+		}
+		w.Header().Set("X-RateLimit-Remaining", "4999")
+		if page == 0 {
+			next := srv.URL + "/repos/owner/repo/commits?page2=1"
+			w.Header().Set("Link", fmt.Sprintf(`<%s>; rel="next", <%s>; rel="last"`, next, next))
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(pages[page]))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, srv, "owner/repo", testCredential(t))
+	res, err := h.invoke(t, "list_commits", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var commits []Commit
+	if err := json.Unmarshal(res.Output, &commits); err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("got %d commits across pages, want 2 (calls=%d)", len(commits), calls)
+	}
+	if commits[0].SHA != "sha1" || commits[0].Author != "alice" || commits[0].Message != "first page commit" ||
+		commits[0].URL != "https://github.com/owner/repo/commit/sha1" || commits[0].CommittedAt != "2026-09-20T10:00:00Z" {
+		t.Fatalf("commits[0] = %+v", commits[0])
+	}
+	if commits[1].SHA != "sha2" || commits[1].Author != "Bob Nogithub" || commits[1].CommittedAt != "2026-09-21T10:00:00Z" {
+		t.Fatalf("commits[1] (no matched github login, falls back to git author name) = %+v", commits[1])
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (one per page)", calls)
+	}
+	if !res.Untrusted {
+		t.Fatal("github.list_commits result must be marked untrusted (External)")
+	}
+}
+
+func TestListCommitsPassesSinceThroughAndRejectsBadShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("since"); got != "2026-09-01T00:00:00Z" {
+			t.Errorf("since query = %q, want 2026-09-01T00:00:00Z", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, srv, "owner/repo", testCredential(t))
+	if _, err := h.invoke(t, "list_commits", map[string]any{"since": "2026-09-01T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+
+	h2 := newHarness(t, srv, "owner/repo", testCredential(t))
+	if _, err := h2.invoke(t, "list_commits", map[string]any{"since": "not-a-timestamp"}); err == nil {
+		t.Fatal("expected a clear error on a non-RFC3339 since")
 	}
 }
 

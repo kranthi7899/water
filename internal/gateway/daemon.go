@@ -388,6 +388,9 @@ func (d *Daemon) Mux() http.Handler {
 	// Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
 	// disclosure, read-only from the registries Phase 1a already loaded.
 	mux.Handle("GET /v1/workspaces", d.auth(d.handleListWorkspaces))
+	// Phase 5a: one workspace's filtered existing sections plus its own
+	// control-room tiles (internal/gateway/workspace_detail.go).
+	mux.Handle("GET /v1/workspaces/{id}", d.auth(d.handleGetWorkspace))
 	mux.Handle("GET /v1/dashboards", d.auth(d.handleListDashboards))
 	// Phase 4: one dashboard's actual computed tiles (internal/dashboards.
 	// Compute), alongside the list route above.

@@ -70,6 +70,18 @@ type PR struct {
 	UpdatedAt    string   `json:"updated_at"` // RFC 3339
 }
 
+// Commit is the compact shape Invoke returns for list_commits (docs/
+// slices/UI.md Phase 5a: the project workspace's 4-week commit bars). There
+// is no fake.GitHub equivalent to match — this function is new in this
+// phase, not a real-connector implementation of an existing fake one.
+type Commit struct {
+	SHA         string `json:"sha"`
+	Author      string `json:"author"`
+	Message     string `json:"message"`
+	URL         string `json:"url"`
+	CommittedAt string `json:"committed_at"` // RFC 3339
+}
+
 // Issue is the compact shape Invoke returns for list_issues, matching
 // fake.GitHubIssue's fields.
 type Issue struct {
@@ -113,6 +125,25 @@ type wireIssue struct {
 	HTMLURL     string      `json:"html_url"`
 	UpdatedAt   string      `json:"updated_at"`
 	PullRequest *struct{}   `json:"pull_request"` // present iff this "issue" is actually a PR
+}
+
+// wireCommit is the subset of GitHub's commit resource this connector uses
+// ("List commits", GET /repos/{owner}/{repo}/commits). The commit author's
+// display name comes from the GitHub account login when GitHub could match
+// the commit to one (author.login), falling back to the raw git commit
+// author name (commit.author.name) for a commit whose email doesn't match
+// any GitHub account — exactly how GitHub's own UI attributes a commit.
+type wireCommit struct {
+	SHA    string `json:"sha"`
+	Commit struct {
+		Author struct {
+			Name string `json:"name"`
+			Date string `json:"date"`
+		} `json:"author"`
+		Message string `json:"message"`
+	} `json:"commit"`
+	Author  *wireUser `json:"author"`
+	HTMLURL string    `json:"html_url"`
 }
 
 type wireUser struct {
@@ -172,6 +203,21 @@ func (*GitHub) Functions() []connectors.Function {
 				},
 			},
 		},
+		{
+			Name:        "list_commits",
+			Description: "List commits on the configured repo (github.repo), most recent first.",
+			Activity:    "Checking commits on GitHub",
+			Level:       twins.R,
+			Risk:        connectors.RiskLow,
+			// A commit's author and message come from GitHub contributors, not
+			// the CEO.
+			External: true,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{
+					"since": {Type: "string", Description: "RFC3339 timestamp; only commits at or after this time"},
+				},
+			},
+		},
 	}
 }
 
@@ -209,6 +255,8 @@ func (g *GitHub) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, 
 		return g.listPRs(ctx, cl, v)
 	case "list_issues":
 		return g.listIssues(ctx, cl, v)
+	case "list_commits":
+		return g.listCommits(ctx, cl, v)
 	}
 	return nil, fmt.Errorf("github: unknown function %q", v.Function)
 }
@@ -347,6 +395,53 @@ func (g *GitHub) listIssues(ctx context.Context, cl *tokenapi.Client, v permit.C
 	return json.Marshal(out)
 }
 
+// listCommits lists commits on the configured repo, most recent first
+// (docs/slices/UI.md Phase 5a's 4-week commit bars, github.list_commits).
+// An optional "since" arg (RFC3339) is passed straight through to GitHub's
+// own `since` query param, so a caller wanting only the last 4 weeks never
+// has to paginate past older history.
+func (g *GitHub) listCommits(ctx context.Context, cl *tokenapi.Client, v permit.Call) (json.RawMessage, error) {
+	since := strings.TrimSpace(tokenapi.ArgString(v.Args, "since"))
+	if since != "" {
+		if _, err := time.Parse(time.RFC3339, since); err != nil {
+			return nil, fmt.Errorf("github: since must be an RFC3339 timestamp")
+		}
+	}
+
+	endpoint := fmt.Sprintf("https://%s/repos/%s/commits", apiHost, g.repo)
+	var out []Commit
+	pageURL := endpoint
+	query := url.Values{"per_page": {strconv.Itoa(defaultPerPage)}}
+	if since != "" {
+		query.Set("since", since)
+	}
+	for page := 0; page < maxPages && pageURL != ""; page++ {
+		var wire []wireCommit
+		q := query
+		if page > 0 {
+			q = nil // pageURL already carries the full query from Link
+		}
+		hdr, err := cl.GetJSON(ctx, pageURL, q, headers(), &wire)
+		if err != nil {
+			if rl := rateLimitFromErr(err, hdr); rl != nil {
+				return nil, rl
+			}
+			return nil, err
+		}
+		if err := checkRateLimit(http.StatusOK, hdr); err != nil {
+			return nil, err
+		}
+		for _, w := range wire {
+			out = append(out, toCommit(w))
+		}
+		pageURL = nextLink(hdr)
+	}
+	if out == nil {
+		out = []Commit{}
+	}
+	return json.Marshal(out)
+}
+
 // rateLimitFromErr converts a 403/429 APIError carrying Remaining: 0 headers
 // into the clear ErrRateLimited sentinel.
 func rateLimitFromErr(err error, hdr http.Header) error {
@@ -428,6 +523,21 @@ func toIssue(w wireIssue) Issue {
 		Labels:    labels,
 		URL:       w.HTMLURL,
 		UpdatedAt: updated.UTC().Format(time.RFC3339),
+	}
+}
+
+func toCommit(w wireCommit) Commit {
+	author := w.Commit.Author.Name
+	if w.Author != nil && w.Author.Login != "" {
+		author = w.Author.Login
+	}
+	at, _ := time.Parse(time.RFC3339, w.Commit.Author.Date)
+	return Commit{
+		SHA:         w.SHA,
+		Author:      author,
+		Message:     w.Commit.Message,
+		URL:         w.HTMLURL,
+		CommittedAt: at.UTC().Format(time.RFC3339),
 	}
 }
 

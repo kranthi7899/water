@@ -93,6 +93,9 @@ public enum WorkspaceAllowlist {
         // Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
         // disclosure. Both are read-only lists with no id segment.
         route("GET", "/v1/workspaces"),
+        // Phase 5a: one workspace's filtered existing sections plus its own
+        // control-room tiles.
+        route("GET", "/v1/workspaces/{id}"),
         route("GET", "/v1/dashboards"),
         // Phase 4: one dashboard's computed tiles.
         route("GET", "/v1/dashboards/{id}"),
