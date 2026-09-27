@@ -18,7 +18,7 @@ import (
 // an envelope (drafts.go in internal/gateway), never to this row.
 type Draft struct {
 	ID           string
-	Template     string // "reply" | "delegation" | "investor_update" (see draftTemplates)
+	Template     string // "reply" | "delegation" | "investor_update" | "team_message" | "pulse_check" (see draftTemplates)
 	To           string
 	Subject      string
 	Body         string
@@ -30,8 +30,13 @@ type Draft struct {
 
 // draftTemplates is Draft.Template's closed set, validated here in Go (not
 // just the migration's own CHECK), the same belt-and-suspenders convention
-// ideas.go's ideaStages uses for Idea.Stage.
-var draftTemplates = map[string]bool{"reply": true, "delegation": true, "investor_update": true}
+// ideas.go's ideaStages uses for Idea.Stage. team_message and pulse_check
+// (docs/slices/UI.md Phase 5b's People workspace buttons, migration 0023)
+// are additive to the three Phase 3c originally shipped with.
+var draftTemplates = map[string]bool{
+	"reply": true, "delegation": true, "investor_update": true,
+	"team_message": true, "pulse_check": true,
+}
 
 // DraftTemplateLabel is Template's display label (docs/slices/UI.md Phase
 // 3c: "tagged Reply, Delegation or Investor-update section"). An unknown
@@ -45,6 +50,10 @@ func DraftTemplateLabel(template string) string {
 		return "Delegation"
 	case "investor_update":
 		return "Investor update section"
+	case "team_message":
+		return "Team message"
+	case "pulse_check":
+		return "Pulse check"
 	default:
 		return ""
 	}

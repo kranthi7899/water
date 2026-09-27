@@ -54,6 +54,8 @@ import Testing
             ("GET", "water://app/v1/workspaces", "/v1/workspaces"),
             // Slice UI Phase 5a: one workspace's own control-room tiles.
             ("GET", "water://app/v1/workspaces/crawler", "/v1/workspaces/crawler"),
+            // Slice UI Phase 5b: the People workspace's draft-creating buttons.
+            ("POST", "water://app/v1/workspaces/people/drafts", "/v1/workspaces/people/drafts"),
             ("GET", "water://app/v1/dashboards", "/v1/dashboards"),
             // Slice UI Phase 4: one dashboard's computed tiles.
             ("GET", "water://app/v1/dashboards/finance", "/v1/dashboards/finance"),
@@ -129,6 +131,8 @@ import Testing
         #expect(!decide("DELETE", "water://app/v1/drafts/draft_1").isAllowed)
         #expect(!decide("PUT", "water://app/v1/drafts/draft_1").isAllowed)
         #expect(!decide("GET", "water://app/v1/drafts/draft_1/submit").isAllowed)
+        #expect(!decide("GET", "water://app/v1/workspaces/people/drafts").isAllowed)
+        #expect(!decide("PUT", "water://app/v1/workspaces/people/drafts").isAllowed)
     }
 
     @Test func wrongOriginIsDenied() {

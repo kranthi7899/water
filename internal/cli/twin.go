@@ -128,6 +128,12 @@ type twinDeps struct {
 	intents   *intents.Registry
 	style     *render.Style
 	roleMD    string
+	// policiesMD is twins/<id>/policies.md, docs/slices/UI.md Phase 5b's
+	// People workspace "Policies" button: a static, read-only document,
+	// loaded once at startup exactly like roleMD above (loadPoliciesMD
+	// mirrors loadRoleMD's own fallback-to-ceo, empty-if-neither
+	// convention).
+	policiesMD string
 	// workspaces and dashboards (docs/slices/UI.md Phase 1a) are the
 	// loaded twins/<id>/workspaces/*.yaml and twins/<id>/dashboards/*.yaml
 	// registries. Phase 1a adds no endpoint that reads them yet — Phase 2's
@@ -150,6 +156,22 @@ func loadRoleMD(id string) string {
 		return string(b)
 	}
 	b, err := water.TwinsFS().ReadFile("twins/ceo/role.md")
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// loadPoliciesMD returns twins/<id>/policies.md, falling back to
+// twins/ceo/policies.md for a twin that has none of its own, or "" if
+// neither exists -- the exact same fallback convention loadRoleMD uses
+// above, for the same reason (a twin like ceo-demo shares the real twin's
+// static reference material rather than needing its own copy).
+func loadPoliciesMD(id string) string {
+	if b, err := water.TwinsFS().ReadFile("twins/" + id + "/policies.md"); err == nil {
+		return string(b)
+	}
+	b, err := water.TwinsFS().ReadFile("twins/ceo/policies.md")
 	if err != nil {
 		return ""
 	}
@@ -438,7 +460,7 @@ func buildTwinDepsFS(fsys fs.FS, id, mailAddress, signatureName, githubRepo stri
 		st.Close()
 		return nil, err
 	}
-	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, intents: intentsReg, style: style, roleMD: loadRoleMD(id), workspaces: wsReg, dashboards: dashReg}, nil
+	return &twinDeps{manifest: m, store: st, audit: log, approvals: q, gate: g, registry: reg, vault: v, decisions: decisionsReg, intents: intentsReg, style: style, roleMD: loadRoleMD(id), policiesMD: loadPoliciesMD(id), workspaces: wsReg, dashboards: dashReg}, nil
 }
 
 // buildDecisionsTrigger wires internal/decisions' classification-trigger

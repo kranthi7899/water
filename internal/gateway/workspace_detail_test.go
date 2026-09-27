@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -90,6 +91,8 @@ const wsTestNow = "2026-09-27T00:00:00Z"
 //     twins/ceo/workspaces/finance.yaml.
 //   - "clients": the clients-template workspace, mirroring
 //     twins/ceo/workspaces/clients.yaml.
+//   - "people": the people-template workspace (Phase 5b), mirroring
+//     twins/ceo/workspaces/people.yaml.
 func wsWorkspacesFixture(t *testing.T) *workspaces.Registry {
 	t.Helper()
 	fsys := fstest.MapFS{
@@ -119,6 +122,12 @@ name: Clients
 template: clients
 source: company_customers
 clients: all
+`)},
+		"twins/t/workspaces/people.yaml": &fstest.MapFile{Data: []byte(`
+id: people
+name: People
+template: people
+source: roster
 `)},
 	}
 	reg, err := workspaces.LoadRegistry(fsys, "t")
@@ -171,6 +180,19 @@ func wsGet(t *testing.T, srvURL, path, token string) (int, map[string]any) {
 	return resp.StatusCode, out
 }
 
+func wsPost(t *testing.T, srvURL, path, body, token string) (int, map[string]any) {
+	t.Helper()
+	resp := do(t, srvURL, "POST", path, body, token)
+	defer resp.Body.Close()
+	var out map[string]any
+	if resp.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+	}
+	return resp.StatusCode, out
+}
+
 // ---- the core invariant: no workspace route can ever create a decision ----
 
 // wsDecisionTableCounts counts every row in the four tables no workspace
@@ -205,6 +227,7 @@ func wsDecisionTableCounts(t *testing.T, dbPath string) map[string]int {
 // decisions.Trigger reachable from these calls even indirectly.
 func TestWorkspaceDetailRoutesNeverWriteADecision(t *testing.T) {
 	h := newHarness(t)
+	ctx := context.Background()
 	now, _ := time.Parse(time.RFC3339, wsTestNow)
 	inv := newWSFakeInvoker().
 		on("linear.list_issues", func(map[string]any) (gate.Result, error) { return wsJSONResult([]linear.Issue{}) }).
@@ -227,21 +250,34 @@ func TestWorkspaceDetailRoutesNeverWriteADecision(t *testing.T) {
 	h.d.cfg.Dashboards = wsDashboardsFixture(t)
 	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
 
+	// Phase 5b: a roster team, so POST /v1/workspaces/people/drafts below
+	// actually reaches store.CreateDraft (a drafts-table write) instead of
+	// being refused at the team lookup -- the point of this test is to
+	// prove that write, like every other route here, never touches the
+	// four decision tables, not merely that a 400 also doesn't.
+	if err := h.st.Upsert(ctx, &store.Team{Meta: store.Meta{Source: "seed", SourceID: "crawler"}, Name: "Crawler", LinearKey: "CRA"}); err != nil {
+		t.Fatal(err)
+	}
+
 	dbPath := filepath.Join(h.dir, "water.db")
 	before := wsDecisionTableCounts(t, dbPath)
 
 	table := []struct {
-		name, method, path string
+		name, method, path, body string
 	}{
-		{"project, no github source", "GET", "/v1/workspaces/crawler-nogh"},
-		{"project, github source", "GET", "/v1/workspaces/crawler-gh"},
-		{"finance", "GET", "/v1/workspaces/finance"},
-		{"clients", "GET", "/v1/workspaces/clients"},
-		{"unknown id (404)", "GET", "/v1/workspaces/does-not-exist"},
+		{"project, no github source", "GET", "/v1/workspaces/crawler-nogh", ""},
+		{"project, github source", "GET", "/v1/workspaces/crawler-gh", ""},
+		{"finance", "GET", "/v1/workspaces/finance", ""},
+		{"clients", "GET", "/v1/workspaces/clients", ""},
+		{"people", "GET", "/v1/workspaces/people", ""},
+		{"people team_message draft", "POST", "/v1/workspaces/people/drafts", `{"kind":"team_message","team":"crawler"}`},
+		{"people pulse_check draft", "POST", "/v1/workspaces/people/drafts", `{"kind":"pulse_check","team":"crawler"}`},
+		{"people draft, unknown kind", "POST", "/v1/workspaces/people/drafts", `{"kind":"newsletter","team":"crawler"}`},
+		{"unknown id (404)", "GET", "/v1/workspaces/does-not-exist", ""},
 	}
 	for _, tc := range table {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := do(t, h.srv.URL, tc.method, tc.path, "", h.token)
+			resp := do(t, h.srv.URL, tc.method, tc.path, tc.body, h.token)
 			resp.Body.Close()
 		})
 	}
@@ -637,4 +673,410 @@ func mustDate(t *testing.T, s string) time.Time {
 		t.Fatal(err)
 	}
 	return d
+}
+
+// ---- People workspace (docs/slices/UI.md Phase 5b) ----
+
+// TestPeopleStrainSignatureCarriesNoTextParameter is THE MORALE INVARIANT's
+// own proof (docs/slices/UI.md Phase 5b's named acceptance item): it parses
+// workspace_detail.go's own AST and checks peopleStrain's parameter types
+// directly, rather than trusting a bare unit test's behaviour to stand in
+// for a signature guarantee -- mirroring
+// TestWorkspaceDetailFileNeverReferencesDecisionWrites' own AST-scan style
+// above. A future edit that widens peopleStrain to take a string (a
+// message body, a Slack/email excerpt, anything free-text) fails this test
+// even if every other behavioural test still passes.
+func TestPeopleStrainSignatureCarriesNoTextParameter(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "workspace_detail.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fn *ast.FuncDecl
+	ast.Inspect(f, func(n ast.Node) bool {
+		if d, ok := n.(*ast.FuncDecl); ok && d.Name.Name == "peopleStrain" {
+			fn = d
+			return false
+		}
+		return true
+	})
+	if fn == nil {
+		t.Fatal("peopleStrain not found in workspace_detail.go")
+	}
+	var params []string
+	for _, field := range fn.Type.Params.List {
+		typeStr := wsExprString(field.Type)
+		n := len(field.Names)
+		if n == 0 {
+			n = 1
+		}
+		for i := 0; i < n; i++ {
+			params = append(params, typeStr)
+		}
+	}
+	want := []string{"float64", "int", "[]PulseAnswer"}
+	if len(params) != len(want) {
+		t.Fatalf("peopleStrain params = %v, want %v", params, want)
+	}
+	for i, p := range params {
+		if p != want[i] {
+			t.Fatalf("peopleStrain params = %v, want %v", params, want)
+		}
+		lower := strings.ToLower(p)
+		if strings.Contains(lower, "string") || strings.Contains(lower, "byte") || strings.Contains(lower, "rune") {
+			t.Fatalf("peopleStrain has a text-shaped parameter %q -- THE MORALE INVARIANT requires no string/text-content parameter at all", p)
+		}
+	}
+}
+
+// wsExprString renders an ast.Expr type node back to source-ish text (only
+// the forms peopleStrain's own signature can plausibly use: identifiers,
+// slices, selectors and pointers), for TestPeopleStrainSignatureCarriesNoTextParameter's
+// own parameter-type comparison above.
+func wsExprString(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.ArrayType:
+		return "[]" + wsExprString(t.Elt)
+	case *ast.SelectorExpr:
+		return wsExprString(t.X) + "." + t.Sel.Name
+	case *ast.StarExpr:
+		return "*" + wsExprString(t.X)
+	default:
+		return fmt.Sprintf("%T", e)
+	}
+}
+
+// TestPeopleWorkspaceResourceBarAndTeamTilesExactValues pins the resource
+// bar's three numbers and both team tiles' load/strain/overdue numbers to
+// exact fixture values -- roster allocations plus a fixture Linear read,
+// computed at request time, never stored.
+//
+// Fixture: two roster teams (crawler/CRA, econ-rag/ECO), each with two
+// members and one already-started project. No person here is assigned
+// issues on more than one team, so this fixture's own cross_team_callouts
+// must come back empty -- TestPeopleWorkspaceCrossTeamCallout below is the
+// dedicated positive/negative case for that.
+func TestPeopleWorkspaceResourceBarAndTeamTilesExactValues(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	now, _ := time.Parse(time.RFC3339, wsTestNow)
+
+	upsert := func(v store.Record) {
+		t.Helper()
+		if err := h.st.Upsert(ctx, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustLink := func(l store.Link) {
+		t.Helper()
+		if err := h.st.AddLink(ctx, l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idJSON := func(label string) string { return `{"linear_owner_label":"` + label + `"}` }
+
+	upsert(&store.Team{Meta: store.Meta{Source: "seed", SourceID: "crawler"}, Name: "Crawler", LinearKey: "CRA"})
+	upsert(&store.Team{Meta: store.Meta{Source: "seed", SourceID: "econ-rag"}, Name: "Econ-RAG", LinearKey: "ECO"})
+
+	upsert(&store.Project{Meta: store.Meta{Source: "seed", SourceID: "ingestion-v2"}, Name: "Ingestion v2", StartAt: mustDate(t, "2026-08-01")})
+	upsert(&store.Project{Meta: store.Meta{Source: "seed", SourceID: "halcyon-rollout"}, Name: "Halcyon rollout", StartAt: mustDate(t, "2026-08-01")})
+
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "lee"}, Name: "Lee", HomeTeam: "crawler", Identities: idJSON("Lee")})
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "theo"}, Name: "Theo", HomeTeam: "crawler", Identities: idJSON("Theo")})
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "dana"}, Name: "Dana", HomeTeam: "econ-rag", Identities: idJSON("Dana")})
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "kai"}, Name: "Kai", HomeTeam: "econ-rag", Identities: idJSON("Kai")})
+
+	mustLink(store.Link{Kind: store.LinkMemberOf, FromType: "person", FromID: "lee", ToType: "team", ToID: "crawler"})
+	mustLink(store.Link{Kind: store.LinkMemberOf, FromType: "person", FromID: "theo", ToType: "team", ToID: "crawler"})
+	mustLink(store.Link{Kind: store.LinkMemberOf, FromType: "person", FromID: "dana", ToType: "team", ToID: "econ-rag"})
+	mustLink(store.Link{Kind: store.LinkMemberOf, FromType: "person", FromID: "kai", ToType: "team", ToID: "econ-rag"})
+
+	// lee 0.5 and dana 0.7 and kai 0.9 are all < 1.0 (free capacity); theo
+	// is exactly 1.0 (not free capacity -- the boundary is strict-less-than).
+	mustLink(store.Link{Kind: store.LinkAllocated, FromType: "person", FromID: "lee", ToType: "project", ToID: "ingestion-v2", Fraction: 0.5})
+	mustLink(store.Link{Kind: store.LinkAllocated, FromType: "person", FromID: "theo", ToType: "project", ToID: "ingestion-v2", Fraction: 1.0})
+	mustLink(store.Link{Kind: store.LinkAllocated, FromType: "person", FromID: "dana", ToType: "project", ToID: "halcyon-rollout", Fraction: 0.7})
+	mustLink(store.Link{Kind: store.LinkAllocated, FromType: "person", FromID: "kai", ToType: "project", ToID: "halcyon-rollout", Fraction: 0.9})
+
+	issues := []linear.Issue{
+		{Identifier: "CRA-1", Team: "CRA", Assignee: "Lee", StateType: "started"},                         // no due date: never overdue
+		{Identifier: "CRA-2", Team: "CRA", Assignee: "Theo", StateType: "started", DueDate: "2026-09-20"}, // overdue
+		{Identifier: "CRA-3", Team: "CRA", Assignee: "Theo", StateType: "started", DueDate: "2026-10-05"}, // due in the future: not overdue
+		{Identifier: "CRA-4", Team: "CRA", StateType: "unstarted", DueDate: "2026-09-10"},                 // unassigned, still counts for the team's own overdue count
+		{Identifier: "ECO-1", Team: "ECO", Assignee: "Dana", StateType: "started", DueDate: "2026-09-01"}, // overdue
+		{Identifier: "ECO-2", Team: "ECO", Assignee: "Kai", StateType: "started"},                         // no due date
+		{Identifier: "ECO-3", Team: "ECO", Assignee: "Kai", StateType: "started", DueDate: "2026-09-05"},  // overdue
+		{Identifier: "ECO-4", Team: "ECO", StateType: "unstarted", DueDate: "2026-09-02"},                 // unassigned, overdue -- pushes econ-rag's overdue count to 3, bumping strain to high
+	}
+	inv := newWSFakeInvoker().
+		on("linear.list_issues", func(map[string]any) (gate.Result, error) { return wsJSONResult(issues) }).
+		on("company_finance.cash_position", func(map[string]any) (gate.Result, error) {
+			return wsJSONResult(map[string]any{"values": map[string]any{"cash_usd": 250000.0, "burn_usd": 40000.0, "runway_months": 6.25}})
+		})
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	h.d.cfg.Dashboards = wsDashboardsFixture(t)
+	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+
+	status, body := wsGet(t, h.srv.URL, "/v1/workspaces/people", h.token)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	people := body["people"].(map[string]any)
+
+	bar := people["resource_bar"].(map[string]any)
+	budget := bar["budget_left_usd"].(map[string]any)
+	if budget["state"] != "ok" || budget["value"].(float64) != 250000 {
+		t.Fatalf("budget_left_usd = %+v, want cash_position 250000 ok (the Finance dashboard's own cash-on-hand metric, this section's documented judgment call)", budget)
+	}
+	hours := bar["hours_this_week"].(map[string]any)
+	if hours["state"] != "ok" || hours["value"].(float64) != 124 {
+		t.Fatalf("hours_this_week = %+v, want 124 (20 lee + 40 theo + 28 dana + 36 kai)", hours)
+	}
+	free := bar["people_with_free_capacity"].(map[string]any)
+	if free["state"] != "ok" || free["value"].(float64) != 3 {
+		t.Fatalf("people_with_free_capacity = %+v, want 3 (lee, dana, kai; theo is exactly 1.0, not free)", free)
+	}
+
+	teams := people["teams"].([]any)
+	if len(teams) != 2 {
+		t.Fatalf("teams = %+v, want 2", teams)
+	}
+	crawler := teams[0].(map[string]any) // sorted by name: "Crawler" before "Econ-RAG"
+	if crawler["name"] != "Crawler" {
+		t.Fatalf("teams[0] = %+v, want Crawler first", crawler)
+	}
+	if got := crawler["load"].(float64); math.Abs(got-1.05) > 1e-9 {
+		t.Fatalf("crawler load = %v, want 1.05 (mean of lee 0.7, theo 1.4)", got)
+	}
+	if crawler["strain"] != "normal" {
+		t.Fatalf("crawler strain = %v, want normal (load 1.05 is between the thresholds, overdue 2 is under the strainOverdueBump of 3)", crawler["strain"])
+	}
+	if crawler["overdue"].(float64) != 2 {
+		t.Fatalf("crawler overdue = %v, want 2 (CRA-2, CRA-4)", crawler["overdue"])
+	}
+	cMembers := crawler["members"].([]any)
+	if len(cMembers) != 2 {
+		t.Fatalf("crawler members = %+v, want 2", cMembers)
+	}
+	leeM := cMembers[0].(map[string]any) // sorted by name: Lee before Theo
+	if leeM["name"] != "Lee" || leeM["initials"] != "LE" {
+		t.Fatalf("crawler members[0] = %+v, want Lee/LE", leeM)
+	}
+	if got := leeM["load"].(float64); math.Abs(got-0.7) > 1e-9 {
+		t.Fatalf("lee load = %v, want 0.7 (allocation 0.5 + 1 open issue / 5)", got)
+	}
+	if leeM["load_level"] != "normal" {
+		t.Fatalf("lee load_level = %v, want normal (0.7 is exactly strainLowMax, the boundary is strict-less-than)", leeM["load_level"])
+	}
+	theoM := cMembers[1].(map[string]any)
+	if theoM["name"] != "Theo" {
+		t.Fatalf("crawler members[1] = %+v, want Theo", theoM)
+	}
+	if got := theoM["load"].(float64); math.Abs(got-1.4) > 1e-9 {
+		t.Fatalf("theo load = %v, want 1.4 (allocation 1.0 + 2 open issues / 5)", got)
+	}
+	if theoM["load_level"] != "high" {
+		t.Fatalf("theo load_level = %v, want high (load 1.4 > strainHighMin)", theoM["load_level"])
+	}
+
+	econ := teams[1].(map[string]any)
+	if econ["name"] != "Econ-RAG" {
+		t.Fatalf("teams[1] = %+v, want Econ-RAG", econ)
+	}
+	if got := econ["load"].(float64); math.Abs(got-1.1) > 1e-9 {
+		t.Fatalf("econ-rag load = %v, want 1.1 (mean of dana 0.9, kai 1.3)", got)
+	}
+	if econ["overdue"].(float64) != 3 {
+		t.Fatalf("econ-rag overdue = %v, want 3 (ECO-1, ECO-3, ECO-4)", econ["overdue"])
+	}
+	if econ["strain"] != "high" {
+		t.Fatalf("econ-rag strain = %v, want high -- load 1.1 alone reads normal, but the overdue count of 3 (>= strainOverdueBump) bumps it, proving overdue is its own signal, not just a side effect of load", econ["strain"])
+	}
+
+	if raw, ok := people["cross_team_callouts"]; ok {
+		if arr, ok := raw.([]any); ok && len(arr) != 0 {
+			t.Fatalf("cross_team_callouts = %+v, want none (nobody in this fixture is assigned issues on two different teams)", arr)
+		}
+	}
+}
+
+// TestPeopleWorkspaceCrossTeamCallout is the dedicated positive/negative
+// case docs/slices/UI.md Phase 5b names explicitly: a real overlap (two
+// different teams, deadlines within 7 days of each other) fires; a
+// same-team pair and an out-of-window pair both don't.
+func TestPeopleWorkspaceCrossTeamCallout(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	now, _ := time.Parse(time.RFC3339, wsTestNow)
+
+	upsert := func(v store.Record) {
+		t.Helper()
+		if err := h.st.Upsert(ctx, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idJSON := func(label string) string { return `{"linear_owner_label":"` + label + `"}` }
+
+	upsert(&store.Team{Meta: store.Meta{Source: "seed", SourceID: "crawler"}, Name: "Crawler", LinearKey: "CRA"})
+	upsert(&store.Team{Meta: store.Meta{Source: "seed", SourceID: "econ-rag"}, Name: "Econ-RAG", LinearKey: "ECO"})
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "avery"}, Name: "Avery", Identities: idJSON("Avery")})
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "blair"}, Name: "Blair", Identities: idJSON("Blair")})
+	upsert(&store.Person{Meta: store.Meta{Source: "seed", SourceID: "casey"}, Name: "Casey", Identities: idJSON("Casey")})
+
+	issues := []linear.Issue{
+		// Avery: two different teams, 4 days apart -- fires.
+		{Identifier: "CRA-10", Team: "CRA", Assignee: "Avery", StateType: "started", DueDate: "2026-09-20"},
+		{Identifier: "ECO-10", Team: "ECO", Assignee: "Avery", StateType: "started", DueDate: "2026-09-24"},
+		// Blair: two different teams, 19 days apart -- outside the 7-day
+		// window, no callout.
+		{Identifier: "CRA-11", Team: "CRA", Assignee: "Blair", StateType: "started", DueDate: "2026-09-01"},
+		{Identifier: "ECO-11", Team: "ECO", Assignee: "Blair", StateType: "started", DueDate: "2026-09-20"},
+		// Casey: the same team twice, 1 day apart -- within the window but
+		// not cross-team, no callout.
+		{Identifier: "CRA-12", Team: "CRA", Assignee: "Casey", StateType: "started", DueDate: "2026-09-20"},
+		{Identifier: "CRA-13", Team: "CRA", Assignee: "Casey", StateType: "started", DueDate: "2026-09-21"},
+	}
+	inv := newWSFakeInvoker().on("linear.list_issues", func(map[string]any) (gate.Result, error) { return wsJSONResult(issues) })
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	h.d.cfg.Compute = &dashboards.Compute{Gate: inv, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}, Now: wsFixedClock(now)}
+
+	status, body := wsGet(t, h.srv.URL, "/v1/workspaces/people", h.token)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	people := body["people"].(map[string]any)
+	calloutsRaw, ok := people["cross_team_callouts"]
+	if !ok {
+		t.Fatal("cross_team_callouts missing, want exactly one callout for Avery")
+	}
+	callouts := calloutsRaw.([]any)
+	if len(callouts) != 1 {
+		t.Fatalf("cross_team_callouts = %+v, want exactly 1 (Avery only)", callouts)
+	}
+	c := callouts[0].(map[string]any)
+	if c["person"] != "Avery" {
+		t.Fatalf("callout person = %v, want Avery", c["person"])
+	}
+	if c["window_days"].(float64) != 7 {
+		t.Fatalf("window_days = %v, want 7", c["window_days"])
+	}
+	teamsGot := c["teams"].([]any)
+	if len(teamsGot) != 2 || teamsGot[0] != "Crawler" || teamsGot[1] != "Econ-RAG" {
+		t.Fatalf("callout teams = %+v, want [Crawler, Econ-RAG]", teamsGot)
+	}
+	deadlines := c["deadlines"].([]any)
+	if len(deadlines) != 2 {
+		t.Fatalf("deadlines = %+v, want 2", deadlines)
+	}
+	d0 := deadlines[0].(map[string]any)
+	if d0["issue_identifier"] != "CRA-10" || d0["due_date"] != "2026-09-20" {
+		t.Fatalf("deadlines[0] = %+v, want CRA-10 on 2026-09-20", d0)
+	}
+	d1 := deadlines[1].(map[string]any)
+	if d1["issue_identifier"] != "ECO-10" || d1["due_date"] != "2026-09-24" {
+		t.Fatalf("deadlines[1] = %+v, want ECO-10 on 2026-09-24", d1)
+	}
+}
+
+// ---- POST /v1/workspaces/{id}/drafts (docs/slices/UI.md Phase 5b) ----
+
+func TestCreateWorkspaceDraftTeamMessageAndPulseCheck(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	if err := h.st.Upsert(ctx, &store.Team{Meta: store.Meta{Source: "seed", SourceID: "crawler"}, Name: "Crawler", LinearKey: "CRA"}); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body := wsPost(t, h.srv.URL, "/v1/workspaces/people/drafts", `{"kind":"team_message","team":"crawler"}`, h.token)
+	if status != http.StatusOK {
+		t.Fatalf("team_message status = %d", status)
+	}
+	if body["template"] != "team_message" {
+		t.Fatalf("template = %v, want team_message", body["template"])
+	}
+	if to, ok := body["to"]; ok && to != "" {
+		t.Fatalf("to = %v, want empty (no populated roster email identity to guess a recipient from)", to)
+	}
+	subj, _ := body["subject"].(string)
+	if !strings.Contains(subj, "Crawler") {
+		t.Fatalf("subject = %q, want it to name the team", subj)
+	}
+	bodyText, _ := body["body"].(string)
+	if !strings.Contains(bodyText, "Crawler") {
+		t.Fatalf("body = %q, want it to name the team", bodyText)
+	}
+
+	status2, body2 := wsPost(t, h.srv.URL, "/v1/workspaces/people/drafts", `{"kind":"pulse_check","team":"crawler"}`, h.token)
+	if status2 != http.StatusOK {
+		t.Fatalf("pulse_check status = %d", status2)
+	}
+	if body2["template"] != "pulse_check" {
+		t.Fatalf("template = %v, want pulse_check", body2["template"])
+	}
+	pulseBody, _ := body2["body"].(string)
+	if !strings.Contains(pulseBody, "1") || !strings.Contains(pulseBody, "5") {
+		t.Fatalf("pulse_check body = %q, want a code-built 1..5 scale question", pulseBody)
+	}
+
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 2 {
+		t.Fatalf("drafts = %+v, want exactly 2 (one per call)", drafts)
+	}
+}
+
+// TestCreateWorkspaceDraftRejectsUnknownKind is the plan's own named case:
+// "an unknown kind is rejected (400), never silently accepted."
+func TestCreateWorkspaceDraftRejectsUnknownKind(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	if err := h.st.Upsert(ctx, &store.Team{Meta: store.Meta{Source: "seed", SourceID: "crawler"}, Name: "Crawler", LinearKey: "CRA"}); err != nil {
+		t.Fatal(err)
+	}
+	resp := do(t, h.srv.URL, "POST", "/v1/workspaces/people/drafts", `{"kind":"newsletter","team":"crawler"}`, h.token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unknown kind", resp.StatusCode)
+	}
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 0 {
+		t.Fatalf("an unknown kind must never create a draft, got %+v", drafts)
+	}
+}
+
+func TestCreateWorkspaceDraftRejectsUnknownTeam(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	resp := do(t, h.srv.URL, "POST", "/v1/workspaces/people/drafts", `{"kind":"team_message","team":"does-not-exist"}`, h.token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for an unknown team", resp.StatusCode)
+	}
+	drafts, err := h.st.ListDrafts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 0 {
+		t.Fatalf("an unknown team must never create a draft, got %+v", drafts)
+	}
+}
+
+func TestCreateWorkspaceDraftUnknownWorkspaceIs404(t *testing.T) {
+	h := newHarness(t)
+	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
+	resp := do(t, h.srv.URL, "POST", "/v1/workspaces/does-not-exist/drafts", `{"kind":"team_message","team":"crawler"}`, h.token)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
 }

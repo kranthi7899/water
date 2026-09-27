@@ -96,6 +96,9 @@ public enum WorkspaceAllowlist {
         // Phase 5a: one workspace's filtered existing sections plus its own
         // control-room tiles.
         route("GET", "/v1/workspaces/{id}"),
+        // Phase 5b: the People workspace's "Message a team"/"Send pulse
+        // check" buttons -- creates a drafts row, never sends anything.
+        route("POST", "/v1/workspaces/{id}/drafts"),
         route("GET", "/v1/dashboards"),
         // Phase 4: one dashboard's computed tiles.
         route("GET", "/v1/dashboards/{id}"),

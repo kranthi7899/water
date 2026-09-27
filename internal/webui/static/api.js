@@ -115,6 +115,10 @@
     // Phase 5a: one workspace's filtered existing sections plus its own
     // control-room tiles (internal/gateway/workspace_detail.go).
     workspace: (id) => request('GET', '/v1/workspaces/' + enc(id)),
+    // Phase 5b: the People workspace's "Message a team"/"Send pulse check"
+    // buttons -- creates a drafts row (store.CreateDraft), never sends
+    // anything itself.
+    createWorkspaceDraft: (id, kind, team) => request('POST', '/v1/workspaces/' + enc(id) + '/drafts', { kind, team }),
     dashboards: () => request('GET', '/v1/dashboards'),
     // Phase 4: one dashboard's actual computed tiles.
     dashboard: (id) => request('GET', '/v1/dashboards/' + enc(id)),

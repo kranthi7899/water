@@ -1,15 +1,17 @@
 // view_workspaces.js: the Workspaces sidebar disclosure and its main-pane
 // view (docs/slices/UI.md Phase 2's routing shape, Phase 5a's real
-// project/finance/clients content). A workspace's page is its filtered
-// existing sections (needs-you rows, recent meetings and threads) plus its
-// own control-room tiles from api.workspace(id)
-// (internal/gateway/workspace_detail.go's WorkspaceView) -- every number
-// here is read-only and this file never proposes, stages or decides
-// anything; it only opens a decision/approval/meeting/thread the CEO
-// already has, exactly like Today's own rows do.
+// project/finance/clients content, Phase 5b's real people content). A
+// workspace's page is its filtered existing sections (needs-you rows,
+// recent meetings and threads) plus its own control-room tiles from
+// api.workspace(id) (internal/gateway/workspace_detail.go's WorkspaceView)
+// -- every number here is read-only and this file never proposes, stages
+// or decides anything by itself; "Message a team"/"Send pulse check" only
+// ever create a drafts row (api.createWorkspaceDraft), never send anything,
+// and everything else only opens a decision/approval/meeting/thread/draft
+// the CEO already has, exactly like Today's own rows do.
 //
-// people/ideas/research/marketing templates still render the Phase 2
-// placeholder: their real content is Phase 5b-5d's own job.
+// ideas/research/marketing templates still render the Phase 2 placeholder:
+// their real content is Phase 5c-5d's own job.
 //
 // The hash route is "workspaces" with an optional two-segment param,
 // "<id>/<sub>" (e.g. "#workspaces/finance/overview", parsed by app.js's
@@ -296,6 +298,110 @@
       accountsPanel(get(cl, 'accounts')));
   }
 
+  // ---- people workspace (docs/slices/UI.md Phase 5b) ----
+  //
+  // A resource bar, one tile per roster team (a strain border, member
+  // initials coloured by individual load, a load bar, an overdue count),
+  // a cross-team callout, and three buttons. "Message a team"/"Send pulse
+  // check" call api.createWorkspaceDraft, which only ever creates a drafts
+  // row (internal/gateway/workspace_detail.go's handleCreateWorkspaceDraft)
+  // -- nothing here sends anything or proposes an envelope. "Policies"
+  // toggles an already-fetched, read-only <pre> block; no second network
+  // call, no new endpoint, nothing editable.
+
+  function strainClass(level) {
+    const l = String(level || 'normal');
+    return 'strain-' + (l === 'low' || l === 'high' ? l : 'normal');
+  }
+
+  function loadClass(level) {
+    const l = String(level || 'normal');
+    return 'load-' + (l === 'low' || l === 'high' ? l : 'normal');
+  }
+
+  function peopleResourceBarPanel(bar) {
+    return h('div', { class: 'dashboard-tiles' },
+      metricBox('Budget left', get(bar, 'budget_left_usd'), get(get(bar, 'budget_left_usd'), 'state'), dashboardStateBadge),
+      metricBox('Hours this week', get(bar, 'hours_this_week'), get(get(bar, 'hours_this_week'), 'state'), dashboardStateBadge),
+      metricBox('People with free capacity', get(bar, 'people_with_free_capacity'), get(get(bar, 'people_with_free_capacity'), 'state'), dashboardStateBadge));
+  }
+
+  // createTeamDraft is "Message a team"/"Send pulse check": it only ever
+  // creates a drafts row and opens it in the Drafts editor for the CEO to
+  // fill in and send -- exactly like every other draft-creating control in
+  // this codebase (Phase 3c).
+  async function createTeamDraft(workspaceID, teamID, kind, label) {
+    const S = window.appShared;
+    try {
+      const draft = await api.createWorkspaceDraft(workspaceID, kind, teamID);
+      S.toast(label + ' drafted.');
+      S.go('drafts', get(draft, 'id'));
+    } catch (err) {
+      S.toast('Could not create the draft: ' + S.errText(err), 'bad');
+    }
+  }
+
+  function teamTilePanel(workspaceID, team) {
+    const S = window.appShared;
+    const members = list(get(team, 'members'));
+    const memberRow = h('div', { class: 'team-members' }, members.map((m) =>
+      h('span', {
+        class: 'avatar ' + loadClass(get(m, 'load_level')),
+        title: get(m, 'name') + ' · load ' + fmtNumber(get(m, 'load')),
+      }, get(m, 'initials'))));
+    const load = get(team, 'load') || 0;
+    const loadMax = get(team, 'load_max') || 2;
+    const teamID = get(team, 'id');
+    const state = get(team, 'state');
+    return h('div', { class: 'panel team-tile ' + strainClass(get(team, 'strain')) },
+      h('div', { class: 'row-title' }, get(team, 'name')),
+      memberRow,
+      h('meter', { min: 0, max: loadMax, value: Math.min(load, loadMax), low: loadMax * 0.35, high: loadMax * 0.6, optimum: 0 }),
+      h('div', { class: 'row-meta' },
+        h('span', { class: 'muted' }, fmtNumber(get(team, 'overdue')) + ' overdue'),
+        state !== 'ok' ? dashboardStateBadge(S, state) : null),
+      h('div', { class: 'head-actions' },
+        S.button('Message a team', () => createTeamDraft(workspaceID, teamID, 'team_message', 'Team message'), 'secondary'),
+        S.button('Send pulse check', () => createTeamDraft(workspaceID, teamID, 'pulse_check', 'Pulse check'), 'secondary')));
+  }
+
+  function crossTeamCalloutsPanel(items) {
+    if (!items.length) return null;
+    const panel = h('section', { class: 'panel' }, h('h2', null, 'Cross-team deadlines'));
+    const ul = h('ul', { class: 'rows' });
+    for (const c of items) {
+      const deadlines = list(get(c, 'deadlines'));
+      ul.appendChild(h('li', null, h('div', { class: 'row row-static' },
+        h('span', { class: 'row-main' },
+          h('span', { class: 'row-title' }, get(c, 'person') + ' — ' + list(get(c, 'teams')).join(', ')),
+          h('span', { class: 'row-meta' }, deadlines.map((dl) =>
+            h('span', { class: 'muted' },
+              get(dl, 'issue_identifier') + ' (' + get(dl, 'team') + ') ' + fmtDay(get(dl, 'due_date')))))))));
+    }
+    panel.appendChild(ul);
+    return panel;
+  }
+
+  function peopleTiles(view, workspaceID) {
+    const S = window.appShared;
+    const p = get(view, 'people');
+    if (!p) return null;
+    const teams = list(get(p, 'teams'));
+    const callouts = list(get(p, 'cross_team_callouts'));
+    const policiesPanel = h('section', { class: 'panel', hidden: true },
+      h('h2', null, 'Policies'),
+      h('pre', { class: 'policies-text' }, get(p, 'policies') || 'No policies document is configured for this twin.'));
+    const policiesButton = S.button('Policies', () => { policiesPanel.hidden = !policiesPanel.hidden; }, 'secondary');
+    return h('div', { class: 'stack' },
+      peopleResourceBarPanel(get(p, 'resource_bar')),
+      teams.length
+        ? h('div', { class: 'dashboard-tiles' }, teams.map((team) => teamTilePanel(workspaceID, team)))
+        : S.empty('No roster teams on record.'),
+      crossTeamCalloutsPanel(callouts),
+      h('div', { class: 'head-actions' }, policiesButton),
+      policiesPanel);
+  }
+
   // ---- shared "filtered existing sections": needs-you, meetings, threads ----
 
   function needsYouPanel(items) {
@@ -385,6 +491,7 @@
     if (template === 'project') tiles = projectTiles(view);
     else if (template === 'finance') tiles = financeTiles(view);
     else if (template === 'clients') tiles = clientsTiles(view);
+    else if (template === 'people') tiles = peopleTiles(view, id);
 
     const body = tiles
       ? h('div', { class: 'stack' }, tiles)

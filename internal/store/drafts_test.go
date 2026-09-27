@@ -30,6 +30,33 @@ func TestCreateDraftRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCreateDraftAcceptsThePeopleWorkspaceTemplates is docs/slices/UI.md
+// Phase 5b: migration 0023 and draftTemplates both widen to accept
+// team_message and pulse_check alongside the three Phase 3c template
+// values, exercised here exactly like TestCreateDraftRoundTrip does for
+// "reply".
+func TestCreateDraftAcceptsThePeopleWorkspaceTemplates(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+
+	for _, template := range []string{"team_message", "pulse_check"} {
+		d, err := s.CreateDraft(ctx, Draft{Template: template, Subject: "s", Body: "b"})
+		if err != nil {
+			t.Fatalf("%s: %v", template, err)
+		}
+		got, err := s.GetDraft(ctx, d.ID)
+		if err != nil {
+			t.Fatalf("%s: %v", template, err)
+		}
+		if got.Template != template {
+			t.Fatalf("%s: got template %q", template, got.Template)
+		}
+		if label := DraftTemplateLabel(template); label == "" {
+			t.Fatalf("%s: DraftTemplateLabel returned empty", template)
+		}
+	}
+}
+
 func TestCreateDraftRejectsUnknownTemplate(t *testing.T) {
 	s, _ := openTemp(t)
 	ctx := context.Background()

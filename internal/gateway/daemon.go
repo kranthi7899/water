@@ -54,6 +54,12 @@ type Config struct {
 	Backend   backend.Backend
 	Warm      *backend.WarmSession // optional; preferred for fast-tier turns
 	RoleMD    string
+	// PoliciesMD is twins/<id>/policies.md (docs/slices/UI.md Phase 5b): the
+	// People workspace's "Policies" button, a static read-only document
+	// loaded once at startup exactly like RoleMD above, returned verbatim
+	// by GET /v1/workspaces/{id}'s people tile (never edited, never a
+	// draft, never a decision).
+	PoliciesMD string
 	// Decisions runs the classification-trigger orchestration (see
 	// internal/decisions.Trigger) over today's candidate items. Optional: a
 	// nil Decisions makes /v1/decisions report no cards and the morning
@@ -391,6 +397,10 @@ func (d *Daemon) Mux() http.Handler {
 	// Phase 5a: one workspace's filtered existing sections plus its own
 	// control-room tiles (internal/gateway/workspace_detail.go).
 	mux.Handle("GET /v1/workspaces/{id}", d.auth(d.handleGetWorkspace))
+	// Phase 5b: the People workspace's "Message a team"/"Send pulse check"
+	// buttons, each creating one drafts row (store.CreateDraft) with a
+	// code-built body -- never an approval envelope, never a decision.
+	mux.Handle("POST /v1/workspaces/{id}/drafts", d.auth(d.handleCreateWorkspaceDraft))
 	mux.Handle("GET /v1/dashboards", d.auth(d.handleListDashboards))
 	// Phase 4: one dashboard's actual computed tiles (internal/dashboards.
 	// Compute), alongside the list route above.

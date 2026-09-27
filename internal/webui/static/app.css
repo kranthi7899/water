@@ -241,6 +241,24 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .dashboard-tile { flex: 1 1 160px; min-width: 140px; }
 .dashboard-tile-value { font-size: 28px; font-weight: 600; margin: 4px 0; }
 
+/* People workspace, Phase 5b: a team tile's border reads its computed
+   strain (peopleStrain, internal/gateway/workspace_detail.go), and each
+   member's initials avatar is coloured by that same person's own load
+   level -- both reuse the app's existing color tokens (no new palette). */
+.team-tile { flex: 1 1 220px; min-width: 200px; border-left-width: 4px; border-left-style: solid; border-left-color: var(--border); }
+.team-tile.strain-low { border-left-color: var(--ok-border); }
+.team-tile.strain-high { border-left-color: var(--danger); }
+.team-members { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.avatar.load-low { color: #1a7f37; border-color: #1a7f37; }
+.avatar.load-high { color: var(--danger); border-color: var(--danger); }
+
+/* The People workspace's "Policies" button toggles this <pre> block's
+   `hidden` attribute directly (dom.js's BOOL_PROPS) -- no second network
+   call, the document is already part of the workspace response. white-space
+   is the one property this needs that a plain <pre> doesn't default to
+   usefully inside a narrow panel. */
+.policies-text { white-space: pre-wrap; word-break: break-word; font: inherit; margin: 0; }
+
 .row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .row-title { font-weight: 600; overflow-wrap: anywhere; }
 .row-sub { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

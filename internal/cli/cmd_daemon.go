@@ -431,7 +431,8 @@ func (a *App) runDaemon(ctx context.Context) error {
 	d := gateway.New(gateway.Config{
 		Manifest: deps.manifest, Store: deps.store, Audit: deps.audit, Approvals: deps.approvals,
 		Gate: deps.gate, Registry: deps.registry, Backend: sel.Backend, Warm: warm, RoleMD: deps.roleMD,
-		Decisions: trigger, ProactiveCues: cfg.Meetings.ProactiveCues, Clients: clients, SocketPath: paths.SocketPath(),
+		PoliciesMD: deps.policiesMD,
+		Decisions:  trigger, ProactiveCues: cfg.Meetings.ProactiveCues, Clients: clients, SocketPath: paths.SocketPath(),
 		Nervous: nv,
 		Home:    config.Home(), PromotionEnabled: cfg.Router.Promotion.Enabled, MaxLearned: cfg.Router.Promotion.MaxLearned,
 		ReloadIntents: reloader.Reload,

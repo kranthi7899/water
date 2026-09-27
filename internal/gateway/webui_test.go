@@ -97,6 +97,8 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		"'/actions/'": true, "'/related'": true,
 		// Phase 3c: Drafts' "Send for approval" route.
 		"'/submit'": true,
+		// Phase 5b: the People workspace's draft-creating buttons.
+		"'/drafts'": true,
 	}
 	for _, m := range regexp.MustCompile(`\+ '(/[^']*)'`).FindAllStringSubmatch(src, -1) {
 		if lit := "'" + m[1] + "'"; !suffixes[lit] {
