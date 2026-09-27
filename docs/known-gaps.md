@@ -777,6 +777,18 @@ any daemon started from this binary unless a real send is intended.
   `pulseAnswers` parameter is always `nil` today; the signature is
   ready for a later phase to wire in real answers.
 
+## Found in Slice UI, Phase 5d (2026-09-27)
+
+- **No production writer creates the `in_workspace` edge from a research
+  run to the marketing workspace**, so every Marketing trend tile is
+  realistically `illustrative` today, not just "possibly" — a later
+  phase (or Attach-like action) needs to actually link a finished
+  research run to marketing before a trend tile can ever go real.
+- **No public-reviews data source exists at all** (no new connector
+  allowed this phase). The tile always reads `not_connected`, and
+  "Draft reply" only ever works from a manually-entered review id —
+  there is nothing to browse or list until a real source is added.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
