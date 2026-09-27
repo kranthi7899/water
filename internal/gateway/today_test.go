@@ -80,12 +80,18 @@ func TestGetTodayReturnsNeedsYouAndSchedule(t *testing.T) {
 		t.Fatalf("Tick: %v", err)
 	}
 
-	// An event starting later today, so it falls inside todayBounds(now).
+	// An event anchored to today's own bounds, not to "now plus an hour":
+	// the latter crosses local midnight into tomorrow whenever this test
+	// runs late at night, falling outside todayBounds(now) and making the
+	// schedule assertion below flake (a real, independently-reproduced bug
+	// found and tracked in docs/known-gaps.md before this fix).
+	dayStart, _ := todayBounds(now)
+	eventStart := dayStart.Add(12 * time.Hour) // noon: always inside today's bounds regardless of the current wall-clock hour
 	if err := st.Upsert(context.Background(), &store.Event{
 		Meta:     store.Meta{Source: "fake", SourceID: "ev1", CreatedAt: now, UpdatedAt: now},
 		Title:    "Standup",
-		StartAt:  now.Add(time.Hour),
-		EndAt:    now.Add(90 * time.Minute),
+		StartAt:  eventStart,
+		EndAt:    eventStart.Add(30 * time.Minute),
 		Location: "Zoom",
 	}); err != nil {
 		t.Fatal(err)

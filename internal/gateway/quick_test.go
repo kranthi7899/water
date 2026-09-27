@@ -61,11 +61,19 @@ func TestQuickInvokeTaintedResultEscalatesSession(t *testing.T) {
 	if got := h.sessionTaint(t); got != gate.Clean {
 		t.Fatalf("session taint before = %v, want clean", got)
 	}
+	// Anchored to today's own bounds, not "now plus an hour": the latter
+	// crosses local midnight into tomorrow whenever this test runs late at
+	// night, falling outside quick.calendar's dayBounds(now) query window
+	// and making this assertion flake (a real, independently-reproduced
+	// bug found and tracked in docs/known-gaps.md before this fix).
+	now := time.Now()
+	dayStart, _ := todayBounds(now)
+	eventStart := dayStart.Add(12 * time.Hour) // noon: always inside today's bounds regardless of the current wall-clock hour
 	if err := h.st.Upsert(context.Background(), &store.Event{
-		Meta:    store.Meta{Source: "fake", SourceID: "ext1", External: true, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		Meta:    store.Meta{Source: "fake", SourceID: "ext1", External: true, CreatedAt: now, UpdatedAt: now},
 		Title:   "External sync",
-		StartAt: time.Now().Add(time.Hour),
-		EndAt:   time.Now().Add(2 * time.Hour),
+		StartAt: eventStart,
+		EndAt:   eventStart.Add(time.Hour),
 	}); err != nil {
 		t.Fatal(err)
 	}
