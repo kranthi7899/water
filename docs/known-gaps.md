@@ -701,6 +701,34 @@ any daemon started from this binary unless a real send is intended.
   meeting capture (crossing a few 1.5s pauses and one 45s rotation) is the
   owner's own manual verification step if wanted.
 
+## Found in Slice UI, Phase 1a (2026-09-26)
+
+- **The owner's real `~/.water/water.db` likely had migration `0017`
+  applied to it ahead of that migration's own commit**, via a pre-existing
+  `internal/cli` test-isolation gap (see the dated `EVOLUTION_PLAN.md` log
+  entry for the full account). Assessed as low-impact — three additive,
+  nullable columns, no data touched, the exact schema this slice needs in
+  production regardless — and now fixed for good via a package-level
+  `TestMain`. Nobody has directly inspected the real database to confirm
+  this account, since the sandboxed shell both the build agent and the
+  coordinator used refuses reads of that specific file. Whether this same
+  gap silently applied any *earlier* migration (0013–0016) on a past
+  session's test run is unknown and not practically reconstructable.
+  Optional owner follow-up: `sqlite3 ~/.water/water.db "select * from
+  schema_migrations"` from a normal terminal, if you want to see for sure.
+- Linear issues have no `for_project`/`in_workspace` linking wired in yet
+  (`recordlinks.ForProjectFromIssue`/`InWorkspaceForIssue` are implemented
+  and tested but uncalled) — issues are fetched live through the gate and
+  never upserted into the store, so there's no real startup hook to call
+  them from until a later phase actually stores one.
+- The `ideas` and `marketing` workspace YAML files use best-fit placeholder
+  `source` values (`internal/workspaces`'s closed source list has no
+  dedicated kind for either) — flagged in-file, to be revisited by whichever
+  later phase (1d, 5d) actually builds their real data sourcing.
+- Several domain workspaces' membership rules are empty placeholders
+  (`finance`'s `vendors: []`, `people`/`research` with no rule fields at
+  all) since nothing concrete matches them yet.
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the
