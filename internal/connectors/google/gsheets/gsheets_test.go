@@ -60,6 +60,8 @@ connectors:
       - {name: outstanding_invoices, level: R}
       - {name: revenue_by_application, level: R}
       - {name: funding_history, level: R}
+      - {name: spend_breakdown_all, level: R}
+      - {name: monthly_costs, level: R}
 `
 
 type harness struct {
@@ -340,12 +342,71 @@ func TestRevenueByApplicationAndFundingHistoryReturnRawGrid(t *testing.T) {
 	}
 }
 
+// TestSpendBreakdownAllReturnsEveryRowWithNoArgument is Phase 4's U4
+// sub-question worked example: a read-extension to an existing connector
+// (spend_breakdown, one row, requires "application") gains a sibling that
+// takes no argument and returns every row, for
+// internal/dashboards/compute.go's spend_by_application breakdown and
+// worst_app_margin callout.
+func TestSpendBreakdownAllReturnsEveryRowWithNoArgument(t *testing.T) {
+	api, gotRange := sheetsServer(t, `{"values":[
+		["crawler", 1000, 2000, 3000, 50000, 48000, -2000, -4],
+		["econ-rag", 1000, 2000, 3000, 30000, 31000, 1000, 3]
+	]}`)
+	ts := newTokenServer(t)
+	sh := gsheets.NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
+	h := newHarness(t, sh)
+
+	res, err := h.invoke(t, "company_finance.spend_breakdown_all", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *gotRange != "Spend by Application!A5:H11" {
+		t.Fatalf("requested range = %q, want %q", *gotRange, "Spend by Application!A5:H11")
+	}
+	var out map[string]any
+	json.Unmarshal(res.Output, &out)
+	rows, ok := out["rows"].([]any)
+	if !ok || len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2", out["rows"])
+	}
+}
+
+// TestMonthlyCostsReturnsRawGrid is Phase 4's second new finance R
+// function: a monthly P&L range read feeding the "cost more than 1.5x the
+// median month" callout signal.
+func TestMonthlyCostsReturnsRawGrid(t *testing.T) {
+	api, gotRange := sheetsServer(t, `{"values":[
+		["2026-06", 20000, 30000, 10000],
+		["2026-07", 20000, 70000, 50000],
+		["2026-08", 20000, 31000, 11000]
+	]}`)
+	ts := newTokenServer(t)
+	sh := gsheets.NewWithOptions(&gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
+	h := newHarness(t, sh)
+
+	res, err := h.invoke(t, "company_finance.monthly_costs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *gotRange != "Monthly P&L!A5:D16" {
+		t.Fatalf("requested range = %q, want %q", *gotRange, "Monthly P&L!A5:D16")
+	}
+	var out map[string]any
+	json.Unmarshal(res.Output, &out)
+	rows, ok := out["rows"].([]any)
+	if !ok || len(rows) != 3 {
+		t.Fatalf("rows = %+v, want 3", out["rows"])
+	}
+}
+
 func TestFunctionsAreAllReadOnly(t *testing.T) {
 	sh := gsheets.New()
 	fns := sh.Functions()
 	want := map[string]bool{
 		"cash_position": true, "budget_status": true, "spend_breakdown": true,
 		"outstanding_invoices": true, "revenue_by_application": true, "funding_history": true,
+		"spend_breakdown_all": true, "monthly_costs": true,
 	}
 	if len(fns) != len(want) {
 		t.Fatalf("got %d functions, want exactly %d: %+v", len(fns), len(want), fns)

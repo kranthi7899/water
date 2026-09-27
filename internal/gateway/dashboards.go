@@ -3,6 +3,8 @@ package gateway
 import (
 	"net/http"
 	"strings"
+
+	"water/internal/dashboards"
 )
 
 // dashboardListItem is one entry of GET /v1/dashboards: a dashboard's
@@ -66,4 +68,43 @@ func (d *Daemon) handleListDashboards(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleGetDashboard serves GET /v1/dashboards/{id}: one dashboard's actual
+// computed tiles (docs/slices/UI.md Phase 4) — its three metrics, one
+// breakdown and one callout, each carrying a value and a tile state
+// (internal/dashboards.TileOK/TileNotConnected/TileUnavailable/
+// TileIllustrative). A dashboard id not in the loaded registry (or no
+// registry at all) is a 404, matching handleGetThread/handleGetMeeting's
+// own convention for an unknown {id}. d.cfg.Compute is optional like
+// d.cfg.Dashboards itself: a nil Compute answers every tile as
+// "unavailable" instead of erroring — the same "missing optional
+// dependency degrades, never crashes" posture every other Config field
+// here already has (NeedsYou, Decisions, Workspaces, Dashboards).
+func (d *Daemon) handleGetDashboard(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if d.cfg.Dashboards == nil {
+		http.Error(w, "no such dashboard", http.StatusNotFound)
+		return
+	}
+	spec, ok := d.cfg.Dashboards.Spec(id)
+	if !ok {
+		http.Error(w, "no such dashboard", http.StatusNotFound)
+		return
+	}
+	var view dashboards.DashboardView
+	if d.cfg.Compute == nil {
+		view = dashboards.DashboardView{
+			ID: spec.ID, Name: spec.Name,
+			Breakdown: dashboards.BreakdownTile{ID: spec.Breakdown, State: dashboards.TileUnavailable},
+			Callout:   dashboards.CalloutTile{ID: spec.Callout, State: dashboards.TileUnavailable},
+		}
+		for _, m := range spec.Metrics {
+			view.Metrics = append(view.Metrics, dashboards.MetricTile{ID: m, State: dashboards.TileUnavailable})
+		}
+	} else {
+		view = d.cfg.Compute.Dashboard(r.Context(), spec)
+	}
+	view.Source = dashboardSourceLabel(spec.Source)
+	writeJSON(w, http.StatusOK, view)
 }

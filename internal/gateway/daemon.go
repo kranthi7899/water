@@ -113,6 +113,11 @@ type Config struct {
 	// than erroring, the same posture NeedsYou and Decisions already have.
 	Workspaces *workspaces.Registry
 	Dashboards *dashboards.Registry
+	// Compute answers GET /v1/dashboards/{id}'s actual metric/breakdown/
+	// callout tiles (docs/slices/UI.md Phase 4, internal/dashboards.
+	// Compute). Optional like Dashboards itself: a nil Compute makes the
+	// route answer every tile as "unavailable" rather than erroring.
+	Compute *dashboards.Compute
 	// StyleBlock is the twin's style.yaml prompt block
 	// (render.Style.PromptBlock()), appended to every main-path system
 	// prompt through baseEnv. internal/cli's daemonPrewarmer must warm with
@@ -384,6 +389,9 @@ func (d *Daemon) Mux() http.Handler {
 	// disclosure, read-only from the registries Phase 1a already loaded.
 	mux.Handle("GET /v1/workspaces", d.auth(d.handleListWorkspaces))
 	mux.Handle("GET /v1/dashboards", d.auth(d.handleListDashboards))
+	// Phase 4: one dashboard's actual computed tiles (internal/dashboards.
+	// Compute), alongside the list route above.
+	mux.Handle("GET /v1/dashboards/{id}", d.auth(d.handleGetDashboard))
 	// V-notify: native-only (never in api.js or the water:// allowlist).
 	mux.Handle("GET /v1/notifications", d.auth(d.handleListNotifications))
 	mux.Handle("POST /v1/notifications/{id}/delivered", d.auth(d.handleMarkNotificationDelivered))

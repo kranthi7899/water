@@ -53,6 +53,8 @@ import Testing
             // Slice UI Phase 2.
             ("GET", "water://app/v1/workspaces", "/v1/workspaces"),
             ("GET", "water://app/v1/dashboards", "/v1/dashboards"),
+            // Slice UI Phase 4: one dashboard's computed tiles.
+            ("GET", "water://app/v1/dashboards/finance", "/v1/dashboards/finance"),
             // Slice UI Phase 3b.
             ("POST", "water://app/v1/decisions/card-0123abcd/actions/sugg-0123abcd/stage",
              "/v1/decisions/card-0123abcd/actions/sugg-0123abcd/stage"),
@@ -117,6 +119,7 @@ import Testing
         #expect(!decide("get", "water://app/v1/today").isAllowed)
         #expect(!decide("POST", "water://app/v1/workspaces").isAllowed)
         #expect(!decide("POST", "water://app/v1/dashboards").isAllowed)
+        #expect(!decide("POST", "water://app/v1/dashboards/finance").isAllowed)
         #expect(!decide("GET", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)
         #expect(!decide("POST", "water://app/v1/decisions/card-1/related").isAllowed)
         #expect(!decide("PUT", "water://app/v1/decisions/card-1/actions/sugg-1/stage").isAllowed)

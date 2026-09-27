@@ -109,7 +109,7 @@ func TestUIOnlyCallsAllowlistedRoutes(t *testing.T) {
 		// Phase 3d: upcoming meetings, a query-param-shaped route like the
 		// existing '/v1/meetings?limit=' entry above.
 		"'/v1/meetings?upcoming=1&limit='",
-		"'/v1/workspaces'", "'/v1/dashboards'",
+		"'/v1/workspaces'", "'/v1/dashboards'", "'/v1/dashboards/'",
 		// Phase 3c: the Drafts editor.
 		"'/v1/drafts'", "'/v1/drafts/'",
 	}

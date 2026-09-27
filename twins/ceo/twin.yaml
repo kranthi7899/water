@@ -94,6 +94,25 @@ connectors:
       - {name: outstanding_invoices, level: R, rate: {max: 60, per: 1h}}
       - {name: revenue_by_application, level: R, rate: {max: 60, per: 1h}}
       - {name: funding_history, level: R, rate: {max: 60, per: 1h}}
+      # spend_breakdown_all/monthly_costs: Phase 4's two new read-only
+      # functions (docs/slices/UI.md, U4 sub-question) for the Finance
+      # dashboard (internal/dashboards/compute.go). Read-only extensions to
+      # this already-real, already-granted connector, not a new connector.
+      - {name: spend_breakdown_all, level: R, rate: {max: 60, per: 1h}}
+      - {name: monthly_costs, level: R, rate: {max: 60, per: 1h}}
+  # company_customers (internal/connectors/google/gsheets.Customers) is
+  # docs/slices/UI.md's named, owner-approved exception to "no new
+  # connectors" (U3-A): a second, read-only gsheets connector over
+  # Renaissance_Customers, on the same shared water.google/ceo credential
+  # as company_finance above. Its one function, accounts, answers
+  # not_connected (see internal/connectors/google/gsheets/customers.go's
+  # ErrCustomersNotConfigured) until the owner uploads the spreadsheet as a
+  # native Google Sheet and this connector's placeholder spreadsheet id is
+  # hand-edited to the real one — expected, correct behavior today, not a
+  # bug.
+  - name: company_customers
+    functions:
+      - {name: accounts, level: R, rate: {max: 60, per: 1h}}
   # display.show (internal/connectors/display) puts a short title and a
   # plain-text body on the CEO's screen during a turn (the model calls it on
   # voice when seeing beats hearing). No network, no credential, no side

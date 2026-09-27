@@ -54,6 +54,20 @@ var lookups = map[string]lookup{
 	"outstanding_invoices":   {"Invoices", "A5:I13"},
 	"revenue_by_application": {"Revenue", "A16:Q24"},
 	"funding_history":        {"Funding & Cap Table", "A5:I6"},
+	// spend_breakdown_all and monthly_costs are docs/slices/UI.md Phase 4's
+	// two new read-only functions (U4 sub-question's own worked example:
+	// a read-extension to an existing connector is not a new connector).
+	// spend_breakdown_all reads the same tab/range as spend_breakdown but
+	// takes no "application" argument and returns every row, for the
+	// Finance dashboard's spend_by_application breakdown and its
+	// worst_app_margin callout (internal/dashboards/compute.go).
+	"spend_breakdown_all": {"Spend by Application", "A5:H11"},
+	// monthly_costs reads a Monthly P&L range: one row per month, feeding
+	// the Finance dashboard's second callout signal (a month whose cost is
+	// more than 1.5x the median). Like every other tab/range in this file,
+	// the exact tab name and range are a best-effort guess pending the
+	// owner's real sheet (see the package doc comment).
+	"monthly_costs": {"Monthly P&L", "A5:D16"},
 }
 
 // Sheets is the "company_finance" connector. opts is nil in production;
@@ -109,6 +123,20 @@ func (*Sheets) Functions() []connectors.Function {
 			Schema: connectors.Schema{},
 		},
 		{
+			Name:        "spend_breakdown_all",
+			Description: "R&D/admin/marketing spend, revenue and profit for every application/product, from the Spend by Application tab (no application filter; see spend_breakdown for one row).",
+			Activity:    "Reading the full spend breakdown",
+			Level:       twins.R, Risk: connectors.RiskLow, External: true,
+			Schema: connectors.Schema{},
+		},
+		{
+			Name:        "monthly_costs",
+			Description: "Revenue, cost and profit by month, from the Monthly P&L tab.",
+			Activity:    "Reading monthly costs",
+			Level:       twins.R, Risk: connectors.RiskLow, External: true,
+			Schema: connectors.Schema{},
+		},
+		{
 			Name:        "revenue_by_application",
 			Description: "Monthly revenue per application/product, from the Revenue tab's \"by application\" block.",
 			Activity:    "Reading revenue by product",
@@ -138,7 +166,7 @@ func (c *Sheets) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, 
 	if err != nil {
 		return nil, err
 	}
-	grid, err := getRange(ctx, cl, lk.tab, lk.rangeA1)
+	grid, err := getRange(ctx, cl, spreadsheetID, lk.tab, lk.rangeA1)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +180,7 @@ func (c *Sheets) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, 
 		return matchApplication(lk, grid, gapi.ArgString(v.Args, "application"))
 	case "outstanding_invoices":
 		return openInvoices(lk, grid)
-	case "revenue_by_application", "funding_history":
+	case "revenue_by_application", "funding_history", "spend_breakdown_all", "monthly_costs":
 		return rawGrid(lk, grid)
 	}
 	return nil, fmt.Errorf("company_finance: unknown function %q", v.Function)
@@ -164,9 +192,12 @@ type sheetsValuesResponse struct {
 	Values [][]any `json:"values"`
 }
 
-// getRange fetches one tab!range as a raw grid, unformatted (numbers decode
-// as JSON numbers, not "$1,234"-style display strings).
-func getRange(ctx context.Context, cl *gapi.Client, tab, rangeA1 string) ([][]any, error) {
+// getRange fetches one spreadsheetID's tab!range as a raw grid, unformatted
+// (numbers decode as JSON numbers, not "$1,234"-style display strings).
+// spreadsheetID is a parameter (not always the package's own const) so
+// customers.go's Customers connector — a different spreadsheet entirely —
+// can reuse this without duplicating the Sheets API call.
+func getRange(ctx context.Context, cl *gapi.Client, spreadsheetID, tab, rangeA1 string) ([][]any, error) {
 	a1 := tab + "!" + rangeA1
 	var resp sheetsValuesResponse
 	q := url.Values{"valueRenderOption": {"UNFORMATTED_VALUE"}, "dateTimeRenderOption": {"FORMATTED_STRING"}}

@@ -82,7 +82,7 @@ func newTwinNode(t *testing.T, id string) *twinNode {
 	// The same connector set the CLI builds for every twin; each manifest
 	// decides which of them its twin may actually use.
 	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
-		twinlink.NewSender(id, st), twinlink.NewInbox(st), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New(), display.New(),
+		twinlink.NewSender(id, st), twinlink.NewInbox(st), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New(), gsheets.NewCustomers(), display.New(),
 		research.New(nil), // research.web: never invoked here (a nil runner refuses)
 		requests.New())
 	if err != nil {

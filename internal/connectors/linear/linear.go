@@ -46,16 +46,45 @@ const (
 )
 
 // Issue is the compact shape Invoke returns and Normalize consumes,
-// matching fake.LinearIssue's fields.
+// matching fake.LinearIssue's fields, plus docs/slices/UI.md Phase 4's
+// read-extension fields (U4 sub-question: a read-only extension to an
+// existing connector's query is not a new connector) that
+// internal/dashboards/compute.go's Delivery dashboard needs: Team,
+// StateType, PriorityRank, DueDate, Labels, Relations and
+// InverseRelations. These are additive and optional — every existing
+// caller that only reads ID/Identifier/Title/Status/Priority/Assignee/
+// Project/URL is unaffected.
 type Issue struct {
-	ID         string `json:"id"`
-	Identifier string `json:"identifier"` // e.g. "ENG-142"
-	Title      string `json:"title"`
-	Status     string `json:"status"`   // Linear's workflow state name
-	Priority   string `json:"priority"` // Urgent | High | Medium | Low | No priority
-	Assignee   string `json:"assignee,omitempty"`
-	Project    string `json:"project"`
-	URL        string `json:"url"`
+	ID           string   `json:"id"`
+	Identifier   string   `json:"identifier"` // e.g. "ENG-142"
+	Title        string   `json:"title"`
+	Status       string   `json:"status"`                  // Linear's workflow state name
+	StateType    string   `json:"state_type,omitempty"`    // Linear's own coarse state.type: triage|backlog|unstarted|started|completed|cancelled
+	Priority     string   `json:"priority"`                // Urgent | High | Medium | Low | No priority
+	PriorityRank int      `json:"priority_rank,omitempty"` // Linear's raw 0-4 priority (1 = Urgent)
+	Assignee     string   `json:"assignee,omitempty"`
+	Project      string   `json:"project"`
+	Team         string   `json:"team,omitempty"`     // the owning team's key, e.g. "CRA"
+	DueDate      string   `json:"due_date,omitempty"` // "YYYY-MM-DD", empty if unset
+	Labels       []string `json:"labels,omitempty"`
+	// Relations is this issue's own outbound relations (e.g. "this issue
+	// blocks that one"); InverseRelations is relations where this issue is
+	// the target ("that issue blocks this one"). Both are read-only,
+	// fetched from Linear's own relations/inverseRelations connections —
+	// no new write surface.
+	Relations        []Relation `json:"relations,omitempty"`
+	InverseRelations []Relation `json:"inverse_relations,omitempty"`
+	URL              string     `json:"url"`
+}
+
+// Relation is one edge of an issue's relations or inverseRelations
+// connection: Type is Linear's own relation type ("blocks", "related",
+// "duplicate", ...), Identifier/StateType describe the *other* issue in
+// the edge (the blocked/blocking issue), never this one.
+type Relation struct {
+	Type       string `json:"type"`
+	Identifier string `json:"identifier"`
+	StateType  string `json:"state_type"`
 }
 
 // wireIssue is one node of Linear's issues connection, trimmed to the
@@ -65,8 +94,10 @@ type wireIssue struct {
 	Identifier string  `json:"identifier"`
 	Title      string  `json:"title"`
 	Priority   float64 `json:"priority"`
+	DueDate    *string `json:"dueDate"`
 	State      *struct {
 		Name string `json:"name"`
+		Type string `json:"type"`
 	} `json:"state"`
 	Assignee *struct {
 		Name string `json:"name"`
@@ -74,7 +105,36 @@ type wireIssue struct {
 	Project *struct {
 		Name string `json:"name"`
 	} `json:"project"`
-	URL string `json:"url"`
+	Team *struct {
+		Key string `json:"key"`
+	} `json:"team"`
+	Labels *struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+	Relations        *wireRelationConnection `json:"relations"`
+	InverseRelations *wireRelationConnection `json:"inverseRelations"`
+	URL              string                  `json:"url"`
+}
+
+// wireRelationConnection is the shape of both the "relations" and
+// "inverseRelations" fields; only one of RelatedIssue (relations) or Issue
+// (inverseRelations) is ever populated per node, matching which of the two
+// connections it came from.
+type wireRelationConnection struct {
+	Nodes []struct {
+		Type         string           `json:"type"`
+		RelatedIssue *wireRelatedNode `json:"relatedIssue"`
+		Issue        *wireRelatedNode `json:"issue"`
+	} `json:"nodes"`
+}
+
+type wireRelatedNode struct {
+	Identifier string `json:"identifier"`
+	State      *struct {
+		Type string `json:"type"`
+	} `json:"state"`
 }
 
 type pageInfo struct {
@@ -106,9 +166,14 @@ query Issues($first: Int!, $after: String) {
       identifier
       title
       priority
-      state { name }
+      dueDate
+      state { name type }
       assignee { name }
       project { name }
+      team { key }
+      labels { nodes { name } }
+      relations { nodes { type relatedIssue { identifier state { type } } } }
+      inverseRelations { nodes { type issue { identifier state { type } } } }
       url
     }
     pageInfo { hasNextPage endCursor }
@@ -249,9 +314,9 @@ func matchesAny(query string, haystacks ...string) bool {
 }
 
 func toIssue(w wireIssue) Issue {
-	status, assignee, project := "", "", ""
+	status, stateType, assignee, project, team := "", "", "", "", ""
 	if w.State != nil {
-		status = w.State.Name
+		status, stateType = w.State.Name, w.State.Type
 	}
 	if w.Assignee != nil {
 		assignee = w.Assignee.Name
@@ -259,16 +324,62 @@ func toIssue(w wireIssue) Issue {
 	if w.Project != nil {
 		project = w.Project.Name
 	}
-	return Issue{
-		ID:         w.ID,
-		Identifier: w.Identifier,
-		Title:      w.Title,
-		Status:     status,
-		Priority:   priorityLabel(w.Priority),
-		Assignee:   assignee,
-		Project:    project,
-		URL:        w.URL,
+	if w.Team != nil {
+		team = w.Team.Key
 	}
+	dueDate := ""
+	if w.DueDate != nil {
+		dueDate = *w.DueDate
+	}
+	var labels []string
+	if w.Labels != nil {
+		for _, n := range w.Labels.Nodes {
+			labels = append(labels, n.Name)
+		}
+	}
+	return Issue{
+		ID:               w.ID,
+		Identifier:       w.Identifier,
+		Title:            w.Title,
+		Status:           status,
+		StateType:        stateType,
+		Priority:         priorityLabel(w.Priority),
+		PriorityRank:     int(w.Priority),
+		Assignee:         assignee,
+		Project:          project,
+		Team:             team,
+		DueDate:          dueDate,
+		Labels:           labels,
+		Relations:        toRelations(w.Relations, false),
+		InverseRelations: toRelations(w.InverseRelations, true),
+		URL:              w.URL,
+	}
+}
+
+// toRelations flattens a wireRelationConnection into Relations, reading
+// RelatedIssue (the "relations" connection) or Issue (the "inverseRelations"
+// connection) per inverse, and skipping a node whose other-side issue is
+// missing (Linear can return a null reference for a deleted issue).
+func toRelations(c *wireRelationConnection, inverse bool) []Relation {
+	if c == nil {
+		return nil
+	}
+	var out []Relation
+	for _, n := range c.Nodes {
+		other := n.RelatedIssue
+		if inverse {
+			other = n.Issue
+		}
+		if other == nil {
+			continue
+		}
+		stateType := ""
+		if other.State != nil {
+			stateType = other.State.Type
+		}
+		out = append(out, Relation{Type: n.Type, Identifier: other.Identifier, StateType: stateType})
+	}
+	return out
 }
 
 // Normalize maps issues onto store.Issue, exactly as

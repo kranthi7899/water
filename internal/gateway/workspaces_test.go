@@ -57,6 +57,43 @@ func newRegistryTestDaemon(t *testing.T) (srv *httptest.Server, token string) {
 	return srv, tok
 }
 
+// newRegistryTestDaemonWithCompute is newRegistryTestDaemon plus a
+// dashboards.Compute wired to a stub Invoker that answers every gate call
+// with body — for GET /v1/dashboards/{id} tests that need real computed
+// tiles, not just the list route's identity/name/source.
+func newRegistryTestDaemonWithCompute(t *testing.T, body string) (srv *httptest.Server, token string) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+
+	dashReg, err := dashboards.LoadRegistry(water.TwinsFS(), "ceo")
+	if err != nil {
+		t.Fatalf("dashboards.LoadRegistry: %v", err)
+	}
+	clients, err := LoadClients(filepath.Join(dir, "clients.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := clients.EnsureCLI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compute := &dashboards.Compute{Gate: stubInvoker{body: body}, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}}
+	d := New(Config{Store: st, Audit: log, Clients: clients, SocketPath: "unused-in-http-tests.sock", Dashboards: dashReg, Compute: compute})
+	srv = httptest.NewServer(d.Mux())
+	t.Cleanup(srv.Close)
+	return srv, tok
+}
+
 // TestGetWorkspacesListsTheLoadedRegistryInOrder: the real CEO twin's
 // twins/ceo/workspaces/*.yaml specs come back id, name, template, source, in
 // the registry's own (id) order — clients, crawler, econ-rag, finance,

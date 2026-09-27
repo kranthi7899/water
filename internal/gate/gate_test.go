@@ -181,7 +181,7 @@ func TestEmbeddedCEOManifestBuildsAGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg, err := connectors.NewRegistry(gcal.New(), gmail.New("agent@example.com"), gdrive.New(), agentmail.New("agent@example.com"),
-		twinlink.NewSender("ceo", nil), twinlink.NewInbox(nil), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New(), display.New(),
+		twinlink.NewSender("ceo", nil), twinlink.NewInbox(nil), github.New("owner/repo"), linear.New(), hubspot.New(), gsheets.New(), gsheets.NewCustomers(), display.New(),
 		research.New(nil), // research.web: never invoked here (a nil runner refuses)
 		requests.New())
 	if err != nil {

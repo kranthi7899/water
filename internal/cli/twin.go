@@ -206,6 +206,15 @@ func loadRoleMD(id string) string {
 // owner connected before this scope existed needs one `water connect
 // google` re-run to pick it up (see docs/google-setup.md).
 //
+// gsheets.NewCustomers ("company_customers") is likewise registered for the
+// real twin only: docs/slices/UI.md's named, owner-approved exception to
+// "no new connectors" (U3-A), the same gsheets package and shared Google
+// credential as company_finance above, over a second, distinct spreadsheet
+// (Renaissance_Customers) the owner has not uploaded yet. Its one function
+// answers not_connected until that upload happens and the connector's
+// placeholder spreadsheet id is hand-edited to the real one — see
+// internal/connectors/google/gsheets/customers.go.
+//
 // display (display.show) is registered for every CEO twin, real and demo:
 // it has no network, credential or side effect beyond the UI (see
 // internal/connectors/display).
@@ -240,7 +249,7 @@ func buildCEORegistryModel(id string, st *store.Store, mailAddress, signatureNam
 			fake.NewHubSpot(fake.DefaultHubSpotDeals(), fake.DefaultHubSpotContacts()),
 		)
 	} else {
-		cs = append(cs, github.New(githubRepo), linear.New(), hubspot.New(), gsheets.New())
+		cs = append(cs, github.New(githubRepo), linear.New(), hubspot.New(), gsheets.New(), gsheets.NewCustomers())
 	}
 	return connectors.NewRegistry(cs...)
 }

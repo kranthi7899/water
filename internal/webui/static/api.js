@@ -113,6 +113,8 @@
     // disclosure ({id, name, template, source} / {id, name, source}).
     workspaces: () => request('GET', '/v1/workspaces'),
     dashboards: () => request('GET', '/v1/dashboards'),
+    // Phase 4: one dashboard's actual computed tiles.
+    dashboard: (id) => request('GET', '/v1/dashboards/' + enc(id)),
     // Phase 3c: the Drafts editor (U10-A, a real drafts table -- see
     // view_drafts.js). Save persists to/subject/body only; submitDraft
     // always sends the editor's current values (never relies on a prior

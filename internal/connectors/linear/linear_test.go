@@ -120,7 +120,8 @@ func nodeJSON(id, identifier, title string, priority float64, state, assignee, p
 	if state != "" {
 		w.State = &struct {
 			Name string `json:"name"`
-		}{state}
+			Type string `json:"type"`
+		}{Name: state}
 	}
 	if assignee != "" {
 		w.Assignee = &struct {
@@ -190,6 +191,120 @@ func TestListIssuesFollowsCursorPagination(t *testing.T) {
 	}
 	if !res.Untrusted {
 		t.Fatal("linear.list_issues result must be marked untrusted (External)")
+	}
+}
+
+// ---- Phase 4 read-extension fields (team, state.type, dueDate, labels,
+// relations/inverseRelations) ----
+
+// TestListIssuesReturnsThePhase4ReadExtensionFields is docs/slices/UI.md
+// Phase 4's U4 sub-question worked example: list_issues' query gains
+// team{key}, state{type}, dueDate, labels and relations/inverseRelations
+// as read-only response fields (no new argument, no write), for
+// internal/dashboards/compute.go's Delivery dashboard.
+func TestListIssuesReturnsThePhase4ReadExtensionFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query string `json:"query"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		for _, want := range []string{"team", "dueDate", "labels", "relations", "inverseRelations", "state { name type }"} {
+			if !strings.Contains(body.Query, want) {
+				t.Errorf("query missing %q: %s", want, body.Query)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"issues":{"nodes":[
+			{
+				"id": "i1", "identifier": "CRA-3", "title": "blocker issue", "priority": 1,
+				"dueDate": "2026-11-01",
+				"state": {"name": "In Progress", "type": "started"},
+				"team": {"key": "CRA"},
+				"labels": {"nodes": [{"name": "urgent"}, {"name": "customer"}]},
+				"relations": {"nodes": [
+					{"type": "blocks", "relatedIssue": {"identifier": "CRA-4", "state": {"type": "started"}}}
+				]},
+				"inverseRelations": {"nodes": []},
+				"url": "https://linear.app/nimbus/issue/CRA-3"
+			},
+			{
+				"id": "i2", "identifier": "CRA-4", "title": "blocked issue", "priority": 3,
+				"state": {"name": "Todo", "type": "unstarted"},
+				"team": {"key": "CRA"},
+				"relations": {"nodes": []},
+				"inverseRelations": {"nodes": [
+					{"type": "blocks", "issue": {"identifier": "CRA-3", "state": {"type": "started"}}}
+				]},
+				"url": "https://linear.app/nimbus/issue/CRA-4"
+			}
+		], "pageInfo": {"hasNextPage": false}}}}`)
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, srv, testCredential(t))
+	res, err := h.invoke(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issues []Issue
+	if err := json.Unmarshal(res.Output, &issues); err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("got %d issues, want 2", len(issues))
+	}
+	blocker, blocked := issues[0], issues[1]
+	if blocker.Team != "CRA" || blocked.Team != "CRA" {
+		t.Fatalf("team = %+v", issues)
+	}
+	if blocker.StateType != "started" || blocked.StateType != "unstarted" {
+		t.Fatalf("state type = %+v", issues)
+	}
+	if blocker.DueDate != "2026-11-01" {
+		t.Fatalf("due date = %q, want 2026-11-01", blocker.DueDate)
+	}
+	if len(blocker.Labels) != 2 || blocker.Labels[0] != "urgent" || blocker.Labels[1] != "customer" {
+		t.Fatalf("labels = %+v", blocker.Labels)
+	}
+	if blocker.PriorityRank != 1 {
+		t.Fatalf("priority rank = %d, want 1", blocker.PriorityRank)
+	}
+	if len(blocker.Relations) != 1 || blocker.Relations[0].Type != "blocks" || blocker.Relations[0].Identifier != "CRA-4" || blocker.Relations[0].StateType != "started" {
+		t.Fatalf("blocker relations = %+v", blocker.Relations)
+	}
+	if len(blocked.InverseRelations) != 1 || blocked.InverseRelations[0].Type != "blocks" || blocked.InverseRelations[0].Identifier != "CRA-3" || blocked.InverseRelations[0].StateType != "started" {
+		t.Fatalf("blocked inverse relations = %+v", blocked.InverseRelations)
+	}
+}
+
+// TestListIssuesRelationsSkipNullOtherIssue: a relation node whose other-
+// side issue is null (Linear can return this for a deleted issue) is
+// skipped, not a panic.
+func TestListIssuesRelationsSkipNullOtherIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"issues":{"nodes":[
+			{
+				"id": "i1", "identifier": "CRA-3", "title": "t", "priority": 3,
+				"relations": {"nodes": [{"type": "blocks", "relatedIssue": null}]},
+				"inverseRelations": {"nodes": [{"type": "blocks", "issue": null}]},
+				"url": "https://linear.app/nimbus/issue/CRA-3"
+			}
+		], "pageInfo": {"hasNextPage": false}}}}`)
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, srv, testCredential(t))
+	res, err := h.invoke(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issues []Issue
+	if err := json.Unmarshal(res.Output, &issues); err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 || len(issues[0].Relations) != 0 || len(issues[0].InverseRelations) != 0 {
+		t.Fatalf("issues = %+v, want relations/inverseRelations dropped, not panicked", issues)
 	}
 }
 

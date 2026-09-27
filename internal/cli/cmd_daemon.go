@@ -23,6 +23,7 @@ import (
 	"water/internal/connectors"
 	"water/internal/connectors/google/gapi"
 	"water/internal/connectors/research"
+	"water/internal/dashboards"
 	"water/internal/gate"
 	"water/internal/gateway"
 	"water/internal/needsyou"
@@ -437,8 +438,13 @@ func (a *App) runDaemon(ctx context.Context) error {
 		NeedsYou:      needsYouSvc,
 		Workspaces:    deps.workspaces,
 		Dashboards:    deps.dashboards,
-		StyleBlock:    styleBlock,
-		MaxChars:      maxChars,
+		// Phase 4: GET /v1/dashboards/{id}'s compute registry, gated
+		// through this daemon's own gate at dashboardOrigin (never P0), a
+		// 10-minute cache shared across every render
+		// (dashboards.DefaultCacheTTL, docs/slices/UI.md Phase 4).
+		Compute:    &dashboards.Compute{Gate: deps.gate, Cache: &dashboards.Cache{TTL: dashboards.DefaultCacheTTL}},
+		StyleBlock: styleBlock,
+		MaxChars:   maxChars,
 	})
 	tc.d = d
 	prewarmer.d = d

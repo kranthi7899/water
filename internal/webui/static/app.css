@@ -229,10 +229,17 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 }
 .row:hover { border-color: var(--accent); }
 .row.selected { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
-/* A non-interactive row (Dashboards, Phase 2: no per-dashboard detail
-   route yet) reuses .row's box but not its pointer cursor or hover. */
+/* A non-interactive row reuses .row's box but not its pointer cursor or
+   hover (e.g. a workspace list row with nothing to click into yet). */
 .row.row-static { cursor: default; }
 .row.row-static:hover { border-color: var(--border); }
+
+/* Dashboards, Phase 4: one dashboard's metric tiles, in a wrapping row of
+   equal-ish panels rather than a fixed column count, so it holds up from a
+   narrow sidebar-open layout to a wide one. */
+.dashboard-tiles { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.dashboard-tile { flex: 1 1 160px; min-width: 140px; }
+.dashboard-tile-value { font-size: 28px; font-weight: 600; margin: 4px 0; }
 
 .row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .row-title { font-weight: 600; overflow-wrap: anywhere; }

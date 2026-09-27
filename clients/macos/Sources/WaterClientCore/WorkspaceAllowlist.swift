@@ -94,6 +94,8 @@ public enum WorkspaceAllowlist {
         // disclosure. Both are read-only lists with no id segment.
         route("GET", "/v1/workspaces"),
         route("GET", "/v1/dashboards"),
+        // Phase 4: one dashboard's computed tiles.
+        route("GET", "/v1/dashboards/{id}"),
         // Phase 3b: the per-action stage route (two dynamic segments; the
         // route() helper only recognises the literal "{id}" token, so it is
         // repeated) and the related-data panel behind "View related data
