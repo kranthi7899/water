@@ -277,7 +277,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // No `.done` mark here: the log line just ends at whatever
                 // checkpoint this turn actually reached before it errored.
                 self.finishVoiceTrace(turn: turn, mark: nil)
-            case .queued, .toolStart, .toolEnd, .artifact:
+            case .toolStart:
+                // Steps are not drawn anywhere (owner brief 2026-09-26), but a
+                // slow tool call (docs/CONTEXT.md principle 4: "longer work
+                // gets an instant 'on it'") was going fully silent even
+                // though the globe's `searching` visual state already
+                // announces exactly these calls (ActivityModel.searchTools)
+                // -- found live 2026-09-28 when a real research.web call
+                // took 10-21s with zero audible acknowledgement. Speak the
+                // same code-built label (e.tool/e.label are never the
+                // call's arguments, see beginStep's doc comment) the globe
+                // already shows, once, only for the tools already flagged
+                // as worth announcing -- not every tool call, which would
+                // be chatty for the many that return near-instantly.
+                if channel == .voice, turn == self.speakingTurn, let tool = e.tool, ActivityModel.searchTools.contains(tool),
+                   let label = e.label, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.speechQueue.enqueue(label + "…")
+                }
+            case .queued, .toolEnd, .artifact:
                 // Steps are not drawn anywhere (owner brief 2026-09-26); a
                 // voice draft's artifact shows in the glass tab (above).
                 // The panel's transcript stays text only.
