@@ -111,25 +111,28 @@ final class HotKeyMonitor {
     }
 }
 
-/// Space and Esc, captured system-wide only while voice mode is on.
+/// The talk key (⌃V) and Esc, captured system-wide only while voice mode is
+/// on.
 ///
 /// Carbon hot keys (`RegisterEventHotKey`), not the NSEvent monitors above:
-/// a global NSEvent monitor can only observe, and Space must be swallowed so
-/// it never types into the focused app while it's the talk key. A Carbon hot
-/// key does exactly that, needs no Accessibility grant, and reports both
-/// pressed and released. Registered with no modifiers, so ⌃⌥Space (the text
-/// bar), ⇧Space, ⌘Esc and the rest still pass through.
+/// a global NSEvent monitor can only observe, and the talk key must be
+/// swallowed so it never types into the focused app while voice mode holds
+/// it. A Carbon hot key does exactly that, needs no Accessibility grant, and
+/// reports both pressed and released. The talk key is registered with the
+/// Control modifier (⌃V, not bare Space as it was until 2026-09-28 — see
+/// `register()`'s own doc comment); Esc is registered with no modifiers, so
+/// ⌃⌥Space (the text bar), ⌘Esc and the rest still pass through.
 ///
 /// Every press and release goes to the one handler passed to `init` — a
 /// required parameter, so the keys can't be registered with nobody
 /// listening. (Before the 2026-09-26 fixes the handler was two optional
-/// properties AppDelegate never set: voice mode swallowed Space and Esc
-/// system-wide and did nothing with them until its 60s idle timeout.)
+/// properties AppDelegate never set: voice mode swallowed the talk key and
+/// Esc system-wide and did nothing with them until its 60s idle timeout.)
 ///
 /// Nothing is registered until `register()`, and `unregister()` is
 /// idempotent. AppDelegate calls it on every voice-mode exit and on
 /// termination; the OS also drops a process's hot keys when it dies, so a
-/// crash can't leave Space captured either.
+/// crash can't leave the talk key captured either.
 final class CaptureKeys {
     /// Carbon hot key ids.
     private enum Key: UInt32 {
@@ -152,17 +155,26 @@ final class CaptureKeys {
 
     var isRegistered: Bool { !refs.isEmpty }
 
-    /// Registers Space and Esc. False (with nothing left registered) when
-    /// Space can't be taken — another app already holds it as a hot key.
-    /// Esc failing alone is tolerated: ⌃⌥V and the idle timeout still exit.
+    /// Registers the talk key (⌃V) and Esc. False (with nothing left
+    /// registered) when the talk key can't be taken — another app already
+    /// holds it as a hot key. Esc failing alone is tolerated: ⌃⌥V and the
+    /// idle timeout still exit.
+    ///
+    /// The talk key was bare Space until 2026-09-28: while voice mode was
+    /// on, Space was captured system-wide with no modifier, which meant it
+    /// silently ate every ordinary space keystroke in whatever app was
+    /// frontmost if voice mode was left on. ⌃V (Control held with V) needs
+    /// both keys down together, which nothing types by accident, and Ctrl+V
+    /// is not a standard macOS shortcut (paste is ⌘V), so it was free to
+    /// take.
     @discardableResult
     func register() -> Bool {
         installHandler()
         guard handler != nil else { return false }
-        for (key, code) in [(Key.space, kVK_Space), (Key.escape, kVK_Escape)] where refs[key] == nil {
+        for (key, code, modifiers) in [(Key.space, kVK_ANSI_V, UInt32(controlKey)), (Key.escape, kVK_Escape, 0)] where refs[key] == nil {
             var ref: EventHotKeyRef?
             let id = EventHotKeyID(signature: Self.signature, id: key.rawValue)
-            if RegisterEventHotKey(UInt32(code), 0, id, GetEventDispatcherTarget(), 0, &ref) == noErr, let ref {
+            if RegisterEventHotKey(UInt32(code), modifiers, id, GetEventDispatcherTarget(), 0, &ref) == noErr, let ref {
                 refs[key] = ref
             }
         }

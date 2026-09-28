@@ -1,12 +1,16 @@
 import Foundation
 
-/// The two keys voice mode captures (HotKeys.swift's `CaptureKeys`).
+/// The two keys voice mode captures (HotKeys.swift's `CaptureKeys`). `.space`
+/// names the talk key by its historical role, not its physical key: it was
+/// bare Space until 2026-09-28, when it moved to ⌃V (see `HotKeys.swift`'s
+/// `CaptureKeys.register()`) because bare Space ate every ordinary space
+/// keystroke elsewhere if voice mode was left on.
 public enum CaptureKey: Equatable { case space, escape }
 
 /// Voice mode (owner brief 2026-09-26): ⌃⌥V turns it on and off. While it
-/// is on the globe stays up, holding Space talks (release sends, exactly
-/// like the old ⌃⌥V hold), and Esc leaves. Space and Esc are captured only
-/// while it is on: entry emits `registerCaptureKeys` and every way out
+/// is on the globe stays up, holding ⌃V talks (release sends, exactly
+/// like the old ⌃⌥V hold), and Esc leaves. The talk key and Esc are captured
+/// only while it is on: entry emits `registerCaptureKeys` and every way out
 /// (toggle, Esc, idle timeout, a failed registration, app shutdown) emits
 /// `unregisterCaptureKeys`.
 ///
@@ -81,16 +85,16 @@ public struct VoiceMode: Equatable {
         return isBusy ? .processing : .armed
     }
 
-    /// Whether Space and Esc must be captured right now.
+    /// Whether the talk key and Esc must be captured right now.
     public var capturesKeys: Bool { isOn }
 
     var isBusy: Bool { activeTurn != nil || speaking || approvalPinned || capturePending }
 
     // MARK: user inputs
 
-    /// One captured key event, as CaptureKeys reports it: Space down/up is
-    /// the hold, Esc down leaves. Esc's release and anything while off do
-    /// nothing.
+    /// One captured key event, as CaptureKeys reports it: the talk key
+    /// (`.space`, physically ⌃V) down/up is the hold, Esc down leaves. Esc's
+    /// release and anything while off do nothing.
     public mutating func key(_ key: CaptureKey, pressed: Bool, now: Date) -> [Effect] {
         switch (key, pressed) {
         case (.space, true): return spaceDown(now: now)

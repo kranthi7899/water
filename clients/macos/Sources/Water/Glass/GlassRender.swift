@@ -110,7 +110,7 @@ enum GlassRender {
                                                 body: "Hi Dana,\n\nThursday morning works for the full deck.\n\nBest,\nKranthi"),
                              readBack: rb, confirmPhrase: "confirm send")
         case "notice":
-            return GlassItem.notice("Hold Space to talk. Esc to leave voice mode.")
+            return GlassItem.notice("Hold ⌃V to talk. Esc to leave voice mode.")
         default:
             return nil
         }

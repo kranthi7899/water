@@ -5,10 +5,12 @@ import WaterClientCore
 /// `Water --voice-keys-selftest`: proves the voice-mode key path end to end
 /// without taking any real key. It builds `CaptureKeys` exactly as
 /// AppDelegate does (its handler feeds `VoiceMode.key`), sends synthetic
-/// Carbon hot-key events for Space down/up and Esc through the event
-/// dispatcher, and checks each reaches the mode with the right effects and
-/// how long the hop to the main queue took. Registers nothing, touches no
-/// daemon, network or UserDefaults. Exits 0 on PASS.
+/// Carbon hot-key events for the talk key (⌃V) down/up and Esc through the
+/// event dispatcher — by hot-key id, not physical key code, so this test is
+/// unaffected by which real key the talk key is bound to — and checks each
+/// reaches the mode with the right effects and how long the hop to the main
+/// queue took. Registers nothing, touches no daemon, network or
+/// UserDefaults. Exits 0 on PASS.
 enum VoiceKeysSelfTest {
     static func run() -> Int32 {
         var mode = VoiceMode()
