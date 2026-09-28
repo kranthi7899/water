@@ -20,6 +20,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // TemplateVersion identifies the email template's content — the exact
@@ -75,6 +76,36 @@ func AssetHash(name string) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// CombinedAssetHash returns one hex-encoded sha256 covering
+// AssetHeader/AssetKoi/AssetGlass together, in that fixed order (name then
+// hash, newline-joined, so two different assets can never collide into the
+// same combined value the way plain concatenation could). This is a single
+// string rather than AssetHash's own per-asset result specifically because
+// it goes into gmail.send_message's approval payload
+// (internal/gateway/brand_payload.go), which -- once claimed -- must
+// re-hash to exactly the envelope's stored PayloadHash
+// (internal/approvals/queue.go's Claim); that payload reaches
+// connectors.Schema.Validate as real function arguments, and
+// connectors.Property has no "object" type to declare a
+// name-to-hash map as (internal/connectors/schema.go) -- found live,
+// 2026-09-28, see gmail.go's sendMessageSchema doc comment for the full
+// story.
+func CombinedAssetHash() (string, error) {
+	var buf strings.Builder
+	for _, name := range []string{AssetHeader, AssetKoi, AssetGlass} {
+		h, err := AssetHash(name)
+		if err != nil {
+			return "", err
+		}
+		buf.WriteString(name)
+		buf.WriteByte('=')
+		buf.WriteString(h)
+		buf.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(buf.String()))
 	return hex.EncodeToString(sum[:]), nil
 }
 

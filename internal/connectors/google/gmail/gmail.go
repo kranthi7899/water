@@ -136,7 +136,7 @@ func (*Gmail) Functions() []connectors.Function {
 			Level:       twins.A,
 			Risk:        connectors.RiskHigh,
 			External:    false,
-			Schema:      writeMessageSchema,
+			Schema:      sendMessageSchema,
 		},
 		{
 			Name:        "draft_for_review",
@@ -164,6 +164,41 @@ var writeMessageSchema = connectors.Schema{
 			"when an earlier call was refused because the domain looks like a misheard one (e.g. close to gmail.com); an approval then still needs a tap"},
 	},
 	Required: []string{"to", "subject", "body"},
+}
+
+// sendMessageSchema is send_message's own schema, not shared with
+// draft_message/draft_for_review: writeMessageSchema's properties plus the
+// three brand payload-hash fields addBrandPayloadFields
+// (internal/gateway/brand_payload.go) adds to every gmail.send_message
+// envelope before it is proposed (docs/slices/BRAND.md task 9).
+//
+// Found live (2026-09-28, the owner's real test send): the gate re-hashes
+// the exact args a claimed envelope executes with and refuses unless that
+// hash equals the envelope's own PayloadHash (internal/approvals/queue.go's
+// Claim) -- an intentional, load-bearing invariant ("an approval covers
+// exactly what you saw"), not a bug. That means these three keys MUST
+// reach Schema.Validate as part of the same, unmodified payload that was
+// hashed at Propose time; stripping them before execution (tried first,
+// reverted) makes the executed args hash differently from the approved
+// envelope and the gate correctly refuses that as "payload changed after
+// approval." So they have to be declared here instead. None of them are
+// ever read by Invoke below -- they exist only so this schema accepts them
+// and PayloadHash covers them, nothing else. asset_hashes is a single
+// combined string (brand.CombinedAssetHash), not a map, because
+// connectors.Property's Type has no "object" case
+// (internal/connectors/schema.go) to declare a map with.
+var sendMessageSchema = connectors.Schema{
+	Properties: map[string]connectors.Property{
+		"to":                        writeMessageSchema.Properties["to"],
+		"subject":                   writeMessageSchema.Properties["subject"],
+		"body":                      writeMessageSchema.Properties["body"],
+		"html_attachment":           writeMessageSchema.Properties["html_attachment"],
+		"confirm_unusual_recipient": writeMessageSchema.Properties["confirm_unusual_recipient"],
+		"template_version":          {Type: "string", Description: "internal/brand.TemplateVersion at propose time; hash coverage only, never read"},
+		"signature_hash":            {Type: "string", Description: "hash of the loaded brand signature at propose time; hash coverage only, never read"},
+		"asset_hashes":              {Type: "string", Description: "combined hash of the header/koi/glass-band assets at propose time; hash coverage only, never read"},
+	},
+	Required: writeMessageSchema.Required,
 }
 
 // message is the JSON shape Invoke returns and Normalize reads back, shared

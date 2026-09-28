@@ -8,12 +8,6 @@ import (
 	"water/internal/brand"
 )
 
-// brandPayloadAssets is the fixed set of embedded assets every rendered
-// email references (internal/brand.AssetHeader/AssetKoi/AssetGlass) --
-// asset_hashes always covers exactly these three, in this order, never a
-// caller-chosen subset.
-var brandPayloadAssets = []string{brand.AssetHeader, brand.AssetKoi, brand.AssetGlass}
-
 // addBrandPayloadFields adds template_version, signature_hash and
 // asset_hashes to payload before a gmail.send_message envelope is proposed
 // (docs/slices/BRAND.md task 9, the shared foundation's item 3: "the
@@ -25,6 +19,17 @@ var brandPayloadAssets = []string{brand.AssetHeader, brand.AssetKoi, brand.Asset
 // bumping brand.TemplateVersion, or changing one of the three embedded
 // assets changes one of these values, which changes PayloadHash, which
 // voids any approval already proposed with the old value, by construction.
+//
+// These three keys are real, if functionally unused, gmail.send_message
+// arguments now (gmail.go's sendMessageSchema), not stripped before
+// execution -- found live (2026-09-28) that stripping them broke a more
+// fundamental invariant: the gate re-hashes the exact args a claimed
+// envelope executes with and refuses unless that equals the envelope's own
+// PayloadHash (Claim's "an approval covers exactly what you saw" check), so
+// whatever gets hashed at Propose time must reach the connector completely
+// unmodified at execute time. asset_hashes is brand.CombinedAssetHash(), a
+// single string, not a per-asset map, because connectors.Property has no
+// "object" type to declare a map with (internal/connectors/schema.go).
 //
 // fsys is the embedded tree to load twins/<twinID>/brand/signature.yaml
 // from -- every real call site passes water.TwinsFS() (see
@@ -70,17 +75,13 @@ func addBrandPayloadFields(fsys fs.FS, twinID string, payload map[string]any) (m
 	if err != nil {
 		return nil, err
 	}
-	assetHashes := make(map[string]string, len(brandPayloadAssets))
-	for _, name := range brandPayloadAssets {
-		h, err := brand.AssetHash(name)
-		if err != nil {
-			return nil, err
-		}
-		assetHashes[name] = h
+	assetHash, err := brand.CombinedAssetHash()
+	if err != nil {
+		return nil, err
 	}
 	payload["template_version"] = brand.TemplateVersion
 	payload["signature_hash"] = sigHash
-	payload["asset_hashes"] = assetHashes
+	payload["asset_hashes"] = assetHash
 	return payload, nil
 }
 

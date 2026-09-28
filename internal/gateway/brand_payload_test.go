@@ -116,20 +116,15 @@ func TestAddBrandPayloadFields_AssetEditChangesPayloadHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assets, ok := payload["asset_hashes"].(map[string]string)
-	if !ok || len(assets) != 3 {
-		t.Fatalf("asset_hashes = %#v, want a 3-entry map", payload["asset_hashes"])
+	assets, ok := payload["asset_hashes"].(string)
+	if !ok || assets == "" {
+		t.Fatalf("asset_hashes = %#v, want a non-empty combined hash string", payload["asset_hashes"])
 	}
 	edited := map[string]any{}
 	for k, v := range payload {
 		edited[k] = v
 	}
-	editedAssets := map[string]string{}
-	for k, v := range assets {
-		editedAssets[k] = v
-	}
-	editedAssets["water-koi"] = "0000000000000000000000000000000000000000000000000000000000000000"
-	edited["asset_hashes"] = editedAssets
+	edited["asset_hashes"] = "0000000000000000000000000000000000000000000000000000000000000000"
 
 	hashOriginal, err := approvals.PayloadHash(payload)
 	if err != nil {
@@ -276,17 +271,79 @@ func TestSubmitDraftForRealCEOTwinCarriesBrandFields(t *testing.T) {
 	if pl["signature_hash"] != wantSigHash {
 		t.Fatalf("signature_hash = %v, want %v", pl["signature_hash"], wantSigHash)
 	}
-	assets, ok := pl["asset_hashes"].(map[string]any)
-	if !ok || len(assets) != 3 {
-		t.Fatalf("asset_hashes = %#v, want a 3-entry map", pl["asset_hashes"])
+	wantAssetHash, err := brand.CombinedAssetHash()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range []string{brand.AssetHeader, brand.AssetKoi, brand.AssetGlass} {
-		want, err := brand.AssetHash(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if assets[name] != want {
-			t.Fatalf("asset_hashes[%q] = %v, want %v", name, assets[name], want)
-		}
+	if pl["asset_hashes"] != wantAssetHash {
+		t.Fatalf("asset_hashes = %v, want %v", pl["asset_hashes"], wantAssetHash)
+	}
+}
+
+// TestApprovedGmailSendWithBrandFieldsActuallyExecutes is a real bug found
+// and fixed during review (2026-09-28), not a hypothetical: every test
+// above proves the brand payload fields reach a *proposed* envelope, but
+// none of them ever approved and executed one, so nothing caught that the
+// gate's Schema.Validate (internal/connectors/schema.go) refuses any key a
+// function's schema doesn't declare. The owner's own real test send hit
+// this live: the approval read back correctly (showing asset_hashes/
+// signature_hash/template_version, proving the payload extension worked),
+// but deciding "yes" came back "denied by gate: gmail.send_message:
+// unexpected argument \"asset_hashes\"" -- the email never sent. A first
+// fix attempt (stripping the three keys before execution) made things
+// worse in a subtler way: it broke Claim's "an approval covers exactly
+// what you saw" re-hash check, since the executed args then hashed
+// differently from the approved envelope ("payload changed after
+// approval"). The real fix is gmail.go's sendMessageSchema, which declares
+// all three as real (if functionally unused) string arguments, so the
+// exact payload that was hashed at Propose time reaches Schema.Validate
+// and Claim unmodified at execute time. This test
+// proves the full propose -> approve -> execute path now actually works,
+// not just that the payload gets built correctly.
+func TestApprovedGmailSendWithBrandFieldsActuallyExecutes(t *testing.T) {
+	h := newCEODraftHarness(t)
+	ctx := context.Background()
+	d, err := h.st.CreateDraft(ctx, store.Draft{Template: "reply", To: "a@x.com", Subject: "s", Body: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := h.post(t, "/v1/drafts/"+d.ID+"/submit", `{"to":"a@x.com","subject":"s","body":"b"}`, h.token)
+	var proposed struct {
+		Envelope struct {
+			ID          string `json:"id"`
+			PayloadHash string `json:"payload_hash"`
+			Payload     struct {
+				AssetHashes string `json:"asset_hashes"`
+			} `json:"payload"`
+		} `json:"envelope"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&proposed); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if proposed.Envelope.Payload.AssetHashes == "" {
+		t.Fatalf("proposed envelope missing asset_hashes, got %+v -- test setup didn't reproduce the real condition", proposed.Envelope.Payload)
+	}
+
+	decideBody, err := json.Marshal(map[string]string{"payload_hash": proposed.Envelope.PayloadHash, "reply": "yes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dResp := h.post(t, "/v1/approvals/"+proposed.Envelope.ID+"/decision", string(decideBody), h.token)
+	defer dResp.Body.Close()
+	var decided struct {
+		Executed bool   `json:"executed"`
+		Error    string `json:"error"`
+		Envelope struct {
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		} `json:"envelope"`
+	}
+	if err := json.NewDecoder(dResp.Body).Decode(&decided); err != nil {
+		t.Fatal(err)
+	}
+	if !decided.Executed || decided.Envelope.Status != "executed" {
+		t.Fatalf("approved gmail.send_message with brand payload fields was not executed: status=%q reason=%q error=%q",
+			decided.Envelope.Status, decided.Envelope.Reason, decided.Error)
 	}
 }

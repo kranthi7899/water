@@ -62,11 +62,28 @@ func (*fakeGmail) Functions() []connectors.Function {
 		"subject": {Type: "string"},
 		"body":    {Type: "string"},
 	}}
+	// sendMsg mirrors gmail.go's real sendMessageSchema: send_message's own
+	// schema, not shared with draft_message/draft_for_review, declaring the
+	// three brand payload-hash fields addBrandPayloadFields adds (real,
+	// functionally unused string arguments -- see gmail.go's sendMessageSchema
+	// doc comment for why they have to be declared rather than stripped).
+	// Kept in sync with the real connector by hand since a fake can't import
+	// the real one's unexported var; TestApprovedGmailSendWithBrandFields
+	// ActuallyExecutes is what would catch this drifting.
+	sendMsg := connectors.Schema{Properties: map[string]connectors.Property{
+		"to":               msg.Properties["to"],
+		"cc":               msg.Properties["cc"],
+		"subject":          msg.Properties["subject"],
+		"body":             msg.Properties["body"],
+		"template_version": {Type: "string"},
+		"signature_hash":   {Type: "string"},
+		"asset_hashes":     {Type: "string"},
+	}}
 	return []connectors.Function{
 		{Name: "list_messages", Level: twins.R, Risk: connectors.RiskLow, Activity: "Searching your email"},
 		{Name: "draft_message", Level: twins.D, Risk: connectors.RiskLow, Activity: "Drafting an email", Schema: msg},
 		{Name: "draft_for_review", Level: twins.D, Risk: connectors.RiskLow, Activity: "Drafting an email for you to review", Schema: msg},
-		{Name: "send_message", Level: twins.A, Risk: connectors.RiskHigh, Activity: "Preparing an email to send", Schema: msg},
+		{Name: "send_message", Level: twins.A, Risk: connectors.RiskHigh, Activity: "Preparing an email to send", Schema: sendMsg},
 	}
 }
 func (g *fakeGmail) Invoke(_ context.Context, p permit.Permit) (json.RawMessage, error) {
