@@ -50,10 +50,14 @@ func turnArtifact(fn string, args map[string]any, output json.RawMessage) *runti
 // never hidden" posture docs/slices/UI.md §4 invariant 8 already keeps for
 // the decision card's own simulated signals).
 //
-// As of Phase 6 no connector sets relay: true yet -- Phase 7 (U4) is where
-// linear.create_comment is built to add it -- so this prefix and
-// noteArtifact are exercised today only by tests with a synthetic result;
-// the mechanism is real and connector-agnostic, waiting for a producer.
+// linear.create_comment (internal/connectors/linear, U4, 2026-09-28) is now
+// the first real producer: every successful comment it posts sets
+// relay: true (worth surfacing as a note, same as a drafted email already
+// is), and Simulated only lights up for the specific call that set
+// simulated_relay: true, since that's the only path whose body carries this
+// exact prefix. It has its own identical copy of this string (there is no
+// shared import between the two packages) -- see that package's own doc
+// comment on why they must stay in sync.
 const relayedCommentPrefix = "(simulated) Relayed:"
 
 // noteArtifact builds a note artifact from a tool result's own JSON output,

@@ -180,6 +180,35 @@ query Issues($first: Int!, $after: String) {
   }
 }`
 
+// resolveIssueQuery resolves a human-readable identifier (e.g. "CRA-3") to
+// the internal UUID create_comment/set_issue_priority's mutations need --
+// Linear's `issue(id: ...)` query accepts either form, confirmed live
+// against the owner's real workspace (2026-09-27, read-only), but the two
+// write mutations below are only verified against Linear's documented
+// schema to require the UUID, so this resolution step runs first for both.
+const resolveIssueQuery = `
+query ResolveIssue($id: String!) {
+  issue(id: $id) { id identifier url }
+}`
+
+// createCommentMutation is docs/slices/UI.md U4's linear.create_comment.
+const createCommentMutation = `
+mutation CreateComment($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment { id url }
+  }
+}`
+
+// setPriorityMutation is docs/slices/UI.md U4's linear.set_issue_priority.
+const setPriorityMutation = `
+mutation SetPriority($id: String!, $priority: Int!) {
+  issueUpdate(id: $id, input: { priority: $priority }) {
+    success
+    issue { id identifier priority }
+  }
+}`
+
 func priorityLabel(p float64) string {
 	switch int(p) {
 	case 1:
@@ -192,6 +221,27 @@ func priorityLabel(p float64) string {
 		return "Low"
 	default:
 		return "No priority"
+	}
+}
+
+// priorityRank is priorityLabel's inverse, for set_issue_priority's input:
+// a case-insensitive match against the exact five labels priorityLabel
+// produces. ok is false for anything else, so a bad or misspelled label
+// refuses cleanly rather than silently landing on "No priority".
+func priorityRank(label string) (int, bool) {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "urgent":
+		return 1, true
+	case "high":
+		return 2, true
+	case "medium":
+		return 3, true
+	case "low":
+		return 4, true
+	case "no priority":
+		return 0, true
+	default:
+		return 0, false
 	}
 }
 
@@ -231,6 +281,40 @@ func (*Linear) Functions() []connectors.Function {
 				},
 			},
 		},
+		{
+			Name:        "create_comment",
+			Description: "Post a comment on a Linear issue. This has an external effect (visible to the team) and cannot be undone.",
+			Activity:    "Commenting on a Linear issue",
+			Level:       twins.A,
+			Risk:        connectors.RiskMedium,
+			External:    false,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{
+					"issue": {Type: "string", Description: "issue identifier, e.g. \"CRA-3\""},
+					"body":  {Type: "string", Description: "comment text"},
+					"simulated_relay": {Type: "boolean", Description: "mark this comment as a simulated stand-in for a reply " +
+						"from someone with no real connector yet (e.g. a chat platform water doesn't integrate with). When true, " +
+						"the connector itself enforces a fixed \"(simulated) Relayed:\" prefix on the posted body -- this cannot " +
+						"be set or spoofed by the model's own wording, only by this flag."},
+				},
+				Required: []string{"issue", "body"},
+			},
+		},
+		{
+			Name:        "set_issue_priority",
+			Description: "Change a Linear issue's priority. This has an external effect (visible to the team) and cannot be undone.",
+			Activity:    "Updating a Linear issue's priority",
+			Level:       twins.A,
+			Risk:        connectors.RiskMedium,
+			External:    false,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{
+					"issue":    {Type: "string", Description: "issue identifier, e.g. \"CRA-3\""},
+					"priority": {Type: "string", Description: "one of: Urgent, High, Medium, Low, No priority"},
+				},
+				Required: []string{"issue", "priority"},
+			},
+		},
 	}
 }
 
@@ -243,17 +327,28 @@ func (l *Linear) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, 
 	if err != nil {
 		return nil, err
 	}
-	if v.Function != "list_issues" {
-		return nil, fmt.Errorf("linear: unknown function %q", v.Function)
-	}
 	cl, err := l.client(v.Credential)
 	if err != nil {
 		return nil, fmt.Errorf("linear: %w; run `water connect linear --token <KEY>`", err)
 	}
+	switch v.Function {
+	case "list_issues":
+		return l.listIssues(ctx, cl, v.Args)
+	case "create_comment":
+		return l.createComment(ctx, cl, v.Args)
+	case "set_issue_priority":
+		return l.setIssuePriority(ctx, cl, v.Args)
+	default:
+		return nil, fmt.Errorf("linear: unknown function %q", v.Function)
+	}
+}
 
-	query := strings.ToLower(tokenapi.ArgString(v.Args, "query"))
-	status := strings.ToLower(tokenapi.ArgString(v.Args, "status"))
-	project := strings.ToLower(tokenapi.ArgString(v.Args, "project"))
+// listIssues is list_issues' implementation, called directly by tests and
+// by Invoke's dispatch above.
+func (l *Linear) listIssues(ctx context.Context, cl *tokenapi.Client, args map[string]any) (json.RawMessage, error) {
+	query := strings.ToLower(tokenapi.ArgString(args, "query"))
+	status := strings.ToLower(tokenapi.ArgString(args, "status"))
+	project := strings.ToLower(tokenapi.ArgString(args, "project"))
 
 	var out []Issue
 	after := ""
@@ -297,6 +392,186 @@ func (l *Linear) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, 
 		out = []Issue{}
 	}
 	return json.Marshal(out)
+}
+
+// relayedCommentPrefix must match internal/gateway/artifact.go's own
+// unexported copy of the same string exactly: that package derives a note
+// artifact's Simulated badge purely by checking whether a tool result's
+// body starts with this text, so the two constants have to agree even
+// though they live in different packages with no shared import between
+// them. docs/slices/UI.md U4: "a relayed comment must start with a
+// code-added '(simulated) Relayed:' prefix, enforced in the connector, not
+// the prompt."
+const relayedCommentPrefix = "(simulated) Relayed:"
+
+// resolveIssueResponse is resolveIssueQuery's wire shape.
+type resolveIssueResponse struct {
+	Data struct {
+		Issue *struct {
+			ID         string `json:"id"`
+			Identifier string `json:"identifier"`
+			URL        string `json:"url"`
+		} `json:"issue"`
+	} `json:"data"`
+	Errors []gqlError `json:"errors"`
+}
+
+type gqlError struct {
+	Message string `json:"message"`
+}
+
+// resolveIssue resolves a human-readable identifier (e.g. "CRA-3") to its
+// internal id/url, shared by createComment and setIssuePriority. A missing
+// or unknown issue refuses with a clear error rather than a nil-pointer
+// panic or a mutation call against an empty id.
+func (l *Linear) resolveIssue(ctx context.Context, cl *tokenapi.Client, identifier string) (id, resolvedIdentifier, url string, err error) {
+	if identifier == "" {
+		return "", "", "", fmt.Errorf("linear: issue is required")
+	}
+	var resp resolveIssueResponse
+	if _, err := cl.PostJSON(ctx, endpoint, map[string]string{"Content-Type": "application/json"}, map[string]any{
+		"query":     resolveIssueQuery,
+		"variables": map[string]any{"id": identifier},
+	}, &resp); err != nil {
+		return "", "", "", fmt.Errorf("linear: %w", err)
+	}
+	if len(resp.Errors) > 0 {
+		return "", "", "", fmt.Errorf("linear: %s", resp.Errors[0].Message)
+	}
+	if resp.Data.Issue == nil {
+		return "", "", "", fmt.Errorf("linear: no such issue %q", identifier)
+	}
+	return resp.Data.Issue.ID, resp.Data.Issue.Identifier, resp.Data.Issue.URL, nil
+}
+
+// createCommentOutput is create_comment's JSON output. Relay, Title, Body
+// and Source match internal/gateway/artifact.go's noteArtifact contract
+// exactly (docs/slices/UI.md Phase 6, U1-A): Relay is always true on a
+// successful post (every comment this connector makes is worth surfacing
+// as a note in the Activity HUD, same as a drafted email already is), and
+// Simulated is derived downstream purely from whether Body starts with
+// relayedCommentPrefix -- never trusted from a field this connector sets.
+type createCommentOutput struct {
+	ID     string `json:"id"`
+	Issue  string `json:"issue"`
+	URL    string `json:"url"`
+	Body   string `json:"body"`
+	Relay  bool   `json:"relay"`
+	Title  string `json:"title"`
+	Source string `json:"source"`
+}
+
+type createCommentResponse struct {
+	Data struct {
+		CommentCreate struct {
+			Success bool `json:"success"`
+			Comment struct {
+				ID  string `json:"id"`
+				URL string `json:"url"`
+			} `json:"comment"`
+		} `json:"commentCreate"`
+	} `json:"data"`
+	Errors []gqlError `json:"errors"`
+}
+
+// createComment is create_comment's implementation, called directly by
+// tests and by Invoke's dispatch above.
+func (l *Linear) createComment(ctx context.Context, cl *tokenapi.Client, args map[string]any) (json.RawMessage, error) {
+	identifier := tokenapi.ArgString(args, "issue")
+	body := strings.TrimSpace(tokenapi.ArgString(args, "body"))
+	if body == "" {
+		return nil, fmt.Errorf("linear: body is required")
+	}
+	simulatedRelay, _ := args["simulated_relay"].(bool)
+	if simulatedRelay {
+		// Strip any prefix-like text the caller (ultimately a model call)
+		// supplied before prepending the canonical one fresh, so the
+		// caller can never smuggle a different, near-miss or absent
+		// prefix past the note artifact's Simulated check downstream.
+		body = strings.TrimSpace(strings.TrimPrefix(body, relayedCommentPrefix))
+		body = relayedCommentPrefix + " " + body
+	}
+
+	issueID, resolvedIdentifier, issueURL, err := l.resolveIssue(ctx, cl, identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp createCommentResponse
+	if _, err := cl.PostJSON(ctx, endpoint, map[string]string{"Content-Type": "application/json"}, map[string]any{
+		"query":     createCommentMutation,
+		"variables": map[string]any{"issueId": issueID, "body": body},
+	}, &resp); err != nil {
+		return nil, fmt.Errorf("linear: %w", err)
+	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("linear: %s", resp.Errors[0].Message)
+	}
+	if !resp.Data.CommentCreate.Success {
+		return nil, fmt.Errorf("linear: comment was not created")
+	}
+
+	return json.Marshal(createCommentOutput{
+		ID:     resp.Data.CommentCreate.Comment.ID,
+		Issue:  resolvedIdentifier,
+		URL:    resp.Data.CommentCreate.Comment.URL,
+		Body:   body,
+		Relay:  true,
+		Title:  fmt.Sprintf("Comment on %s", resolvedIdentifier),
+		Source: issueURL,
+	})
+}
+
+// setIssuePriorityOutput is set_issue_priority's JSON output.
+type setIssuePriorityOutput struct {
+	Issue    string `json:"issue"`
+	Priority string `json:"priority"`
+	URL      string `json:"url"`
+}
+
+type setPriorityResponse struct {
+	Data struct {
+		IssueUpdate struct {
+			Success bool `json:"success"`
+		} `json:"issueUpdate"`
+	} `json:"data"`
+	Errors []gqlError `json:"errors"`
+}
+
+// setIssuePriority is set_issue_priority's implementation, called directly
+// by tests and by Invoke's dispatch above.
+func (l *Linear) setIssuePriority(ctx context.Context, cl *tokenapi.Client, args map[string]any) (json.RawMessage, error) {
+	identifier := tokenapi.ArgString(args, "issue")
+	label := tokenapi.ArgString(args, "priority")
+	rank, ok := priorityRank(label)
+	if !ok {
+		return nil, fmt.Errorf("linear: priority %q is not one of Urgent, High, Medium, Low, No priority", label)
+	}
+
+	issueID, resolvedIdentifier, issueURL, err := l.resolveIssue(ctx, cl, identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp setPriorityResponse
+	if _, err := cl.PostJSON(ctx, endpoint, map[string]string{"Content-Type": "application/json"}, map[string]any{
+		"query":     setPriorityMutation,
+		"variables": map[string]any{"id": issueID, "priority": rank},
+	}, &resp); err != nil {
+		return nil, fmt.Errorf("linear: %w", err)
+	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("linear: %s", resp.Errors[0].Message)
+	}
+	if !resp.Data.IssueUpdate.Success {
+		return nil, fmt.Errorf("linear: issue priority was not updated")
+	}
+
+	return json.Marshal(setIssuePriorityOutput{
+		Issue:    resolvedIdentifier,
+		Priority: priorityLabel(float64(rank)),
+		URL:      issueURL,
+	})
 }
 
 // matchesAny reports whether any whitespace-separated word of query appears
