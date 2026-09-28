@@ -27,7 +27,21 @@ import (
 // ProposeAction because a write intent's action is level A by construction
 // (internal/nervous/intents.checkAction only ever marks a write intent
 // RequiresApproval when its granted level is A).
-func proposeEnvelope(ctx context.Context, reg *connectors.Registry, aq *approvals.Queue, fn string, payload map[string]any, origin gate.Origin) (approvals.Envelope, error) {
+//
+// twinID is passed through to addBrandPayloadFields for a
+// "gmail.send_message" fn only (docs/slices/BRAND.md task 9): this is the
+// choke point for both the model's own direct tool call
+// (handleToolInvoke) and a sous-chef write intent (ProposeAction), so
+// wiring it in here covers every gmail.send_message envelope either of
+// those two flows proposes, without either caller having to remember to.
+func proposeEnvelope(ctx context.Context, reg *connectors.Registry, aq *approvals.Queue, twinID, fn string, payload map[string]any, origin gate.Origin) (approvals.Envelope, error) {
+	if fn == "gmail.send_message" {
+		var err error
+		payload, err = addBrandPayloadFieldsForTwin(twinID, payload)
+		if err != nil {
+			return approvals.Envelope{}, err
+		}
+	}
 	return aq.Propose(ctx, approvals.Envelope{
 		Action: fn, Payload: payload, Origin: string(origin), Risk: string(functionRisk(reg, fn)),
 	})
@@ -52,7 +66,7 @@ func (d *Daemon) ProposeAction(ctx context.Context, fn string, payload map[strin
 	if f.Level != twins.A {
 		return approvals.Envelope{}, fmt.Errorf("sous proposals must be level A, %s is level %s", fn, f.Level)
 	}
-	return proposeEnvelope(ctx, d.cfg.Registry, d.cfg.Approvals, fn, payload, gate.P0)
+	return proposeEnvelope(ctx, d.cfg.Registry, d.cfg.Approvals, d.cfg.Manifest.ID, fn, payload, gate.P0)
 }
 
 // approvedExecTimeout bounds one approved action's execution, which runs

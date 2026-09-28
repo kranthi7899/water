@@ -289,6 +289,12 @@ func (d *Daemon) handleRequestChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]any{"to": []string{addr}, "subject": "Changes requested", "body": note}
+	// docs/slices/BRAND.md task 9 (see internal/gateway/brand_payload.go).
+	payload, err = addBrandPayloadFieldsForTwin(d.cfg.Manifest.ID, payload)
+	if err != nil {
+		http.Error(w, "preparing the email's brand fields failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	env, err := d.cfg.Approvals.Propose(ctx, approvals.Envelope{
 		Action: "gmail.send_message", Payload: payload, Origin: string(gate.P0),
 		Risk: string(functionRisk(d.cfg.Registry, "gmail.send_message")),

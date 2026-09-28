@@ -561,6 +561,71 @@
       h('span', null, 'Requested by ' + name));
   }
 
+  // srcdoc-preview:start -- see internal/webui/webui_test.go's
+  // srcdocPreviewSpan for the one, narrow exception this authorizes: only
+  // the text between this marker and its matching "srcdoc-preview:end"
+  // below, and only in this file, may use the word "srcdoc". Every other
+  // occurrence anywhere in the shipped UI stays flagged, exactly as before.
+  //
+  // emailPreviewSection is docs/slices/BRAND.md task 8's addition to a
+  // gmail.send_message approval card, placed alongside the existing payload
+  // display (which keeps showing the raw "body" field exactly as before --
+  // this section never replaces or hides it): a small note that the header
+  // and signature Water's brand template adds aren't in that raw body, plus
+  // a lazy "Preview full email" control. The button fetches the actual
+  // brand-templated HTML on click (GET .../email_preview -- the same
+  // internal/brand.RenderEmail call the send path itself makes) and shows
+  // it inside a sandboxed <iframe>:
+  //   - sandbox="" (the attribute present with an empty token list) grants
+  //     none of allow-scripts/allow-same-origin/allow-popups/allow-forms/
+  //     allow-top-navigation -- no script runs, the frame's content is
+  //     treated as an opaque origin, and it cannot submit a form, open a
+  //     popup or navigate the page.
+  //   - srcdoc, never src: the HTML is handed to the browser directly, so
+  //     this frame never becomes a same-origin request the server has to
+  //     answer, and it never touches window.appShared/api's own origin.
+  //   - the server-side CSP the returned HTML already carries (img-src
+  //     'none', default-src 'none' -- see approval_email_preview.go's
+  //     previewCSP) is the second, independent layer: sandbox alone does
+  //     not stop a resource fetch, only script/navigation/form actions, so
+  //     the template's cid: images fail closed by policy rather than
+  //     merely because cid: isn't a fetchable scheme in a browser.
+  // The frame is built with plain document.createElement/property
+  // assignment, not dom.js's h(): h()'s SAFE_ATTRS allowlist deliberately
+  // excludes sandbox and srcdoc (its own header comment: "nothing here ever
+  // parses a string as markup"), and that guarantee should keep holding for
+  // every other element this UI builds. This is the one, explicit place
+  // that renders a server string as markup, and it does so only inside a
+  // sandboxed iframe, never into this page's own DOM.
+  // Nothing here reads or changes read_back -- that stays exactly the
+  // body-summary text approvals.ReadBack computes server-side.
+  function emailPreviewSection(env) {
+    if (get(env, 'action') !== 'gmail.send_message') return null;
+    const body = h('div');
+    const load = button('Preview full email', async () => {
+      load.disabled = true;
+      try {
+        const res = await api.approvalEmailPreview(get(env, 'id'));
+        const frame = document.createElement('iframe');
+        // Present with an empty token list: none of allow-scripts/
+        // allow-same-origin/allow-popups/allow-forms/allow-top-navigation.
+        frame.setAttribute('sandbox', '');
+        frame.className = 'email-preview-frame';
+        frame.title = 'Full email preview';
+        frame.srcdoc = get(res, 'html') || '';
+        replace(body, frame);
+      } catch (err) {
+        replace(body, errorBox('Could not load the preview', err));
+        load.disabled = false;
+      }
+    });
+    return h('section', { class: 'card-sec' },
+      h('h3', null, 'Email preview'),
+      h('p', { class: 'muted small' }, 'Water header and signature will be added.'),
+      load, body);
+  }
+  // srcdoc-preview:end
+
   // requestChangesForm is the person-request card's inline note field (no
   // modal/dialog library, plain DOM): submitting calls the new
   // request-changes endpoint, which denies the original and proposes a
@@ -690,6 +755,7 @@
           h('h3', null, 'Read-back'),
           h('p', { class: 'muted small' }, 'Written by Water from the exact payload this approval is bound to.'),
           h('div', { class: 'readback' }, get(env, 'read_back') || '')),
+        emailPreviewSection(env),
         warningsBox(env),
         get(env, 'reason') ? h('p', { class: 'muted' }, 'Reason: ' + get(env, 'reason')) : null,
         actions,

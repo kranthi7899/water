@@ -58,6 +58,41 @@ var htmlOnly = []struct {
 	{"<iframe>/<object>/<embed>/<base>", regexp.MustCompile(`(?i)<(iframe|object|embed|base|frame)\b`)},
 }
 
+// srcdocPreviewStart/End bracket the one, narrow, deliberate exception to
+// the "srcdoc" rule below: docs/slices/BRAND.md task 8's approval-card
+// "Preview full email" control (app.js's emailPreviewSection) hands a
+// server-rendered, brand-templated email to a fully sandboxed iframe
+// (sandbox="" -- none of allow-scripts/allow-same-origin/allow-popups/
+// allow-forms/allow-top-navigation) whose own document additionally
+// carries a strict img-src/default-src 'none' CSP the server injects
+// (internal/gateway/approval_email_preview.go's previewCSP); srcdoc is the
+// only way to hand that HTML to a sandboxed frame without it becoming a
+// same-origin fetch the daemon would have to answer unauthenticated. This
+// is a single, explicit, reviewed exception, not a general softening: it
+// requires both a matching pair of markers AND app.js specifically, so
+// "srcdoc" anywhere else in app.js (outside the markers) or in any other
+// shipped file stays flagged exactly as before -- see
+// TestSrcdocExceptionIsNarrow.
+var (
+	srcdocPreviewStart = regexp.MustCompile(`// srcdoc-preview:start`)
+	srcdocPreviewEnd   = regexp.MustCompile(`// srcdoc-preview:end`)
+)
+
+// srcdocPreviewSpan returns the [start,end) byte range app.js's paired
+// srcdoc-preview markers bracket, or -1,-1 when name isn't "app.js" or the
+// markers aren't both present in order.
+func srcdocPreviewSpan(name, src string) (int, int) {
+	if name != "app.js" {
+		return -1, -1
+	}
+	s := srcdocPreviewStart.FindStringIndex(src)
+	e := srcdocPreviewEnd.FindStringIndex(src)
+	if s == nil || e == nil || e[0] < s[1] {
+		return -1, -1
+	}
+	return s[0], e[1]
+}
+
 // violations reports every forbidden construct in one file's content.
 func violations(name string, b []byte) []string {
 	var out []string
@@ -68,7 +103,18 @@ func violations(name string, b []byte) []string {
 			out = append(out, name+":"+strconv.Itoa(line)+": "+rule+": "+strings.TrimSpace(src[loc[0]:loc[1]]))
 		}
 	}
+	spanStart, spanEnd := srcdocPreviewSpan(name, src)
 	for _, f := range forbidden {
+		if f.name == "srcdoc" {
+			for _, loc := range f.re.FindAllStringIndex(src, -1) {
+				if spanStart >= 0 && loc[0] >= spanStart && loc[1] <= spanEnd {
+					continue // the one authorized email-preview exception
+				}
+				line := strings.Count(src[:loc[0]], "\n") + 1
+				out = append(out, name+":"+strconv.Itoa(line)+": "+f.name+": "+strings.TrimSpace(src[loc[0]:loc[1]]))
+			}
+			continue
+		}
 		check(f.name, f.re)
 	}
 	if path.Ext(name) == ".html" {
@@ -160,6 +206,29 @@ func TestScannerCatchesEachForbiddenConstruct(t *testing.T) {
 		if v := violations(name, []byte(src)); len(v) != 0 {
 			t.Errorf("%s: false positive: %v", name, v)
 		}
+	}
+}
+
+// TestSrcdocExceptionIsNarrow proves srcdocPreviewSpan's exception
+// (docs/slices/BRAND.md task 8) covers exactly what it's meant to and
+// nothing more: "srcdoc" between the markers in app.js is allowed, but
+// "srcdoc" outside them (even in app.js), or between an identical pair of
+// markers in any other file, is still flagged.
+func TestSrcdocExceptionIsNarrow(t *testing.T) {
+	marked := "// srcdoc-preview:start\nframe.srcdoc = x;\n// srcdoc-preview:end\n"
+	if v := violations("app.js", []byte(marked)); len(v) != 0 {
+		t.Errorf("app.js inside the markers: false positive: %v", v)
+	}
+	if v := violations("other.js", []byte(marked)); len(v) == 0 {
+		t.Error("other.js inside an identical pair of markers: srcdoc was not flagged, want it still flagged (the exception is app.js-only)")
+	}
+	outside := marked + "\nel.srcdoc = y;\n"
+	v := violations("app.js", []byte(outside))
+	if len(v) != 1 {
+		t.Fatalf("app.js with one use outside the markers: got %d violations, want exactly 1: %v", len(v), v)
+	}
+	if !strings.Contains(v[0], "app.js:5:") {
+		t.Errorf("violation = %q, want it to name line 5 (the out-of-span use)", v[0])
 	}
 }
 

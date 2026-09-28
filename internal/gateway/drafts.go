@@ -174,6 +174,14 @@ func (d *Daemon) handleSubmitDraft(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]any{"to": []string{to}, "subject": subject, "body": msg}
+	// docs/slices/BRAND.md task 9: cover the brand template's inputs in this
+	// envelope's PayloadHash, same as every other gmail.send_message propose
+	// site (internal/gateway/brand_payload.go).
+	payload, err = addBrandPayloadFieldsForTwin(d.cfg.Manifest.ID, payload)
+	if err != nil {
+		http.Error(w, "preparing the email's brand fields failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	env, err := d.cfg.Approvals.Propose(ctx, approvals.Envelope{
 		Action: "gmail.send_message", Payload: payload, Origin: string(gate.P0),
 		Risk:         string(functionRisk(d.cfg.Registry, "gmail.send_message")),

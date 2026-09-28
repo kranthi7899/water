@@ -13,6 +13,7 @@ import (
 	"water/internal/approvals"
 	"water/internal/audit"
 	"water/internal/backend"
+	"water/internal/brand"
 	"water/internal/config"
 	"water/internal/connectors"
 	"water/internal/connectors/display"
@@ -54,6 +55,13 @@ const (
 	realTwinID = "ceo"
 	demoTwinID = "ceo-demo"
 )
+
+// brandSignaturePath is the CEO twin's Water brand signature block
+// (internal/brand.LoadSignature), reused for both realTwinID and
+// demoTwinID's gmail connector: the persona/signature is the same
+// regardless of which fake or real connectors a twin id otherwise gets, and
+// only twins/ceo (not twins/ceo-demo) has a brand/ directory today.
+const brandSignaturePath = "twins/ceo/brand/signature.yaml"
 
 // demoEnvVar is the env-var fallback for --demo, for a shell or launchd
 // context where passing a flag is awkward. Either one selects demoTwinID;
@@ -258,9 +266,22 @@ func buildCEORegistry(id string, st *store.Store, mailAddress, signatureName, gi
 
 // buildCEORegistryModel is buildCEORegistry with the model research.web's
 // subprocess runs on (the twin's fast tier, m.ModelFor(twins.TierFast)).
+//
+// signatureName (config's agent.signature_name) is accepted but no longer
+// used to configure gm: it is retired in this path in favor of
+// twins/ceo/brand/signature.yaml's own Name field (docs/slices/BRAND.md
+// task 5) -- brandSignaturePath, loaded fresh here via brand.LoadSignature,
+// is the one source of "who is signing this email" now. The parameter
+// itself stays (callers still thread cfg.Agent.SignatureName through for
+// unrelated uses, e.g. cmd_doctor.go's health check display) so this is the
+// only line that changes, not every call site's signature.
 func buildCEORegistryModel(id string, st *store.Store, mailAddress, signatureName, githubRepo, researchModel string) (*connectors.Registry, error) {
 	gm := gmail.New(mailAddress)
-	gm.SetSignatureName(signatureName)
+	sig, err := brand.LoadSignature(water.TwinsFS(), brandSignaturePath)
+	if err != nil {
+		return nil, fmt.Errorf("gmail brand signature: %w", err)
+	}
+	gm.SetSignature(sig)
 	cs := []connectors.Connector{gcal.New(), gm, gdrive.New(), agentmail.New(mailAddress),
 		twinlink.NewSender(id, st), twinlink.NewInbox(st), display.New(),
 		research.New(research.CLIRunner{Model: researchModel}), requests.New()}

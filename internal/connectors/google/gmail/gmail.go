@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"water/internal/brand"
 	"water/internal/connectors"
 	"water/internal/connectors/google/gapi"
 	"water/internal/gate/permit"
@@ -52,13 +54,19 @@ var ErrHistoryTooOld = errors.New("gmail: history too old, full resync needed")
 // as" alias (config's agent.mail_address): draft_message/send_message
 // always set MIME From: to this address, never the primary account's own,
 // and never anything an args map supplies (there is no "from" argument).
-// signatureName is config's agent.signature_name (the CEO's name, or ""):
-// it only affects the disclosure line appended to mail actually sent under
-// the agent's identity (see appendSignature), never draft_for_review.
+// signature is the Water brand signature block (loaded from
+// twins/ceo/brand/signature.yaml via internal/brand.LoadSignature, see
+// internal/cli's buildCEORegistryModel): it supplies the Name/Title/
+// Company/Signoff/Links/CTA that internal/brand.RenderEmail renders into
+// the disclosure and signature footer on mail actually sent under the
+// agent's identity (see renderSendBody), never draft_for_review. Config's
+// older agent.signature_name field is retired for this purpose --
+// signature.yaml's Name is now the one source of "who is signing this
+// email" (docs/slices/BRAND.md task 5).
 type Gmail struct {
-	opts          *gapi.Options
-	mailAddress   string
-	signatureName string
+	opts        *gapi.Options
+	mailAddress string
+	signature   *brand.Signature
 }
 
 func New(mailAddress string) *Gmail { return &Gmail{mailAddress: mailAddress} }
@@ -68,12 +76,15 @@ func NewWithOptions(mailAddress string, o *gapi.Options) *Gmail {
 	return &Gmail{mailAddress: mailAddress, opts: o}
 }
 
-// SetSignatureName sets the name used in the disclosure line appended to
-// mail sent under the agent's identity (config's agent.signature_name), and
-// returns g so it can be chained onto New/NewWithOptions. Left unset (""),
-// the line omits the name clause rather than inventing a placeholder.
-func (g *Gmail) SetSignatureName(name string) *Gmail {
-	g.signatureName = name
+// SetSignature sets the brand signature block used to render the
+// disclosure/signature footer on mail sent or drafted under the agent's
+// identity (draft_message, send_message), and returns g so it can be
+// chained onto New/NewWithOptions. Left unset (nil), those two functions
+// refuse to send rather than silently omitting the signature -- see
+// readMessageArgs. draft_for_review never reads this: that draft must read
+// as the CEO's own unedited writing, byte for byte.
+func (g *Gmail) SetSignature(sig *brand.Signature) *Gmail {
+	g.signature = sig
 	return g
 }
 
@@ -512,12 +523,15 @@ type writeMessageOutput struct {
 }
 
 func (g *Gmail) draftMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
-	to, subject, body, html, err := g.readMessageArgs(args)
+	to, subject, body, htmlAttachment, err := g.readMessageArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	body, html = appendSignature(body, html, g.signatureName)
-	raw, err := buildRawMessage(g.mailAddress, to, subject, body, html)
+	textOut, htmlOut, err := g.renderSendBody(body, htmlAttachment)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage(g.mailAddress, to, subject, textOut, htmlOut)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +546,7 @@ func (g *Gmail) draftMessage(ctx context.Context, cl *gapi.Client, args map[stri
 	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/drafts", nil, payload, &resp); err != nil {
 		return nil, err
 	}
-	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, From: g.mailAddress, To: to, Subject: subject, Body: body})
+	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, From: g.mailAddress, To: to, Subject: subject, Body: textOut})
 }
 
 // draftForReview serves the "draft into your own account, as yourself" mode:
@@ -574,12 +588,15 @@ func (g *Gmail) draftForReview(ctx context.Context, cl *gapi.Client, args map[st
 // a generic error, so a caller can errors.Is it and surface "uncertain,
 // check Sent folder" instead of assuming success or retrying on its own.
 func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
-	to, subject, body, html, err := g.readMessageArgs(args)
+	to, subject, body, htmlAttachment, err := g.readMessageArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	body, html = appendSignature(body, html, g.signatureName)
-	raw, err := buildRawMessage(g.mailAddress, to, subject, body, html)
+	textOut, htmlOut, err := g.renderSendBody(body, htmlAttachment)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage(g.mailAddress, to, subject, textOut, htmlOut)
 	if err != nil {
 		return nil, err
 	}
@@ -591,7 +608,7 @@ func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[strin
 	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/messages/send", nil, payload, &resp); err != nil {
 		return nil, err
 	}
-	return json.Marshal(writeMessageOutput{ID: resp.ID, ThreadID: resp.ThreadID, From: g.mailAddress, To: to, Subject: subject, Body: body})
+	return json.Marshal(writeMessageOutput{ID: resp.ID, ThreadID: resp.ThreadID, From: g.mailAddress, To: to, Subject: subject, Body: textOut})
 }
 
 // readMessageArgs reads to/subject/body/html_attachment from args for the
@@ -605,6 +622,9 @@ func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[strin
 func (g *Gmail) readMessageArgs(args map[string]any) (to []string, subject, body, html string, err error) {
 	if g.mailAddress == "" {
 		return nil, "", "", "", errors.New("gmail: agent.mail_address is not configured; verify the agent's Gmail alias and set it before sending")
+	}
+	if g.signature == nil {
+		return nil, "", "", "", errors.New("gmail: no brand signature configured; twins/ceo/brand/signature.yaml must load before sending (see Gmail.SetSignature)")
 	}
 	return g.readWriteArgs(args)
 }
@@ -636,38 +656,38 @@ func (g *Gmail) readWriteArgs(args map[string]any) (to []string, subject, body, 
 	return to, gapi.ArgString(args, "subject"), gapi.ArgString(args, "body"), gapi.ArgString(args, "html_attachment"), nil
 }
 
-// plainSignature and htmlSignature build the disclosure line appended to
-// mail actually sent under the agent's own identity: send_message (which
-// leaves as the agent) and draft_message (which will eventually be sent as
-// the agent too). name is config's agent.signature_name; when empty the
-// line omits the "on behalf of" clause rather than inventing a placeholder
-// name. draft_for_review must never call either of these -- that draft is
-// meant to read as the CEO's own unedited writing.
-func plainSignature(name string) string {
-	if name == "" {
-		return "\n\n---\nSent by Water, an AI assistant — approved before sending."
+// renderSendBody turns a model-drafted body (plus an optional caller
+// pre-rendered HTML alternative) into the final plain-text and HTML parts
+// send_message/draft_message hand to buildRawMessage. This is the send
+// path's one connection point into internal/brand: body is closer-stripped
+// (stripCloser, closer.go) and sanitized to the brand template's allowlist
+// (sanitizeBody, sanitize.go) exactly once, then rendered through
+// brand.RenderEmail with g.signature -- so the signature block and
+// disclosure line come from the brand template exactly once, never from
+// the retired appendSignature/plainSignature/htmlSignature mechanism (no
+// double disclosure). draft_for_review never calls this: that draft must
+// read as the CEO's own unedited writing, byte for byte.
+//
+// htmlAttachment, when non-empty, is a caller pre-rendered HTML document
+// (e.g. internal/gateway's decision-card report, card.HTMLReport via
+// html_attachment) -- it is not model-drafted free text, so running it
+// through the body allowlist would mangle it; it is used verbatim as the
+// HTML alternative instead of RenderEmail's own template output. The
+// plain-text alternative still always carries the brand signature and
+// disclosure from RenderEmail, regardless of htmlAttachment.
+func (g *Gmail) renderSendBody(body, htmlAttachment string) (textOut, htmlOut string, err error) {
+	if g.signature == nil {
+		return "", "", errors.New("gmail: no brand signature configured; twins/ceo/brand/signature.yaml must load before sending")
 	}
-	return fmt.Sprintf("\n\n---\nSent by Water, an AI assistant, on behalf of %s — approved before sending.", name)
-}
-
-func htmlSignature(name string) string {
-	text := "Sent by Water, an AI assistant — approved before sending."
-	if name != "" {
-		text = fmt.Sprintf("Sent by Water, an AI assistant, on behalf of %s — approved before sending.", name)
+	sanitized := sanitizeBody(stripCloser(body))
+	htmlOut, textOut, err = brand.RenderEmail(sanitized, *g.signature)
+	if err != nil {
+		return "", "", fmt.Errorf("gmail: rendering email: %w", err)
 	}
-	return `<hr><p style="color:#888;font-size:0.85em;">` + html.EscapeString(text) + "</p>"
-}
-
-// appendSignature appends the disclosure line to body and, when htmlBody is
-// non-empty, to the HTML alternative too -- each separated from the actual
-// message by a blank line and a rule, so it can never be confused with the
-// CEO's or agent's own words.
-func appendSignature(body, htmlBody, name string) (string, string) {
-	body += plainSignature(name)
-	if htmlBody != "" {
-		htmlBody += htmlSignature(name)
+	if htmlAttachment != "" {
+		htmlOut = htmlAttachment
 	}
-	return body, htmlBody
+	return textOut, htmlOut, nil
 }
 
 func argStrings(args map[string]any, key string) []string {
@@ -694,12 +714,17 @@ func sanitizeHeaderValue(s string) string {
 
 // buildRawMessage builds an RFC 2822 message, base64url encoded as Gmail's
 // drafts.create/messages.send "raw" field wants. When html is empty the
-// message is a single text/plain part; otherwise it is multipart/alternative
-// with body as the plain part and html as the html part, so a client with no
-// HTML rendering still shows the plain text. When from is empty, the From
-// header is omitted entirely rather than set to a guess -- Gmail then
-// defaults it to the sending account's own primary address, which is what
-// draft_for_review wants and this code has no other way to know.
+// message is a single text/plain part. Otherwise it is a multipart/related
+// envelope (docs/slices/BRAND.md task 4) wrapping a multipart/alternative
+// plain+html pair (so a client with no HTML rendering still shows the plain
+// text) plus the three Water brand images (internal/brand's AssetHeader/
+// AssetKoi/AssetGlass) as inline image parts, each carrying the Content-ID
+// the brand email template references as cid:water-header/cid:water-koi/
+// cid:water-glass (see inlineAssets, writeInlineImages). When from is
+// empty, the From header is omitted entirely rather than set to a guess --
+// Gmail then defaults it to the sending account's own primary address,
+// which is what draft_for_review wants and this code has no other way to
+// know.
 func buildRawMessage(from string, to []string, subject, body, html string) (string, error) {
 	var head bytes.Buffer
 	hdr := func(k, v string) { fmt.Fprintf(&head, "%s: %s\r\n", k, sanitizeHeaderValue(v)) }
@@ -717,6 +742,40 @@ func buildRawMessage(from string, to []string, subject, body, html string) (stri
 		return base64.URLEncoding.EncodeToString(head.Bytes()), nil
 	}
 
+	altBytes, altBoundary, err := buildAlternativePart(body, html)
+	if err != nil {
+		return "", err
+	}
+
+	var related bytes.Buffer
+	rw := multipart.NewWriter(&related)
+	altPart, err := rw.CreatePart(textproto.MIMEHeader{
+		"Content-Type": {fmt.Sprintf(`multipart/alternative; boundary=%q`, altBoundary)},
+	})
+	if err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if _, err := altPart.Write(altBytes); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if err := writeInlineImages(rw); err != nil {
+		return "", err
+	}
+	relatedBoundary := rw.Boundary()
+	if err := rw.Close(); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	fmt.Fprintf(&head, "Content-Type: multipart/related; boundary=%q\r\n\r\n", relatedBoundary)
+	head.Write(related.Bytes())
+	return base64.URLEncoding.EncodeToString(head.Bytes()), nil
+}
+
+// buildAlternativePart builds the inner multipart/alternative plain+html
+// pair (body as the plain part, html as the html part) as raw MIME bytes
+// plus the boundary buildRawMessage needs to declare its Content-Type, so
+// that pair can be nested inside the outer multipart/related envelope as
+// one part.
+func buildAlternativePart(body, html string) ([]byte, string, error) {
 	var parts bytes.Buffer
 	mw := multipart.NewWriter(&parts)
 	plainPart, err := mw.CreatePart(textproto.MIMEHeader{
@@ -724,27 +783,81 @@ func buildRawMessage(from string, to []string, subject, body, html string) (stri
 		"Content-Transfer-Encoding": {"8bit"},
 	})
 	if err != nil {
-		return "", fmt.Errorf("gmail: building message: %s", err)
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
 	}
 	if _, err := plainPart.Write([]byte(body)); err != nil {
-		return "", fmt.Errorf("gmail: building message: %s", err)
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
 	}
 	htmlPart, err := mw.CreatePart(textproto.MIMEHeader{
 		"Content-Type":              {`text/html; charset="UTF-8"`},
 		"Content-Transfer-Encoding": {"8bit"},
 	})
 	if err != nil {
-		return "", fmt.Errorf("gmail: building message: %s", err)
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
 	}
 	if _, err := htmlPart.Write([]byte(html)); err != nil {
-		return "", fmt.Errorf("gmail: building message: %s", err)
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
 	}
+	boundary := mw.Boundary()
 	if err := mw.Close(); err != nil {
-		return "", fmt.Errorf("gmail: building message: %s", err)
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
 	}
-	fmt.Fprintf(&head, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", mw.Boundary())
-	head.Write(parts.Bytes())
-	return base64.URLEncoding.EncodeToString(head.Bytes()), nil
+	return parts.Bytes(), boundary, nil
+}
+
+// inlineAssets is the three Water brand images embedded as inline parts of
+// the outer multipart/related envelope, in the order buildRawMessage/
+// writeInlineImages add them, keyed by internal/brand's asset names -- also
+// the exact Content-ID (and so the cid: reference) each one gets.
+var inlineAssets = []string{brand.AssetHeader, brand.AssetKoi, brand.AssetGlass}
+
+// writeInlineImages adds inlineAssets' bytes to rw as base64-encoded
+// image/png parts, each with a Content-ID of "<name>" (matching the brand
+// email template's cid:water-header/cid:water-koi/cid:water-glass
+// references) and Content-Disposition: inline, so mail clients display them
+// as part of the message body rather than as attachments.
+func writeInlineImages(rw *multipart.Writer) error {
+	for _, name := range inlineAssets {
+		data, err := brand.AssetBytes(name)
+		if err != nil {
+			return fmt.Errorf("gmail: building message: %w", err)
+		}
+		part, err := rw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {"image/png"},
+			"Content-Transfer-Encoding": {"base64"},
+			"Content-ID":                {"<" + name + ">"},
+			"Content-Disposition":       {fmt.Sprintf(`inline; filename="%s.png"`, name)},
+		})
+		if err != nil {
+			return fmt.Errorf("gmail: building message: %s", err)
+		}
+		if err := writeBase64Body(part, data); err != nil {
+			return fmt.Errorf("gmail: building message: %s", err)
+		}
+	}
+	return nil
+}
+
+// writeBase64Body writes data to w as standard base64, wrapped at 76
+// characters per line (RFC 2045 §6.8) with CRLF line endings, matching the
+// Content-Transfer-Encoding: base64 header writeInlineImages sets.
+func writeBase64Body(w io.Writer, data []byte) error {
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(data)))
+	base64.StdEncoding.Encode(encoded, data)
+	const lineLen = 76
+	for i := 0; i < len(encoded); i += lineLen {
+		end := i + lineLen
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		if _, err := w.Write(encoded[i:end]); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("\r\n")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // bulkHeaders is the raw value of the four bulk-mail headers

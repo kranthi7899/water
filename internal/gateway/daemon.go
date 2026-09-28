@@ -377,6 +377,14 @@ func (d *Daemon) Mux() http.Handler {
 	// Workspace UI (Slice V-ui, docs/slices/V.md §5).
 	mux.Handle("POST /v1/approvals/{id}/edit", d.auth(d.handleEditApproval))
 	mux.Handle("POST /v1/approvals/{id}/request-changes", d.auth(d.handleRequestChanges))
+	// docs/slices/BRAND.md task 8: the approval card's "Preview full email"
+	// control (app.js's emailPreviewSection), a gmail.send_message-only
+	// read. Named "/preview", not "/email_preview" or "/email" -- api.js's
+	// own allowlist test (webui_test.go) refuses any UI-reachable path
+	// containing "/email" outright (that substring is reserved for the
+	// native-only POST /v1/decisions/{id}/email report route), so this
+	// route's own name has to steer clear of it.
+	mux.Handle("GET /v1/approvals/{id}/preview", d.auth(d.handleApprovalEmailPreview))
 	mux.Handle("POST /v1/decisions/{id}/stage", d.auth(d.handleStageDecision))
 	mux.Handle("POST /v1/decisions/{id}/dismiss", d.auth(d.handleDismissDecision))
 	// Slice UI Phase 3b: the per-action stage endpoint replaces the
@@ -830,7 +838,7 @@ func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if f, ok := d.cfg.Manifest.Function(body.Function); ok && gate.NeedsEnvelope(f.Level, ta.Taint) {
-		env, err := proposeEnvelope(r.Context(), d.cfg.Registry, d.cfg.Approvals, body.Function, body.Args, ta.Origin)
+		env, err := proposeEnvelope(r.Context(), d.cfg.Registry, d.cfg.Approvals, d.cfg.Manifest.ID, body.Function, body.Args, ta.Origin)
 		if err != nil {
 			status = runtime.StepDenied
 			writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})

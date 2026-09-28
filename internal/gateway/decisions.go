@@ -199,6 +199,12 @@ func (d *Daemon) handleEmailDecisionReport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	payload := map[string]any{"to": body.To, "subject": subject, "body": textBody, "html_attachment": html}
+	// docs/slices/BRAND.md task 9 (see internal/gateway/brand_payload.go).
+	payload, err = addBrandPayloadFieldsForTwin(d.cfg.Manifest.ID, payload)
+	if err != nil {
+		http.Error(w, "preparing the email's brand fields failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	env, err := d.cfg.Approvals.Propose(r.Context(), approvals.Envelope{
 		Action: "gmail.send_message", Payload: payload, Origin: string(gate.P0),
 		Risk: string(functionRisk(d.cfg.Registry, "gmail.send_message")),

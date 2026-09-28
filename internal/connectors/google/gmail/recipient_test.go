@@ -18,7 +18,7 @@ func TestWritesRefuseIncidentNearMissBeforeAnyRequest(t *testing.T) {
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
 	args := func() map[string]any {
 		return map[string]any{"to": []any{"kranthetjob@therightgmail.com"}, "subject": "Job", "body": "Hi"}
 	}

@@ -23,6 +23,7 @@ import (
 
 	"water/internal/approvals"
 	"water/internal/audit"
+	"water/internal/brand"
 	"water/internal/connectors"
 	"water/internal/connectors/google/gapi"
 	"water/internal/gate"
@@ -39,6 +40,14 @@ const (
 	// never anything an args map supplies.
 	testAgentAddress = "water.twin@gmail.com"
 )
+
+// testSignature is the brand signature draft_message/send_message tests
+// configure via Gmail.SetSignature: readMessageArgs refuses to send without
+// one (see gmail.go), matching how it already refuses without
+// testAgentAddress.
+var testSignature = &brand.Signature{
+	Name: "Alex Kim", Title: "CEO", Company: "Acme Holdings", Signoff: "Best,",
+}
 
 func noSleep(context.Context, time.Duration) error { return nil }
 
@@ -1104,7 +1113,7 @@ func TestDraftMessageCreatesDraftViaPost(t *testing.T) {
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
 	out, err := g.draftMessage(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "Q4 numbers", "body": "Could you share the breakdown?",
 	})
@@ -1147,7 +1156,7 @@ func TestSendMessageSendsExactlyOnceAndNormalizesAsExternal(t *testing.T) {
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
 	out, err := g.sendMessage(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "Re: Q3 budget", "body": "Sounds good.",
 	})
@@ -1171,7 +1180,13 @@ func TestSendMessageSendsExactlyOnceAndNormalizesAsExternal(t *testing.T) {
 	if !ok || !m.External {
 		t.Fatalf("sent message record: %+v, want External", m)
 	}
-	wantBody := "Sounds good." + plainSignature("")
+	// The normalized record's body is send_message's rendered plain-text
+	// part -- the same brand.RenderEmail output the send path itself built
+	// (docs/slices/BRAND.md task 5), not the raw drafted text.
+	_, wantBody, err := brand.RenderEmail(sanitizeBody(stripCloser("Sounds good.")), *testSignature)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if m.From != testAgentAddress || m.Subject != "Re: Q3 budget" || m.Body != wantBody {
 		t.Fatalf("normalized record: %+v, want body %q", m, wantBody)
 	}
@@ -1186,7 +1201,7 @@ func TestSendMessageArgsCannotOverrideFrom(t *testing.T) {
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
 	if _, err := g.sendMessage(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "s", "body": "b", "from": "attacker@evil.com",
 	}); err != nil {
@@ -1216,7 +1231,7 @@ func TestSendMessageAmbiguousOutcomeNotSwallowed(t *testing.T) {
 	}))
 	defer api.Close()
 	cl := newDirectClient(t, ts, api)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
 	_, err := g.sendMessage(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "s", "body": "b",
 	})
@@ -1281,9 +1296,15 @@ func TestBuildRawMessagePlainRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBuildRawMessageMultipartRoundTripWithHTMLAttachment(t *testing.T) {
-	html := "<html><body><b>Hi</b></body></html>"
-	raw, err := buildRawMessage(testAgentAddress, []string{"dana@acme.com"}, "Q3 numbers", "Hello there.", html)
+// TestBuildRawMessageRelatedEnvelopeWrapsAlternativeAndInlineImages is task
+// 4's structural test: buildRawMessage's MIME output, given a plain+html
+// pair, parses with Go's mime/multipart as multipart/related containing
+// exactly the multipart/alternative plain+html pair plus the three Water
+// brand images as inline parts (docs/slices/BRAND.md task 4) -- and each
+// image's decoded bytes round-trip exactly to internal/brand.AssetBytes.
+func TestBuildRawMessageRelatedEnvelopeWrapsAlternativeAndInlineImages(t *testing.T) {
+	htmlIn := "<html><body><b>Hi</b></body></html>"
+	raw, err := buildRawMessage(testAgentAddress, []string{"dana@acme.com"}, "Q3 numbers", "Hello there.", htmlIn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1295,12 +1316,16 @@ func TestBuildRawMessageMultipartRoundTripWithHTMLAttachment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
-	if err != nil || !strings.HasPrefix(mediaType, "multipart/alternative") {
-		t.Fatalf("content-type = %q, %v", mediaType, err)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/related") {
+		t.Fatalf("content-type = %q, %v, want multipart/related", mediaType, err)
 	}
-	mr := multipart.NewReader(msg.Body, params["boundary"])
+
 	var gotPlain, gotHTML string
+	var imageCIDs []string
+	relatedParts := 0
+	mr := multipart.NewReader(msg.Body, params["boundary"])
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
@@ -1309,22 +1334,82 @@ func TestBuildRawMessageMultipartRoundTripWithHTMLAttachment(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, err := io.ReadAll(part)
-		if err != nil {
-			t.Fatal(err)
-		}
+		relatedParts++
+		ct := part.Header.Get("Content-Type")
 		switch {
-		case strings.HasPrefix(part.Header.Get("Content-Type"), "text/plain"):
-			gotPlain = string(data)
-		case strings.HasPrefix(part.Header.Get("Content-Type"), "text/html"):
-			gotHTML = string(data)
+		case strings.HasPrefix(ct, "multipart/alternative"):
+			_, altParams, err := mime.ParseMediaType(ct)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ar := multipart.NewReader(part, altParams["boundary"])
+			altParts := 0
+			for {
+				ap, err := ar.NextPart()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				altParts++
+				data, err := io.ReadAll(ap)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch {
+				case strings.HasPrefix(ap.Header.Get("Content-Type"), "text/plain"):
+					gotPlain = string(data)
+				case strings.HasPrefix(ap.Header.Get("Content-Type"), "text/html"):
+					gotHTML = string(data)
+				}
+			}
+			if altParts != 2 {
+				t.Fatalf("multipart/alternative has %d parts, want 2 (plain, html)", altParts)
+			}
+		case strings.HasPrefix(ct, "image/png"):
+			cid := strings.Trim(part.Header.Get("Content-ID"), "<>")
+			imageCIDs = append(imageCIDs, cid)
+			if disp := part.Header.Get("Content-Disposition"); !strings.HasPrefix(disp, "inline") {
+				t.Fatalf("image %s Content-Disposition = %q, want inline", cid, disp)
+			}
+			raw, err := io.ReadAll(part)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clean := strings.NewReplacer("\r", "", "\n", "").Replace(string(raw))
+			decoded, err := base64.StdEncoding.DecodeString(clean)
+			if err != nil {
+				t.Fatalf("image %s: not valid base64: %v", cid, err)
+			}
+			want, err := brand.AssetBytes(cid)
+			if err != nil {
+				t.Fatalf("image %s: unknown brand asset: %v", cid, err)
+			}
+			if !bytes.Equal(decoded, want) {
+				t.Fatalf("image %s decoded bytes don't match brand.AssetBytes", cid)
+			}
+		default:
+			t.Fatalf("unexpected multipart/related part Content-Type %q", ct)
 		}
+	}
+	if relatedParts != 4 {
+		t.Fatalf("multipart/related has %d parts, want 4 (1 alternative + 3 inline images)", relatedParts)
 	}
 	if gotPlain != "Hello there." {
 		t.Fatalf("plain part = %q", gotPlain)
 	}
-	if gotHTML != html {
+	if gotHTML != htmlIn {
 		t.Fatalf("html part = %q", gotHTML)
+	}
+	wantCIDs := []string{brand.AssetHeader, brand.AssetKoi, brand.AssetGlass}
+	if len(imageCIDs) != len(wantCIDs) {
+		t.Fatalf("got %d inline images %v, want %d %v", len(imageCIDs), imageCIDs, len(wantCIDs), wantCIDs)
+	}
+	for i, want := range wantCIDs {
+		if imageCIDs[i] != want {
+			t.Fatalf("inline image[%d] Content-ID = %q, want %q", i, imageCIDs[i], want)
+		}
 	}
 }
 
@@ -1371,10 +1456,10 @@ func TestDraftForReviewCreatesDraftWithNoAgentFromOrSignature(t *testing.T) {
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	// SetSignatureName is configured here specifically to prove it has no
+	// SetSignature is configured here specifically to prove it has no
 	// effect on draft_for_review: the signature must never appear regardless
 	// of what the connector's own configuration carries.
-	g := New(testAgentAddress).SetSignatureName("Alex")
+	g := New(testAgentAddress).SetSignature(testSignature)
 	out, err := g.draftForReview(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "Q4 numbers", "body": "Could you share the breakdown?",
 	})
@@ -1435,7 +1520,7 @@ func TestSignatureOnSendMessageOnlyNotDraftForReview(t *testing.T) {
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
 	out, err := g.sendMessage(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hello.",
 	})
@@ -1469,31 +1554,20 @@ func TestSignatureOnSendMessageOnlyNotDraftForReview(t *testing.T) {
 	}
 }
 
-// TestSignatureRespectsConfiguredNameAndFallback covers the config side:
-// plainSignature/htmlSignature use agent.signature_name when set, and fall
-// back to omitting the "on behalf of" clause entirely (never a placeholder
-// name) when it's empty, and SetSignatureName threads the configured name
-// through a real send_message call.
-func TestSignatureRespectsConfiguredNameAndFallback(t *testing.T) {
-	if got, want := plainSignature(""), "\n\n---\nSent by Water, an AI assistant — approved before sending."; got != want {
-		t.Fatalf("plainSignature(\"\") = %q, want %q", got, want)
-	}
-	if got, want := plainSignature("Alex Kim"), "\n\n---\nSent by Water, an AI assistant, on behalf of Alex Kim — approved before sending."; got != want {
-		t.Fatalf("plainSignature(name) = %q, want %q", got, want)
-	}
-	if strings.Contains(plainSignature(""), "on behalf of") {
-		t.Fatal("empty name must omit the \"on behalf of\" clause, not invent a placeholder")
-	}
-	if !strings.Contains(htmlSignature("Alex Kim"), "Alex Kim") {
-		t.Fatal("htmlSignature should carry the configured name")
-	}
-
+// TestSignatureRespectsConfiguredName covers the new brand mechanism's
+// config side: send_message's rendered body carries the configured
+// signature's Name in the brand template's fixed disclosure/signature
+// footer text, sourced from Gmail.SetSignature (in production,
+// twins/ceo/brand/signature.yaml via internal/brand.LoadSignature), never
+// from config's retired agent.signature_name.
+func TestSignatureRespectsConfiguredName(t *testing.T) {
 	ts := newTokenServer(t)
 	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress).SetSignatureName("Alex Kim")
+	sig := &brand.Signature{Name: "Alex Kim", Title: "CEO", Company: "Acme Holdings", Signoff: "Best,"}
+	g := New(testAgentAddress).SetSignature(sig)
 	out, err := g.sendMessage(context.Background(), cl, map[string]any{
 		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hi.",
 	})
@@ -1507,20 +1581,55 @@ func TestSignatureRespectsConfiguredNameAndFallback(t *testing.T) {
 	if !strings.Contains(w.Body, "on behalf of Alex Kim") {
 		t.Fatalf("body = %q, want the configured signature name", w.Body)
 	}
+	if !strings.Contains(w.Body, "Sent by Water") {
+		t.Fatalf("body = %q, want the disclosure line", w.Body)
+	}
+	// Exactly one disclosure line: the retired appendSignature mechanism
+	// never runs alongside the brand template's own footer.
+	if n := strings.Count(w.Body, "Sent by Water"); n != 1 {
+		t.Fatalf("disclosure appears %d times in body, want exactly 1: %q", n, w.Body)
+	}
 }
 
-// TestSendMessageAppendsSignatureToHTMLPartToo checks the MIME html
-// alternative also gets the disclosure line, visually separated from the
-// caller's own HTML by a rule.
-func TestSendMessageAppendsSignatureToHTMLPartToo(t *testing.T) {
+// TestSendMessageRefusesWithoutSignature is the new mechanism's required-
+// config guard: send_message/draft_message refuse outright, before ever
+// calling the API, when no brand signature is configured -- matching the
+// existing agent.mail_address requirement -- rather than silently sending
+// mail with no signature or disclosure at all.
+func TestSendMessageRefusesWithoutSignature(t *testing.T) {
+	ts := newTokenServer(t)
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer api.Close()
+	cl := newDirectClient(t, ts, api)
+	g := New(testAgentAddress) // no SetSignature
+	if _, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "b",
+	}); err == nil {
+		t.Fatal("want an error: no brand signature configured")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("must not call the API before a brand signature is configured")
+	}
+}
+
+// TestSendMessageSanitizesAndStripsCloserEndToEnd is the integration-level
+// check for tasks 6 and 7 together: a model-drafted body carrying both a
+// trailing closer the template's own signoff would otherwise double, and
+// unsafe markup (script, an on-brand-disallowed tag), reaches the sent
+// message with the closer gone, the unsafe markup gone, the legitimate
+// text preserved, and exactly one disclosure line -- all derived from one
+// sanitize pass (the html and plain parts never disagree on what was kept).
+func TestSendMessageSanitizesAndStripsCloserEndToEnd(t *testing.T) {
 	ts := newTokenServer(t)
 	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
 	srv := api.server()
 	defer srv.Close()
 	cl := newDirectClient(t, ts, srv)
-	g := New(testAgentAddress)
+	g := New(testAgentAddress).SetSignature(testSignature)
+	body := "<p>Here's the update.</p><script>alert(1)</script>\n\nThanks,\nKranthi"
 	_, err := g.sendMessage(context.Background(), cl, map[string]any{
-		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hi.", "html_attachment": "<p>Hi.</p>",
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": body,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1530,29 +1639,129 @@ func TestSendMessageAppendsSignatureToHTMLPartToo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
-	if err != nil || !strings.HasPrefix(mediaType, "multipart/alternative") {
-		t.Fatalf("content-type = %q, %v", mediaType, err)
+	_, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	mr := multipart.NewReader(msg.Body, params["boundary"])
-	var gotHTML string
+	part, err := mr.NextPart() // multipart/alternative
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, altParams, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar := multipart.NewReader(part, altParams["boundary"])
+	var gotPlain, gotHTML string
 	for {
-		part, err := mr.NextPart()
+		ap, err := ar.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, err := io.ReadAll(part)
+		data, err := io.ReadAll(ap)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.HasPrefix(part.Header.Get("Content-Type"), "text/html") {
+		switch {
+		case strings.HasPrefix(ap.Header.Get("Content-Type"), "text/plain"):
+			gotPlain = string(data)
+		case strings.HasPrefix(ap.Header.Get("Content-Type"), "text/html"):
 			gotHTML = string(data)
 		}
 	}
-	if !strings.Contains(gotHTML, "Sent by Water") || !strings.Contains(gotHTML, "<hr>") {
-		t.Fatalf("html part = %q, want the disclosure signature set off by a rule", gotHTML)
+	for _, part := range []struct{ name, got string }{{"html", gotHTML}, {"plain", gotPlain}} {
+		if strings.Contains(part.got, "alert(1)") || strings.Contains(part.got, "<script") {
+			t.Fatalf("%s part still carries the script: %q", part.name, part.got)
+		}
+		// The html part HTML-entity-escapes ordinary text between tags
+		// (sanitizeBody's own fix for a real leaked-tag-fragment bypass,
+		// see TestSanitizeBodyEscapesLeakedTagFragments) -- "Here's"
+		// becomes "Here&#39;s", which every HTML parser renders back to a
+		// literal apostrophe, so this is correct, not lost text.
+		wantText := "Here's the update."
+		if part.name == "html" {
+			wantText = "Here&#39;s the update."
+		}
+		if !strings.Contains(part.got, wantText) {
+			t.Fatalf("%s part lost the legitimate text: %q", part.name, part.got)
+		}
+		if strings.Contains(part.got, "Thanks") || strings.Contains(part.got, "Kranthi") {
+			t.Fatalf("%s part still carries the model's own closer: %q", part.name, part.got)
+		}
+		if n := strings.Count(part.got, "Sent by Water"); n != 1 {
+			t.Fatalf("%s part has %d disclosure lines, want exactly 1: %q", part.name, n, part.got)
+		}
+	}
+}
+
+// TestSendMessageHTMLAttachmentUsedVerbatim covers the interaction between
+// html_attachment (a caller pre-rendered HTML document, e.g.
+// internal/gateway's decision-card report) and the new brand mechanism: the
+// attachment is used as-is for the HTML alternative -- not run through the
+// body allowlist or the brand template, which would mangle a full document
+// -- while the plain-text alternative still always carries the brand
+// signature/disclosure, rendered from the plain body.
+func TestSendMessageHTMLAttachmentUsedVerbatim(t *testing.T) {
+	ts := newTokenServer(t)
+	api := &gmailWriteAPI{resp: `{"id":"m1","threadId":"t1"}`}
+	srv := api.server()
+	defer srv.Close()
+	cl := newDirectClient(t, ts, srv)
+	g := New(testAgentAddress).SetSignature(testSignature)
+	htmlIn := "<html><body><table><tr><td>Q3 report</td></tr></table></body></html>"
+	_, err := g.sendMessage(context.Background(), cl, map[string]any{
+		"to": []any{"dana@acme.com"}, "subject": "s", "body": "Hi.", "html_attachment": htmlIn,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := rawFromBody(t, api.last().body, false)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mr := multipart.NewReader(msg.Body, params["boundary"])
+	part, err := mr.NextPart() // multipart/alternative
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, altParams, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar := multipart.NewReader(part, altParams["boundary"])
+	var gotPlain, gotHTML string
+	for {
+		ap, err := ar.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(ap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case strings.HasPrefix(ap.Header.Get("Content-Type"), "text/plain"):
+			gotPlain = string(data)
+		case strings.HasPrefix(ap.Header.Get("Content-Type"), "text/html"):
+			gotHTML = string(data)
+		}
+	}
+	if gotHTML != htmlIn {
+		t.Fatalf("html part = %q, want the html_attachment verbatim", gotHTML)
+	}
+	if !strings.Contains(gotPlain, "Sent by Water") {
+		t.Fatalf("plain part = %q, want the brand disclosure", gotPlain)
 	}
 }

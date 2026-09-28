@@ -96,6 +96,11 @@
     // gmail.send_message reply to the requester; nothing is sent by this
     // call itself.
     requestChanges: (id, note) => request('POST', '/v1/approvals/' + enc(id) + '/request-changes', { note }),
+    // docs/slices/BRAND.md task 8: the "Preview full email" control on a
+    // gmail.send_message approval card -- the final, brand-templated HTML,
+    // rendered into a sandboxed iframe by the caller, never into the page's
+    // own DOM.
+    approvalEmailPreview: (id) => request('GET', '/v1/approvals/' + enc(id) + '/preview'),
     threads: () => request('GET', '/v1/threads'),
     createThread: (title) => request('POST', '/v1/threads', { title }),
     anchorThread: (type, id) => request('POST', '/v1/threads/anchor', { anchor_type: type, anchor_id: id }),

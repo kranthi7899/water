@@ -1,0 +1,20 @@
+# Water brand: email signature block for the CEO twin, appended to every
+# email Water sends or drafts under this twin's identity (see
+# internal/brand.LoadSignature and internal/brand.RenderEmail).
+#
+# Placeholder (example.com) values only -- replace with the real signature
+# before this twin sends live mail. Schema: internal/brand.Signature.
+#   name, title, company, signoff: required, non-empty.
+#   links: zero or more {label, url} lines shown under the signoff.
+#   cta: optional single {label, url} call-to-action button. Omit the whole
+#     key (don't leave an empty map) when there is no CTA -- an absent key
+#     loads as a nil pointer, never an empty rendered button.
+name: Alex Morgan
+title: CEO
+company: Example Holdings
+signoff: "Best,"
+links:
+  - {label: "example.com", url: "https://example.com"}
+cta:
+  label: "Book a time to talk"
+  url: "https://example.com/book"

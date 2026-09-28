@@ -512,6 +512,21 @@ figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
 .kv dt { font-weight: 600; color: var(--muted); }
 .kv dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* docs/slices/BRAND.md task 8: the approval card's "Preview full email"
+   sandboxed iframe (app.js's emailPreviewSection). Sizing only -- the
+   frame's own content (internal/brand's email template) is fully
+   self-styled. */
+.email-preview-frame {
+  display: block;
+  width: 100%;
+  max-width: 640px;
+  height: 480px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}
+
 details summary { cursor: pointer; color: var(--muted); }
 
 /* ---------- Approvals queue additions (docs/slices/UI.md Phase 3a) ---------- */

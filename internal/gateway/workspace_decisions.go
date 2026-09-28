@@ -211,6 +211,18 @@ func (d *Daemon) handleStageDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "linking decision card "+id+" failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// docs/slices/BRAND.md task 9: chosen.Function is any granted staged
+	// action, not only mail, so this only calls addBrandPayloadFields
+	// (brand_payload.go) when it actually is "gmail.send_message" -- a
+	// non-mail action's payload is untouched.
+	if chosen.Function == "gmail.send_message" {
+		var err error
+		payload, err = addBrandPayloadFieldsForTwin(d.cfg.Manifest.ID, payload)
+		if err != nil {
+			http.Error(w, "preparing the email's brand fields failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
 	env, err := d.cfg.Approvals.Propose(ctx, approvals.Envelope{
 		Action: chosen.Function, Payload: payload, Origin: string(gate.P0),
 		Risk:         string(functionRisk(d.cfg.Registry, chosen.Function)),
