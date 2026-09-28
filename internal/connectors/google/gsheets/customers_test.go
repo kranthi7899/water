@@ -150,8 +150,8 @@ func TestAccountsReadsEveryRowOnceConfigured(t *testing.T) {
 	if !res.Untrusted {
 		t.Fatal("company_customers.accounts must be marked untrusted (External)")
 	}
-	if *gotRange != "Accounts!A5:F55" {
-		t.Fatalf("requested range = %q, want %q", *gotRange, "Accounts!A5:F55")
+	if *gotRange != "Accounts!A5:Q60" {
+		t.Fatalf("requested range = %q, want %q", *gotRange, "Accounts!A5:Q60")
 	}
 	var out map[string]any
 	if err := json.Unmarshal(res.Output, &out); err != nil {

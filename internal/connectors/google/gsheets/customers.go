@@ -20,20 +20,50 @@
 // this error (and a missing shared Google credential) to the Clients
 // dashboard's "not_connected" tile state.
 //
-// Row schema (Accounts tab, once the owner's real sheet exists): this
-// package has no live access to the real spreadsheet, so the schema below
-// is this task's own minimal, documented guess, not a confirmed layout —
-// correct it once the sheet is real (see docs/google-setup.md). One row
-// per customer account:
+// Row schema (Accounts tab), corrected against the owner's actual
+// Renaissance_Customers.xlsx (2026-09-27) — the original schema above this
+// comment was this task's own unconfirmed guess and was wrong. Header row
+// is row 5 (rows 1-4 are a title/note/as-of-date block); data runs rows
+// 6-15 today. One row per customer, prospect or partner:
 //
-//	A  account name (string)
-//	B  health ("healthy" | "at_risk" | "critical", case-insensitive; any
-//	   other non-empty value is still counted as "not healthy" for
-//	   accounts_at_risk, and shown as its own group in accounts_by_health)
-//	C  open tickets (integer)
-//	D  NPS score (integer, blank if no survey response yet)
-//	E  last contact date ("YYYY-MM-DD")
-//	F  notes (free text, not read by any compute function)
+//	A  account id (string, e.g. "meridian-records") — not used for display
+//	B  name (string) — the join key dashboards.go's accountColName reads
+//	C  product
+//	D  type (Customer | Pilot | Prospect | Design partner)
+//	E  segment (free text)
+//	F  owner (person)
+//	G  MRR (number)
+//	H  contract start (date)
+//	I  renewal / end (date)
+//	J  health (free text: "Healthy" | "Watch" | "At risk" | "New lead" seen
+//	   so far, case-insensitive; any value other than "healthy" still counts
+//	   as "not healthy" for accounts_at_risk, and each distinct value is its
+//	   own group in accounts_by_health — the compute layer never assumes a
+//	   closed set)
+//	K  primary channel
+//	L  next step (free text)
+//	M  last interaction (date) — the last-contact date accountColLastContact
+//	   reads; per U9, "days since contact" is always recomputed from this at
+//	   render time, never trusted from column N
+//	N  days since contact (sheet-computed; not read — see M)
+//	O  open tickets (integer)
+//	P  latest NPS (integer, blank if none)
+//	Q  flag (free text, not read by any compute function)
+//
+// The sheet's own dates render through gsheets.getRange's
+// dateTimeRenderOption=FORMATTED_STRING, which formats by the spreadsheet's
+// locale/cell format — not guaranteed to be "YYYY-MM-DD". Column M's actual
+// rendered format is unverified until this spreadsheet is live (tracked in
+// docs/known-gaps.md); compute.go's strict "2006-01-02" parse will need
+// adjusting then if the format differs.
+//
+// The real workbook also has Contacts, Interactions, Support tickets,
+// Feedback, Reviews and Vendors tabs — none read by this connector. Reviews
+// in particular has real per-review data (Product Hunt, G2, Reddit, an app
+// review site) that could retire the Clients workspace's permanent
+// "not_connected" Reviews tile (Slice UI Phase 5d), but reading a second tab
+// is new connector surface beyond the owner's U3-A approval for Accounts
+// only, so it isn't read here without a separate decision.
 package gsheets
 
 import (
@@ -69,7 +99,7 @@ const customersConfigurePrefix = "CONFIGURE_ME_"
 // same shape gsheets.go's own `lookup` type has (kept separate so this
 // file has no dependency on gsheets.go's lookups map, which is keyed by
 // company_finance's own function names).
-var customersLookup = lookup{tab: "Accounts", rangeA1: "A5:F55"}
+var customersLookup = lookup{tab: "Accounts", rangeA1: "A5:Q60"}
 
 // ErrCustomersNotConfigured is returned by Customers.Invoke while
 // customersSpreadsheetID is still the CONFIGURE_ME placeholder — i.e., the

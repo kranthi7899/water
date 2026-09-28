@@ -649,15 +649,17 @@ func deliveryTopBlockerCallout(ctx context.Context, co *Compute) CalloutTile {
 // ---- Clients (company_customers) ----
 
 // accountColumns documents the Accounts tab's row schema, restated from
-// customers.go's own package doc comment for this file's easier reference:
-// column A account name, column B health, column C open tickets, column D
-// NPS score (blank if none), column E last contact date ("YYYY-MM-DD").
+// customers.go's own package doc comment for this file's easier reference
+// (corrected 2026-09-27 against the owner's real Renaissance_Customers.xlsx):
+// column B name, column J health, column M last interaction date, column O
+// open tickets, column P latest NPS (blank if none). Columns A, C-I, K, L, N
+// and Q exist in the real sheet but nothing here reads them.
 const (
-	accountColName        = 0
-	accountColHealth      = 1
-	accountColTickets     = 2
-	accountColNPS         = 3
-	accountColLastContact = 4
+	accountColName        = 1
+	accountColHealth      = 9
+	accountColLastContact = 12
+	accountColTickets     = 14
+	accountColNPS         = 15
 )
 
 func clientsAccounts(ctx context.Context, co *Compute) (sheetRows, error) {

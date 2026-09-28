@@ -600,6 +600,22 @@ func TestFinanceWorkspaceExactFixtureValues(t *testing.T) {
 	}
 }
 
+// wsAcctRow builds one Accounts-tab row (17 real columns, A-Q) with only
+// the columns clientsAccountsTile/marketingProspectsTile actually read set,
+// matching the real Renaissance_Customers.xlsx layout (see customers.go's
+// doc comment): 1 name, 3 type, 9 health, 12 last interaction, 14 open
+// tickets, 15 NPS.
+func wsAcctRow(name, typ, health string, tickets float64, nps any, lastContact string) []any {
+	row := make([]any, 17)
+	row[1] = name
+	row[3] = typ
+	row[9] = health
+	row[12] = lastContact
+	row[14] = tickets
+	row[15] = nps
+	return row
+}
+
 // ---- exact fixture values: clients workspace ----
 
 func TestClientsWorkspaceExactFixtureValues(t *testing.T) {
@@ -625,8 +641,8 @@ func TestClientsWorkspaceExactFixtureValues(t *testing.T) {
 	inv := newWSFakeInvoker().
 		on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
 			return wsJSONResult(map[string]any{"rows": [][]any{
-				{"Acme", "healthy", 1.0, 9.0, "2026-09-20"},
-				{"Northstar", "at_risk", 4.0, 5.0, "2026-08-01"},
+				wsAcctRow("Acme", "Customer", "healthy", 1.0, 9.0, "2026-09-20"),
+				wsAcctRow("Northstar", "Customer", "at_risk", 4.0, 5.0, "2026-08-01"),
 			}})
 		}).
 		on("company_finance.outstanding_invoices", func(map[string]any) (gate.Result, error) {
@@ -1097,7 +1113,7 @@ func TestCreateWorkspaceDraftUnknownWorkspaceIs404(t *testing.T) {
 // TestMarketingWorkspaceExactFixtureValues pins the Marketing template's
 // shape to exact fixture values: no research run is linked in_workspace, so
 // every trend tile must be illustrative; company_customers.accounts has one
-// healthy account (Acme, excluded) and two blank-health rows (prospects,
+// Customer account (Acme, excluded) and two Type=Prospect rows (prospects,
 // included, sorted by name); no roster person has role "Design lead", so
 // there is no capacity note; public reviews always report not_connected
 // with no items.
@@ -1107,9 +1123,9 @@ func TestMarketingWorkspaceExactFixtureValues(t *testing.T) {
 
 	inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
 		return wsJSONResult(map[string]any{"rows": [][]any{
-			{"Acme", "healthy", 1.0, 9.0, "2026-09-20"},
-			{"Northstar", "", 4.0, nil, "2026-08-01"},
-			{"Fenwick", "", 0.0, nil, "2026-09-10"},
+			wsAcctRow("Acme", "Customer", "healthy", 1.0, 9.0, "2026-09-20"),
+			wsAcctRow("Northstar", "Prospect", "New lead", 4.0, nil, "2026-08-01"),
+			wsAcctRow("Fenwick", "Prospect", "New lead", 0.0, nil, "2026-09-10"),
 		}})
 	})
 	h.d.cfg.Workspaces = wsWorkspacesFixture(t)
@@ -1141,7 +1157,7 @@ func TestMarketingWorkspaceExactFixtureValues(t *testing.T) {
 	}
 	items := prospects["items"].([]any)
 	if len(items) != 2 {
-		t.Fatalf("prospects.items = %+v, want 2 (blank-health rows only)", items)
+		t.Fatalf("prospects.items = %+v, want 2 (Type=Prospect rows only)", items)
 	}
 	fenwick := items[0].(map[string]any) // sorted by name: Fenwick before Northstar
 	if fenwick["name"] != "Fenwick" {
@@ -1316,7 +1332,7 @@ func TestCreateWorkspaceDraftProspectOutreach(t *testing.T) {
 	now, _ := time.Parse(time.RFC3339, wsTestNow)
 	inv := newWSFakeInvoker().on("company_customers.accounts", func(map[string]any) (gate.Result, error) {
 		return wsJSONResult(map[string]any{"rows": [][]any{
-			{"Fenwick", "", 2.0, nil, "2026-09-10"},
+			wsAcctRow("Fenwick", "Prospect", "New lead", 2.0, nil, "2026-09-10"),
 		}})
 	})
 	h.d.cfg.Workspaces = wsWorkspacesFixture(t)

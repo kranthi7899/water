@@ -315,11 +315,24 @@ func TestDeliveryTopBlockerTieBreaksAlphabetically(t *testing.T) {
 
 // ---- Clients: exact numbers, breakdown and cross-connector callout ----
 
+// acctRow builds one Accounts-tab row (17 real columns, A-Q) with only the
+// five columns the compute layer actually reads set, matching the real
+// Renaissance_Customers.xlsx layout (see customers.go's doc comment).
+func acctRow(name, health string, tickets float64, nps any, lastContact string) []any {
+	row := make([]any, 17)
+	row[accountColName] = name
+	row[accountColHealth] = health
+	row[accountColLastContact] = lastContact
+	row[accountColTickets] = tickets
+	row[accountColNPS] = nps
+	return row
+}
+
 func clientsAccountsFixture() []any {
 	return []any{
-		[]any{"Meridian", "healthy", 1.0, 9.0, "2026-09-20"},
-		[]any{"Northstar", "at_risk", 4.0, 5.0, "2026-08-01"},
-		[]any{"Lexicon", "critical", 2.0, nil, "2026-07-15"},
+		acctRow("Meridian", "healthy", 1.0, 9.0, "2026-09-20"),
+		acctRow("Northstar", "at_risk", 4.0, 5.0, "2026-08-01"),
+		acctRow("Lexicon", "critical", 2.0, nil, "2026-07-15"),
 	}
 }
 

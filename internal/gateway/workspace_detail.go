@@ -770,22 +770,25 @@ func (d *Daemon) clientsAccountsTile(ctx context.Context) clientAccountsTile {
 	now := d.computeNow()
 	var items []clientAccountView
 	for _, row := range rows {
-		name, ok := cellString(row, 0)
+		// Column order (corrected 2026-09-27 against the real
+		// Renaissance_Customers.xlsx, see customers.go's doc comment):
+		// 1 name, 9 health, 12 last interaction, 14 open tickets, 15 NPS.
+		name, ok := cellString(row, 1)
 		if !ok || name == "" {
 			continue
 		}
 		av := clientAccountView{Name: name}
-		if h, ok := cellString(row, 1); ok {
+		if h, ok := cellString(row, 9); ok {
 			av.Health = strings.TrimSpace(h)
 		}
-		if tk, ok := cellFloat(row, 2); ok {
+		if tk, ok := cellFloat(row, 14); ok {
 			av.OpenTickets = tk
 		}
-		if nps, ok := cellFloat(row, 3); ok {
+		if nps, ok := cellFloat(row, 15); ok {
 			n := nps
 			av.NPS = &n
 		}
-		if lc, ok := cellString(row, 4); ok {
+		if lc, ok := cellString(row, 12); ok {
 			if t, perr := time.Parse("2006-01-02", strings.TrimSpace(lc)); perr == nil {
 				days := now.Sub(t).Hours() / 24
 				av.DaysSinceContact = &days
@@ -1804,23 +1807,14 @@ func (d *Daemon) marketingTrendTiles(ctx context.Context, workspaceID string) []
 // ---- prospects ----
 
 // prospectView is one company_customers.accounts row this phase treats as
-// a prospect rather than an active client. Judgment call (docs/slices/UI.md
-// Phase 5d asks for "Prospects (customers sheet)" with no further
-// definition): the Accounts tab's own documented schema (customers.go's
-// package doc comment: column A name, B health, C open tickets, D NPS, E
-// last contact -- the same column order clientsAccountsTile above already
-// reads by plain index, internal/dashboards/compute.go's own accountColumns
-// const block being unexported there) has no dedicated prospect/customer
-// stage column -- every row is documented as a "customer account". The one
-// signal this codebase already treats specially for a
-// blank health value is clientsAccountsByHealth's own "(unknown)" bucket
-// (internal/dashboards/compute.go): a row with no recorded health status
-// has never been through the health-tracking process an actively monitored
-// customer goes through. This reuses that exact, already-established
-// signal -- an accounts row whose health column is blank -- as its own
-// documented mapping for "prospect", rather than inventing a new sheet
-// column this task has no real data for. Revisit once the sheet gains a
-// real stage/status column of its own.
+// a prospect rather than an active client. Corrected 2026-09-27 against the
+// real Renaissance_Customers.xlsx: the sheet has a real column D ("Type":
+// Customer | Pilot | Prospect | Design partner), so this now matches Type
+// == "Prospect" (case-insensitive) directly, rather than the earlier
+// unconfirmed guess's fallback of "blank health column" -- which the real
+// data would have made permanently empty, since every real row has a
+// non-blank health value ("Healthy"/"Watch"/"At risk"/"New lead"), none of
+// them blank.
 type prospectView struct {
 	Name             string   `json:"name"`
 	OpenTickets      float64  `json:"open_tickets,omitempty"`
@@ -1835,7 +1829,7 @@ type prospectsTile struct {
 // marketingProspectsTile reuses dashboards.Rows over the exact same
 // "company_customers.accounts" function clientsAccountsTile above already
 // reads (Phase 4's existing connector/read -- no new connector, no
-// duplicated fetch logic), filtered to blank-health rows per prospectView's
+// duplicated fetch logic), filtered to Type == "Prospect" per prospectView's
 // own doc comment.
 func (d *Daemon) marketingProspectsTile(ctx context.Context) prospectsTile {
 	if d.cfg.Compute == nil {
@@ -1848,20 +1842,21 @@ func (d *Daemon) marketingProspectsTile(ctx context.Context) prospectsTile {
 	now := d.computeNow()
 	var items []prospectView
 	for _, row := range rows {
-		// Column order: 0 name, 1 health, 2 open tickets, 3 NPS, 4 last
-		// contact -- matching clientsAccountsTile's own reads above exactly.
-		name, ok := cellString(row, 0)
+		// Column order (see clientsAccountsTile's own comment): 1 name, 3
+		// type, 12 last interaction, 14 open tickets.
+		name, ok := cellString(row, 1)
 		if !ok || name == "" {
 			continue
 		}
-		if health, _ := cellString(row, 1); strings.TrimSpace(health) != "" {
-			continue // a recorded health status: an active client, not a prospect
+		typ, _ := cellString(row, 3)
+		if !strings.EqualFold(strings.TrimSpace(typ), "prospect") {
+			continue // an active/pilot account, not a prospect
 		}
 		pv := prospectView{Name: name}
-		if tk, ok := cellFloat(row, 2); ok {
+		if tk, ok := cellFloat(row, 14); ok {
 			pv.OpenTickets = tk
 		}
-		if lc, ok := cellString(row, 4); ok {
+		if lc, ok := cellString(row, 12); ok {
 			if t, perr := time.Parse("2006-01-02", strings.TrimSpace(lc)); perr == nil {
 				days := now.Sub(t).Hours() / 24
 				pv.DaysSinceContact = &days
