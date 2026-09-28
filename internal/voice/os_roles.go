@@ -1,11 +1,11 @@
 package voice
 
-// Free per-role voices for the OS provider. The engine is the same system TTS
-// for every role, so this cannot make speech expressive; it makes roles
-// distinguishable by ear at zero cost. macOS Premium/Enhanced voices (a free
-// download under System Settings → Accessibility → Spoken Content) sound far
-// less robotic, so each role prefers one of those when installed and falls
-// back to a voice that ships with every Mac.
+// The OS provider's preferred voice for the CEO twin. The engine is the
+// system TTS, so this cannot make speech expressive; it just prefers a less
+// robotic installed voice when one is present. macOS Premium/Enhanced voices
+// (a free download under System Settings → Accessibility → Spoken Content)
+// sound far less robotic, so this prefers one of those when installed and
+// falls back to a voice that ships with every Mac.
 
 import (
 	"os/exec"
@@ -17,7 +17,7 @@ import (
 	"sync"
 )
 
-// OSProfile is one role's OS voice: candidates in preference order and a
+// OSProfile is the CEO twin's OS voice: candidates in preference order and a
 // speaking rate. Linux uses the espeak variant instead of the macOS names.
 type OSProfile struct {
 	Voices []string
@@ -25,31 +25,21 @@ type OSProfile struct {
 	Espeak string
 }
 
-func OSProfileFor(role string) OSProfile {
-	switch role {
-	case "ceo":
-		return OSProfile{[]string{"Jamie (Premium)", "Jamie (Enhanced)", "Evan (Premium)", "Evan (Enhanced)", "Daniel (Enhanced)", "Daniel"}, 172, "en+m3"}
-	case "coo":
-		return OSProfile{[]string{"Ava (Premium)", "Ava (Enhanced)", "Samantha (Enhanced)", "Samantha"}, 185, "en+f3"}
-	case "cto":
-		return OSProfile{[]string{"Nathan (Premium)", "Nathan (Enhanced)", "Tom (Enhanced)", "Rishi (Enhanced)", "Rishi"}, 190, "en+m1"}
-	case "design":
-		return OSProfile{[]string{"Zoe (Premium)", "Zoe (Enhanced)", "Serena (Premium)", "Serena (Enhanced)", "Moira (Enhanced)", "Moira"}, 180, "en+f4"}
-	default:
-		return OSProfile{}
-	}
+// CEOOSProfile is the one OS voice profile Water speaks with.
+func CEOOSProfile() OSProfile {
+	return OSProfile{[]string{"Jamie (Premium)", "Jamie (Enhanced)", "Evan (Premium)", "Evan (Enhanced)", "Daniel (Enhanced)", "Daniel"}, 172, "en+m3"}
 }
 
-// NewOSFor returns the OS provider speaking as role. override (from
-// voice.<role>_voice) wins when it names an installed voice.
-func NewOSFor(role, override string) *OS {
+// NewOSVoice returns the OS provider speaking in the CEO voice. override
+// (from voice.ceo_voice) wins when it names an installed voice.
+func NewOSVoice(override string) *OS {
 	o := NewOS()
-	o.applyRole(role, override, installedVoices())
+	o.applyProfile(override, installedVoices())
 	return o
 }
 
-func (o *OS) applyRole(role, override string, installed []string) {
-	p := OSProfileFor(role)
+func (o *OS) applyProfile(override string, installed []string) {
+	p := CEOOSProfile()
 	o.rate = p.Rate
 	switch runtime.GOOS {
 	case "darwin":
@@ -67,8 +57,11 @@ func (o *OS) applyRole(role, override string, installed []string) {
 // Voice reports the resolved voice ("" = system default).
 func (o *OS) Voice() string { return o.voice }
 
+// Rate reports the speaking rate in words per minute (0 = engine default).
+func (o *OS) Rate() int { return o.rate }
+
 // OverrideIgnored reports whether a configured override is not installed and
-// was replaced by the role default (macOS only, where voices can be listed).
+// was replaced by the profile default (macOS only, where voices can be listed).
 func OverrideIgnored(override string) bool {
 	if override == "" || runtime.GOOS != "darwin" {
 		return false

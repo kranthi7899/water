@@ -1,0 +1,22 @@
+{
+  "id": "m-html",
+  "threadId": "t-html",
+  "snippet": "See attached...",
+  "internalDate": "1758623500000",
+  "payload": {
+    "mimeType": "multipart/alternative",
+    "headers": [
+      {"name": "From", "value": "dana@acme.com"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "Re: Q3 numbers"},
+      {"name": "Date", "value": "Tue, 23 Sep 2026 09:35:00 -0400"}
+    ],
+    "parts": [
+      {
+        "mimeType": "text/html",
+        "headers": [{"name": "Content-Type", "value": "text/html; charset=UTF-8"}],
+        "body": {"data": "PHA-U2VlIGF0dGFjaGVkIGZvciA8Yj5RMzwvYj4uPC9wPg", "size": 34}
+      }
+    ]
+  }
+}

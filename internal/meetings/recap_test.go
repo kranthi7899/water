@@ -1,0 +1,391 @@
+package meetings
+
+import (
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"water/internal/backend"
+	"water/internal/decisions"
+	"water/internal/store"
+)
+
+// scriptedTranscript is a fixture meeting: two channels, a decision, an
+// owned action item, an unassigned action item, an open question and an
+// FYI, plus plain chatter that should surface nowhere in the recap.
+func scriptedTranscript(base time.Time) []Segment {
+	return []Segment{
+		{At: base, Channel: Mic, Text: "let's kick off the compute review"},
+		{At: base.Add(1 * time.Minute), Channel: System, Text: "the Kafka budget is over by twenty percent"},
+		{At: base.Add(2 * time.Minute), Channel: Mic, Text: "we decided to move the extra brokers to spot instances"},
+		{At: base.Add(3 * time.Minute), Channel: System, Text: "Priya will send the updated budget deck by Friday"},
+		{At: base.Add(4 * time.Minute), Channel: System, Text: "action item: rotate the staging credentials"},
+		{At: base.Add(5 * time.Minute), Channel: Mic, Text: "what does legal think about the vendor contract?"},
+		{At: base.Add(6 * time.Minute), Channel: System, Text: "fyi the offsite moved to the east building"},
+		{At: base.Add(7 * time.Minute), Channel: Mic, Text: "anyway, how's everyone's weekend"},
+	}
+}
+
+func TestExtractSignalsBucketsAndTracesToSegmentText(t *testing.T) {
+	base := time.Date(2026, 9, 24, 15, 0, 0, 0, time.UTC)
+	segs := scriptedTranscript(base)
+	sig := ExtractSignals(segs)
+
+	if len(sig.Decisions) != 1 || sig.Decisions[0].Text != segs[2].Text {
+		t.Fatalf("decisions = %+v", sig.Decisions)
+	}
+	if len(sig.ActionItems) != 2 {
+		t.Fatalf("action items = %+v, want 2", sig.ActionItems)
+	}
+	if sig.ActionItems[0].Text != segs[3].Text || sig.ActionItems[0].Owner != "Priya" {
+		t.Fatalf("action item 0 = %+v, want owner Priya", sig.ActionItems[0])
+	}
+	if sig.ActionItems[0].Level != "D" {
+		t.Fatalf("action item level = %q, want D (draft only, never executed)", sig.ActionItems[0].Level)
+	}
+	if sig.ActionItems[1].Text != segs[4].Text || sig.ActionItems[1].Owner != "" {
+		t.Fatalf("action item 1 = %+v, want no owner", sig.ActionItems[1])
+	}
+	if len(sig.OpenQuestions) != 1 || sig.OpenQuestions[0].Text != segs[5].Text {
+		t.Fatalf("open questions = %+v", sig.OpenQuestions)
+	}
+	if len(sig.FYI) != 1 || sig.FYI[0].Text != segs[6].Text {
+		t.Fatalf("fyi = %+v", sig.FYI)
+	}
+
+	// Property: every extracted item, whatever its bucket, is the exact text
+	// of some real segment — never a paraphrase or an invented fact.
+	segText := map[string]bool{}
+	for _, s := range segs {
+		segText[s.Text] = true
+	}
+	all := append([]RecapItem{}, sig.Decisions...)
+	all = append(all, sig.OpenQuestions...)
+	all = append(all, sig.FYI...)
+	for _, it := range all {
+		if !segText[it.Text] {
+			t.Fatalf("item %q does not trace to any real segment", it.Text)
+		}
+	}
+	for _, a := range sig.ActionItems {
+		if !segText[a.Text] {
+			t.Fatalf("action item %q does not trace to any real segment", a.Text)
+		}
+	}
+}
+
+// TestExtractSignalsNeverInventsOwners is the review finding: any
+// capitalized word before "to"/"will" used to become an action item's
+// owner ("owner: Want"), and questions were swallowed as action items.
+func TestExtractSignalsNeverInventsOwners(t *testing.T) {
+	for _, tc := range []struct {
+		text     string
+		bucket   string // "action", "question" or "none"
+		wantOwnr string
+	}{
+		{"Nice to meet you all", "none", ""},
+		{"Welcome to the call", "none", ""},
+		{"Want to grab lunch after?", "question", ""},
+		{"We will see", "none", ""},
+		{"Happy to help with that", "none", ""},
+		{"Going to be late tomorrow", "none", ""},
+		{"Priya will send the deck", "action", "Priya"},
+		{"Nice to meet you, and Sam to draft the memo", "action", "Sam"},
+		{"Action item: somebody should check pricing?", "action", ""},
+	} {
+		sig := ExtractSignals([]Segment{{Channel: Mic, Text: tc.text}})
+		gotBucket, gotOwner := "none", ""
+		switch {
+		case len(sig.ActionItems) == 1:
+			gotBucket, gotOwner = "action", sig.ActionItems[0].Owner
+		case len(sig.OpenQuestions) == 1:
+			gotBucket = "question"
+		}
+		if gotBucket != tc.bucket || gotOwner != tc.wantOwnr {
+			t.Errorf("%q: bucket=%s owner=%q, want %s owner=%q", tc.text, gotBucket, gotOwner, tc.bucket, tc.wantOwnr)
+		}
+	}
+}
+
+func TestRenderRecapSignalsLabelsProjectGuessAsAGuessNeverFact(t *testing.T) {
+	sig := ExtractSignals(scriptedTranscript(time.Now()))
+	withGuess := RenderRecapSignals(sig, ProjectGuess{Available: true, TypeID: "budget_request", Confidence: 0.62})
+	if !strings.Contains(withGuess, "GUESS") || !strings.Contains(withGuess, "0.62") || !strings.Contains(withGuess, "budget_request") {
+		t.Fatalf("rendered signals missing a clearly labeled guess: %q", withGuess)
+	}
+	if !strings.Contains(withGuess, "unconfirmed") {
+		t.Fatalf("rendered signals must say the match is unconfirmed: %q", withGuess)
+	}
+	noGuess := RenderRecapSignals(sig, ProjectGuess{})
+	if !strings.Contains(noGuess, "unavailable") {
+		t.Fatalf("rendered signals with no classifier must say unavailable: %q", noGuess)
+	}
+}
+
+type fakeClassifier struct {
+	c   decisions.Classification
+	err error
+}
+
+func (f fakeClassifier) Classify(context.Context, store.Record) (decisions.Classification, error) {
+	return f.c, f.err
+}
+
+func newRecapManager(t *testing.T) (*Manager, *store.Store) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return New(st), st
+}
+
+// TestRecapStoresTranscriptRefAndSummaryWithGuessedProject exercises
+// Recap end to end against a fixture transcript posted through AddSegment
+// (mirroring the replay-mode segments endpoint), asserting: one model call,
+// TranscriptRef pointing at the session, Summary holding the phrased text,
+// and the project match reported as a guess with its confidence.
+func TestRecapStoresTranscriptRefAndSummaryWithGuessedProject(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "evt-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seg := range scriptedTranscript(time.Now()) {
+		if err := m.AddSegment(ctx, s.ID, seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := m.Stop(ctx, s.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	fb := backend.NewFake("fake")
+	fb.Reply = func(req backend.Request) string {
+		return "Decisions: moved brokers to spot.\nAction items: Priya sends deck."
+	}
+	cls := fakeClassifier{c: decisions.Classification{NeedsDecision: true, TypeID: "budget_request", Confidence: 0.71}}
+
+	res, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fb.Calls() != 1 {
+		t.Fatalf("model calls = %d, want exactly 1 (code extracts, one call phrases)", fb.Calls())
+	}
+	if res.Text == "" {
+		t.Fatal("recap text is empty")
+	}
+	if !res.ProjectGuess.Available || res.ProjectGuess.TypeID != "budget_request" || res.ProjectGuess.Confidence != 0.71 {
+		t.Fatalf("project guess = %+v", res.ProjectGuess)
+	}
+	if got := fb.Requests()[0].Model; got != "haiku" {
+		t.Fatalf("model = %q, want the fast tier model passed in", got)
+	}
+
+	rec, err := store.Get[store.Meeting, *store.Meeting](ctx, st, "meetings", s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.TranscriptRef != s.ID {
+		t.Fatalf("TranscriptRef = %q, want the session id (the full transcript already lives in meeting_segments)", rec.TranscriptRef)
+	}
+	if rec.Summary != res.Text {
+		t.Fatalf("Summary = %q, want %q", rec.Summary, res.Text)
+	}
+	if !rec.External {
+		t.Fatal("a meeting record built from untrusted transcript content must be marked External")
+	}
+}
+
+// TestRecapWithNoClassifierLeavesProjectGuessUnavailable confirms a nil
+// classifier never causes Recap to guess blind.
+func TestRecapWithNoClassifierLeavesProjectGuessUnavailable(t *testing.T) {
+	m, _ := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: Mic, Text: "just a quick sync"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	res, err := m.Recap(ctx, s.ID, nil, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ProjectGuess.Available {
+		t.Fatalf("project guess = %+v, want unavailable with no classifier wired", res.ProjectGuess)
+	}
+}
+
+// TestRecapPersistsSignalsAndProjectGuessOntoMeetingSession is migration
+// 0022's own contract: recap_signals (JSON of RecapSignals) and the project
+// guess (id, confidence) land on the meeting_sessions row itself, not only
+// in the phrased store.Meeting summary, so the recap view can render the
+// four sections and the guess without re-parsing prose.
+func TestRecapPersistsSignalsAndProjectGuessOntoMeetingSession(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seg := range scriptedTranscript(time.Now()) {
+		if err := m.AddSegment(ctx, s.ID, seg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fb := backend.NewFake("fake")
+	fb.Reply = func(backend.Request) string { return "Decisions: moved brokers to spot." }
+	cls := fakeClassifier{c: decisions.Classification{TypeID: "budget_request", Confidence: 0.71}}
+	res, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	row, err := st.GetMeetingSession(ctx, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.RecapSignals == "" {
+		t.Fatal("recap_signals was not persisted")
+	}
+	var sig RecapSignals
+	if err := json.Unmarshal([]byte(row.RecapSignals), &sig); err != nil {
+		t.Fatalf("recap_signals is not valid JSON: %v", err)
+	}
+	if len(sig.Decisions) != len(res.Signals.Decisions) || len(sig.ActionItems) != len(res.Signals.ActionItems) {
+		t.Fatalf("persisted signals = %+v, want to match res.Signals = %+v", sig, res.Signals)
+	}
+	if sig.ActionItems[0].Owner == "" && res.Signals.ActionItems[0].Owner != "" {
+		t.Fatalf("persisted action item lost its owner: %+v", sig.ActionItems[0])
+	}
+	if row.ProjectGuessID != "budget_request" {
+		t.Fatalf("project_guess_id = %q, want budget_request", row.ProjectGuessID)
+	}
+	if row.ProjectGuessConfidence == nil || *row.ProjectGuessConfidence != 0.71 {
+		t.Fatalf("project_guess_confidence = %v, want 0.71", row.ProjectGuessConfidence)
+	}
+}
+
+// TestRecapWithUnavailableGuessPersistsNoProjectGuess: a nil classifier (or
+// a Fallback verdict) must leave project_guess_id/confidence unset, not a
+// fake zero-confidence guess.
+func TestRecapWithUnavailableGuessPersistsNoProjectGuess(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: Mic, Text: "just a quick sync"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	if _, err := m.Recap(ctx, s.ID, nil, fb, "haiku", 0); err != nil {
+		t.Fatal(err)
+	}
+	row, err := st.GetMeetingSession(ctx, s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ProjectGuessID != "" || row.ProjectGuessConfidence != nil {
+		t.Fatalf("row = %+v, want no project guess persisted", row)
+	}
+}
+
+// TestRecapProjectGuessNeverWritesAForProjectLink is the phase's central
+// safety property: a labelled project guess is shown to the CEO, and it
+// must never, by itself, create a for_project link (or any other anchor) —
+// only the CEO's own action ever does that (docs/slices/UI.md Phase 3d,
+// V's invariant 9 "never-guess links").
+func TestRecapProjectGuessNeverWritesAForProjectLink(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: System, Text: "the halcyon rollout budget is over by twenty percent"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	fb.Reply = func(backend.Request) string { return "Decisions: none." }
+	cls := fakeClassifier{c: decisions.Classification{TypeID: "halcyon-rollout", Confidence: 0.9}}
+	if _, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 0); err != nil {
+		t.Fatal(err)
+	}
+	links, err := st.LinksFrom(ctx, "meeting", s.ID, store.LinkForProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("for_project links after recap = %+v, want none: a project guess must never file a link on its own", links)
+	}
+	threads, err := st.ListThreads(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 0 {
+		t.Fatalf("threads after recap = %+v, want none: a project guess must never anchor a thread on its own", threads)
+	}
+}
+
+func TestRecapUnknownSessionIsNotFound(t *testing.T) {
+	m, _ := newRecapManager(t)
+	fb := backend.NewFake("fake")
+	if _, err := m.Recap(context.Background(), "mtg_nope", nil, fb, "haiku", 0); err == nil {
+		t.Fatal("expected an error for an unknown session")
+	}
+}
+
+// TestRecapGuessLabelDoesNotDependOnTheModel: the project match is labeled
+// a guess, with its confidence, by code in the returned and stored recap
+// text, so a phrasing that states it as settled fact (or drops it) can't
+// reach a reader of Meeting.Summary unlabeled.
+func TestRecapGuessLabelDoesNotDependOnTheModel(t *testing.T) {
+	m, st := newRecapManager(t)
+	ctx := context.Background()
+	s, err := m.Start(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddSegment(ctx, s.ID, Segment{Channel: System, Text: "the Kafka budget is over by twenty percent"}); err != nil {
+		t.Fatal(err)
+	}
+	fb := backend.NewFake("fake")
+	fb.Reply = func(backend.Request) string { return "Decisions: none.\nProject: budget_request." }
+	cls := fakeClassifier{c: decisions.Classification{NeedsDecision: true, TypeID: "budget_request", Confidence: 0.55}}
+	res, err := m.Recap(ctx, s.ID, cls, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := store.Get[store.Meeting, *store.Meeting](ctx, st, "meetings", s.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"Text": res.Text, "Summary": rec.Summary} {
+		if !strings.Contains(text, "budget_request (a guess, confidence 0.55, unconfirmed)") {
+			t.Fatalf("%s = %q, want the code-rendered guess label", name, text)
+		}
+	}
+
+	// A fallback verdict (the classifier couldn't read its own reply) is not
+	// a guess at all: it is reported unavailable, not as "generic".
+	fb.Reply = func(backend.Request) string { return "Decisions: none." }
+	cls = fakeClassifier{c: decisions.Classification{NeedsDecision: true, TypeID: "generic", Fallback: true}}
+	res, err = m.Recap(ctx, s.ID, cls, fb, "haiku", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ProjectGuess.Available || !strings.Contains(res.Text, "Project match: unavailable") {
+		t.Fatalf("fallback verdict: guess = %+v, text = %q; want unavailable", res.ProjectGuess, res.Text)
+	}
+}

@@ -1,0 +1,60 @@
+id: budget_request
+title: Budget request
+trigger: >-
+  Someone is asking for money: a purchase, a renewal, a headcount budget, a
+  raise, or any other spend that needs the CEO's approval.
+needs:
+  - name: requester_history
+    fetch: gmail.list_messages
+    kind: lookup
+    args: {query: "from:{sender}"}
+  - name: comparable_requests
+    fetch: gdrive.search_files
+    kind: research
+    args: {query: "{keywords}"}
+default_rule: >-
+  Approve if the amount is under $2,000 and runway stays above 6 months
+  after it; otherwise route to the CEO with the full packet.
+staged_actions:
+  - gmail.send_message
+severity_weight: 2
+---
+`staged_actions` names only `gmail.send_message` (level A): a staged action
+must be level A, and `gmail.draft_message` (level D) has no external effect
+and runs directly rather than being queued for approval — see
+twins/ceo/decisions/budget_request.yaml's matching note.
+
+The threshold in `default_rule` follows the board policy in
+`twins/ceo/role.md`'s "Budget structure" section; update both together if
+that policy changes.
+
+This demo twin deliberately has no `cash_position`/`budget_status` need,
+unlike the real `twins/ceo/decisions/budget_request.yaml`: those call
+`company_finance` (`internal/connectors/google/gsheets`), a real Google
+Sheets connector reading the company's actual financial model, and the demo
+twin is registered with fake, in-memory stand-ins for GitHub/Linear/HubSpot
+specifically so it never needs a real credential — there is no fake
+`company_finance`, so granting it here would mean either the demo twin
+fails to start (no connector to satisfy the manifest) or it reaches the
+owner's real financial sheet with the demo's own showcase data, neither of
+which is right. The runway figure this used to (nominally) compute via a
+Drive-exported-CSV read was already non-functional in this file too — its
+`budget_spreadsheet` need pointed at the same unfilled
+`CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet` placeholder the real
+twin's copy had — so dropping it here is a simplification, not a
+regression.
+
+`comparable_requests` is a keyword search over Drive for similar past asks,
+the same pattern `generic`'s own needs use; it is research, not part of the
+runway math.
+
+This type is classified, not run on every synced message: the daemon only
+offers an item to `Classify` when the brief's existing "needs attention"
+heuristic (`internal/runtime/brief.go`) already flagged it as worth a human
+look, and each item is classified at most once (cached by its
+`store.Meta` `Source`+`SourceID`). The cached verdict is not tied to the
+item's content: it is cleared only by an explicit `Triager.Forget`, and a
+verdict the model's reply could not be read for is never cached durably
+(it is retried later instead of pinning the item to `generic`). Classification itself still decides
+whether the flagged item is a budget request at all, or something else, or
+nothing needing a decision.

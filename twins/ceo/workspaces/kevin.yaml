@@ -1,0 +1,7 @@
+# Project workspace: Kevin, twins/ceo/seed/people.yaml's "kevin" team,
+# Linear key KEV.
+id: kevin
+name: Kevin
+template: project
+source: linear_team:KEV
+teams: [KEV]

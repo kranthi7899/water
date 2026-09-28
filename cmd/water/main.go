@@ -1,18 +1,12 @@
-// Command water is the multi-agent persona CLI.
+// Command water is the CEO digital-twin CLI.
 package main
 
 import (
-	"io/fs"
 	"os"
 
-	"water"
 	"water/internal/cli"
 )
 
 func main() {
-	agents, err := fs.Sub(water.AgentsFS(), "agents")
-	if err != nil {
-		panic(err)
-	}
-	os.Exit(cli.Execute(agents, water.ThemesFS(), os.Args[1:]))
+	os.Exit(cli.Execute(os.Args[1:]))
 }

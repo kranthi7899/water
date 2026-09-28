@@ -24,7 +24,7 @@ func init() { Register("os", func() Provider { return NewOS() }) }
 type OS struct {
 	bin   string
 	args  []string
-	voice string                       // resolved per-role voice; empty means the system default
+	voice string                       // resolved CEO voice; empty means the system default
 	rate  int                          // words per minute; 0 means the engine default
 	Look  func(string) (string, error) // exec.LookPath; overridable in tests
 }
@@ -36,13 +36,17 @@ func NewOS() *OS {
 	return o
 }
 
-func (o *OS) detect() {
+func (o *OS) detect() { o.detectFor(runtime.GOOS) }
+
+func (o *OS) detectFor(goos string) {
 	candidates := [][]string{}
-	switch runtime.GOOS {
+	switch goos {
 	case "darwin":
 		candidates = append(candidates, []string{"say"})
 	case "linux":
-		candidates = append(candidates, []string{"spd-say", "--wait"}, []string{"espeak"}, []string{"espeak-ng"})
+		// spd-say reads stdin only in pipe mode (-e); without it and without
+		// a text argument it prints its usage and exits 1.
+		candidates = append(candidates, []string{"spd-say", "--wait", "-e"}, []string{"espeak"}, []string{"espeak-ng"})
 	}
 	for _, c := range candidates {
 		if p, err := o.Look(c[0]); err == nil {
@@ -53,6 +57,15 @@ func (o *OS) detect() {
 }
 
 func (o *OS) Name() string { return "os" }
+
+// SetVoice overrides the resolved voice directly (e.g. from the daemon's
+// GET /v1/voice/profile, R-26's `water ask --voice`), bypassing
+// applyProfile's installed-voice lookup: the caller is trusting a name the
+// daemon itself already resolved from style.yaml, not raw owner input.
+func (o *OS) SetVoice(v string) { o.voice = v }
+
+// SetRate overrides the resolved speaking rate (words per minute) directly.
+func (o *OS) SetRate(wpm int) { o.rate = wpm }
 
 // Available reports whether a TTS binary was found.
 func (o *OS) Available() bool { return o.bin != "" }
@@ -69,8 +82,8 @@ func (o *OS) Absence() string {
 	}
 }
 
-// Speak renders text through the OS TTS binary, in this provider's per-role
-// voice when one was resolved. Markdown is flattened first so the engine does
+// Speak renders text through the OS TTS binary, in the resolved CEO voice
+// when one was resolved. Markdown is flattened first so the engine does
 // not recite asterisks, fences and table pipes.
 func (o *OS) Speak(ctx context.Context, text string) error {
 	if o.bin == "" {
@@ -82,7 +95,8 @@ func (o *OS) Speak(ctx context.Context, text string) error {
 	}
 	args := append([]string{}, o.args...)
 	args = append(args, o.voiceArgs()...)
-	// `say`, spd-say and espeak all read stdin when no text argument is given.
+	// `say` and espeak read stdin when no text argument is given; spd-say
+	// does in pipe mode, which detectFor always passes (-e).
 	cmd := exec.CommandContext(ctx, o.bin, args...)
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Env = backend.ScrubbedEnv()

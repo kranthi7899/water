@@ -1,0 +1,10 @@
+# Clients dashboard spec (Phase 1a: spec only). docs/slices/UI.md Phase 4
+# (U3): accounts at risk, open tickets and NPS; the breakdown is accounts
+# by health; the callout is the account with the longest time since
+# contact and money outstanding (joining finance outstanding_invoices by
+# account name).
+name: Clients
+source: company_customers
+metrics: [accounts_at_risk, open_tickets, nps_score]
+breakdown: accounts_by_health
+callout: longest_silent_account_with_balance

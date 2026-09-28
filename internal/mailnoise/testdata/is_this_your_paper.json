@@ -1,0 +1,6 @@
+{
+  "_note": "Synthesized, not pulled from ~/.water/water.db: the sandboxed shell could not open that file this session (sqlite3 -readonly failed with SQLITE_CANTOPEN). This is a realistic stand-in for an academic-spam 'is this your paper?' email, built by hand per the task's fallback instruction.",
+  "subject": "Is this your paper? Please confirm your listing",
+  "from": "Academic Author Alerts <updates@scholar-alerts-mail.example>",
+  "snippet": "Hi Kranthi, is this your paper on distributed systems research? Please confirm your authorship and claim your profile so your citation count stays accurate."
+}

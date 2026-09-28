@@ -32,27 +32,20 @@ func TestOSDegradesWithClearMessage(t *testing.T) {
 	}
 }
 
-func TestOSRolesResolveDistinctInstalledVoices(t *testing.T) {
+func TestOSRoleResolvesInstalledVoice(t *testing.T) {
 	installed := []string{"Daniel", "Samantha", "Rishi", "Moira", "Ava (Premium)"}
-	got := map[string]string{}
-	for _, r := range []string{"ceo", "coo", "cto", "design"} {
-		o := &OS{bin: "/usr/bin/say"}
-		o.voice = pickVoice("", OSProfileFor(r).Voices, installed)
-		got[r] = o.voice
+	o := &OS{bin: "/usr/bin/say"}
+	o.voice = pickVoice("", CEOOSProfile().Voices, installed)
+	if o.voice != "Daniel" {
+		t.Fatalf("ceo voice = %q, want Daniel", o.voice)
 	}
-	want := map[string]string{"ceo": "Daniel", "coo": "Ava (Premium)", "cto": "Rishi", "design": "Moira"}
-	for r, v := range want {
-		if got[r] != v {
-			t.Fatalf("%s voice = %q, want %q (all: %v)", r, got[r], v, got)
-		}
-	}
-	if v := pickVoice("samantha", OSProfileFor("ceo").Voices, installed); v != "Samantha" {
+	if v := pickVoice("samantha", CEOOSProfile().Voices, installed); v != "Samantha" {
 		t.Fatalf("installed override ignored: %q", v)
 	}
-	if v := pickVoice("marin", OSProfileFor("ceo").Voices, installed); v != "Daniel" {
-		t.Fatalf("uninstalled override must fall back to role default, got %q", v)
+	if v := pickVoice("marin", CEOOSProfile().Voices, installed); v != "Daniel" {
+		t.Fatalf("uninstalled override must fall back to the profile default, got %q", v)
 	}
-	if v := pickVoice("", OSProfileFor("ceo").Voices, nil); v != "" {
+	if v := pickVoice("", CEOOSProfile().Voices, nil); v != "" {
 		t.Fatalf("no installed voices must mean system default, got %q", v)
 	}
 }
@@ -68,6 +61,25 @@ func TestOSVoiceArgs(t *testing.T) {
 	}
 	if got := (&OS{bin: "/usr/bin/spd-say"}).voiceArgs(); len(got) != 0 {
 		t.Fatalf("spd-say args = %v", got)
+	}
+}
+
+// spd-say only reads the text from stdin in pipe mode (-e); without it,
+// Speak's stdin text is ignored and spd-say exits 1 with its usage.
+func TestOSDetectSpdSayUsesPipeMode(t *testing.T) {
+	o := &OS{Look: func(name string) (string, error) { return "/usr/bin/" + name, nil }}
+	o.detectFor("linux")
+	if o.bin != "/usr/bin/spd-say" {
+		t.Fatalf("bin = %q, want spd-say first on linux", o.bin)
+	}
+	hasPipe := false
+	for _, a := range o.args {
+		if a == "-e" || a == "--pipe-mode" {
+			hasPipe = true
+		}
+	}
+	if !hasPipe {
+		t.Fatalf("spd-say args %v lack -e: stdin text would never be spoken", o.args)
 	}
 }
 

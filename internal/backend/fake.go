@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -48,4 +49,23 @@ func (f *Fake) Run(ctx context.Context, req Request) (Response, error) {
 		text = f.Reply(req)
 	}
 	return Response{Text: text, Raw: text, Metered: f.Avail.Metered, Backend: f.FakeName, AttachmentsDelivered: len(req.Attachments) > 0}, nil
+}
+
+// RunStream makes Fake a Streamer: it delivers the same text Run would, split
+// into words so tests can assert deltas arrive in order before the result.
+func (f *Fake) RunStream(ctx context.Context, req Request, onDelta func(string)) (Response, error) {
+	resp, err := f.Run(ctx, req)
+	if err != nil {
+		return resp, err
+	}
+	if onDelta != nil {
+		words := strings.Fields(resp.Text)
+		for i, w := range words {
+			if i > 0 {
+				onDelta(" ")
+			}
+			onDelta(w)
+		}
+	}
+	return resp, nil
 }

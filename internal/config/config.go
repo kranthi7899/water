@@ -21,43 +21,254 @@ const CurrentSchema = 1
 
 // Config is the typed, fully-resolved configuration.
 type Config struct {
-	Schema        int                 `yaml:"schema"`
-	Backend       BackendConfig       `yaml:"backend"`
-	Memory        MemoryConfig        `yaml:"memory"`
-	Voice         VoiceConfig         `yaml:"voice"`
-	Orchestration OrchestrationConfig `yaml:"orchestration"`
-	Telemetry     TelemetryConfig     `yaml:"telemetry"`
-	API           APIConfig           `yaml:"api"`
-	Sessions      SessionsConfig      `yaml:"sessions"`
-	Tools         ToolsConfig         `yaml:"tools"`
-	Skills        SkillsConfig        `yaml:"skills"`
-	UI            UIConfig            `yaml:"ui"`
-	Onboard       OnboardConfig       `yaml:"onboard"`
+	Schema   int            `yaml:"schema"`
+	Backend  BackendConfig  `yaml:"backend"`
+	Voice    VoiceConfig    `yaml:"voice"`
+	API      APIConfig      `yaml:"api"`
+	Onboard  OnboardConfig  `yaml:"onboard"`
+	Sync     SyncConfig     `yaml:"sync"`
+	Brief    BriefConfig    `yaml:"brief"`
+	Meetings MeetingsConfig `yaml:"meetings"`
+	Agent    AgentConfig    `yaml:"agent"`
+	GitHub   GitHubConfig   `yaml:"github"`
+	Router   RouterConfig   `yaml:"router"`
+	Decider  DeciderConfig  `yaml:"decider"`
+	Notify   NotifyConfig   `yaml:"notify"`
+	// Decisions configures the decision-card layer (internal/decisions).
+	Decisions DecisionsConfig `yaml:"decisions"`
 }
 
-// SessionsConfig is transcript retention (Part 4.3): count-based with an age
-// backstop; pinned sessions are exempt.
-type SessionsConfig struct {
-	Keep   int    `yaml:"keep"`
-	MaxAge string `yaml:"max_age"`
+// DecisionsConfig configures internal/decisions' Trigger.
+type DecisionsConfig struct {
+	// CardTTLSeconds is how long decisions.Trigger reuses its last pass of
+	// cards before building them again (decisions.card_ttl_seconds). Each
+	// build fetches every card's evidence through the gate, so this is what
+	// keeps the needs-you ticker, GET /v1/decisions and the brief from
+	// spending the hourly rate caps the CEO's own questions share. 0 turns
+	// the cache off (every request rebuilds); negative is refused.
+	CardTTLSeconds int `yaml:"card_ttl_seconds"`
 }
 
-// ToolsConfig enables Water's tool layer for roles whose role.yaml declares a
-// tools block, and names the roots they may read. Roots are never inherited
-// from the working directory (Part 5.2).
-type ToolsConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Roots   string `yaml:"roots"` // comma-separated absolute or ~-paths
+// CardTTL is CardTTLSeconds as a time.Duration.
+func (c DecisionsConfig) CardTTL() time.Duration {
+	return time.Duration(c.CardTTLSeconds) * time.Second
 }
 
-// SkillsConfig picks the skill selector.
-type SkillsConfig struct {
-	Selector string `yaml:"selector"` // description | keyword
+// DeciderConfig selects the internal/decider.Decider implementation
+// (docs/slices/R.md §15/§17). Landed with R-24, the task that builds
+// internal/decider, the same early-landing call R-21/R-23 made for their
+// own flags: only "none" (internal/decider.Null) is supported today, and
+// apply() rejects anything else — there is no Jev or other adapter to
+// select yet.
+type DeciderConfig struct {
+	Provider string `yaml:"provider"`
 }
 
-// UIConfig holds interactive-session knobs.
-type UIConfig struct {
-	Theme string `yaml:"theme"` // "" = per-role theme; a name forces one theme
+// RouterConfig configures Slice R's nervous-system router
+// (internal/nervous), per docs/slices/R.md Design §17's full table. The
+// voice approval binding's (R-21) and promotion loop's (R-23) flags landed
+// early; the rest lands with this task (R-25).
+type RouterConfig struct {
+	Tier0        RouterTier0Config       `yaml:"tier0"`
+	Main         RouterMainConfig        `yaml:"main"`
+	Breaker      RouterBreakerConfig     `yaml:"breaker"`
+	Speculation  RouterSpeculationConfig `yaml:"speculation"`
+	QuickTools   RouterQuickToolsConfig  `yaml:"quick_tools"`
+	VoiceApprove VoiceApproveConfig      `yaml:"voice_approve"`
+	Promotion    PromotionConfig         `yaml:"promotion"`
+
+	// PossibleMissWindowSeconds bounds Tier 0's possible-miss detection
+	// window (router.possible_miss_window_seconds, nervous.Config.MissWindow).
+	PossibleMissWindowSeconds int `yaml:"possible_miss_window_seconds"`
+	// LogRetentionDays bounds how long route_log rows are kept
+	// (router.log_retention_days, nervous.Config.Retention).
+	LogRetentionDays int `yaml:"log_retention_days"`
+	// AckMS bounds how long an unrouted turn waits before Handle emits a
+	// handoff acknowledgement on its own (router.ack_ms,
+	// nervous.Config.AckAfter). apply() rejects any value >= 300: the
+	// handoff acknowledgement must arrive well inside the 300ms budget
+	// R-12's own tests lock in (docs/slices/R.md acceptance criterion 9),
+	// so a value at or above that budget could never actually be met.
+	AckMS int `yaml:"ack_ms"`
+	// VoiceFillerMS is router.voice_filler_ms (Slice W, D3;
+	// nervous.Config.VoiceFiller). The handoff is never spoken by default;
+	// when this is > 0, a voice turn escalated to the main model speaks one
+	// short filler (style.voice.handoff[0]) only if the model has produced
+	// no sentence by then. 0 (the default) is off; apply() bounds it to
+	// 0..10000.
+	VoiceFillerMS int `yaml:"voice_filler_ms"`
+}
+
+// RouterTier0Config configures Tier 0, the sous chef's deterministic
+// template match (router.tier0.*).
+type RouterTier0Config struct {
+	Enabled   bool `yaml:"enabled"`
+	TimeoutMS int  `yaml:"timeout_ms"`
+}
+
+// RouterMainConfig configures the main path (router.main.*). Disabling it
+// leaves quick answers only; an unanswered turn errors.
+type RouterMainConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// RouterBreakerConfig configures Tier 0's circuit breaker
+// (router.breaker.*, nervous.BreakerConfig). MissSample and MinMissSamples
+// are not in Design §17's table — they stay the code defaults
+// nervous.DefaultBreakerConfig documents, not a settable key.
+type RouterBreakerConfig struct {
+	Failures        int `yaml:"failures"`
+	CooldownSeconds int `yaml:"cooldown_seconds"`
+	MaxMissRatePct  int `yaml:"max_miss_rate_pct"`
+}
+
+// RouterSpeculationConfig gates R-19's partial-transcript prefetch
+// (router.speculation.enabled).
+type RouterSpeculationConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// RouterQuickToolsConfig gates the main agent's quick-tool bridge
+// (router.quick_tools.enabled).
+type RouterQuickToolsConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// PromotionConfig gates the learned-intent growth loop (router.promotion.*,
+// code default off; docs/slices/R.md Design §16). Landed with this task
+// (R-23), ahead of R-25's bulk config commit, the same way R-21 landed
+// router.voice_approve.* early: the feature needs a real settable flag to
+// be testable end to end, and R-25 has not landed yet.
+type PromotionConfig struct {
+	// Enabled gates both drafting (`water intent draft`/POST
+	// /v1/intents/draft) and promoting (`water intent promote`) a learned
+	// intent, and whether intents.LoadOptions.Learned is ever populated at
+	// all (with it off, the overlay directory is never loaded, regardless
+	// of what it contains).
+	Enabled bool
+	// MinRepeats is `water route candidates`'s default --min (Design §16
+	// item 1). Candidate listing itself is never gated by Enabled.
+	MinRepeats int
+	// MaxLearned bounds how many learned intents may be simultaneously
+	// active (promote.ValidateLearned's cap).
+	MaxLearned int
+	// DemoteMissRatePct and DemoteMinSamples feed the automatic-demotion
+	// breaker (nervous.PromotionConfig, LearnedIntentShouldDemote).
+	DemoteMissRatePct int
+	DemoteMinSamples  int
+}
+
+// VoiceApproveConfig gates a bare voice yes/no directly deciding a pending
+// envelope bound to an earlier read-back (router.voice_approve.enabled,
+// code default false; docs/slices/R.md Design §13).
+type VoiceApproveConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// WindowSeconds bounds how long after a read-back a bare yes/no on the
+	// same voice channel still binds to it.
+	WindowSeconds int `yaml:"window_seconds"`
+	// InternalDomains is a comma-separated list of domains a recipient
+	// address may belong to without requiring a tap. Empty means every
+	// recipient is external — fail closed, never fail open.
+	InternalDomains string `yaml:"internal_domains"`
+}
+
+// SyncConfig configures the daemon's background Google refresh
+// (internal/sync): calendar and mail refresh on independent intervals, mail
+// far more often since it is cheap to poll and staleness matters more.
+type SyncConfig struct {
+	IntervalMinutes     int `yaml:"interval_minutes"`
+	MailIntervalSeconds int `yaml:"mail_interval_seconds"`
+}
+
+// Interval is IntervalMinutes as a time.Duration (the calendar cadence).
+func (c SyncConfig) Interval() time.Duration { return time.Duration(c.IntervalMinutes) * time.Minute }
+
+// MailInterval is MailIntervalSeconds as a time.Duration.
+func (c SyncConfig) MailInterval() time.Duration {
+	return time.Duration(c.MailIntervalSeconds) * time.Second
+}
+
+// BriefConfig configures the morning brief's background precompute
+// (internal/runtime/brief.go via internal/sync's events tick).
+type BriefConfig struct {
+	// ReadyAfter is "HH:MM" local time; the precompute only fires once local
+	// time is past this, so it doesn't try before the CEO's day realistically
+	// starts.
+	ReadyAfter string `yaml:"ready_after"`
+}
+
+// MeetingsConfig configures Slice M's live-meeting features.
+type MeetingsConfig struct {
+	// ProactiveCues gates GET /v1/meetings/{id}/cues (docs/slices/M.md
+	// section 6): quiet, rate-limited related-item suggestions surfaced
+	// from a live session's recent transcript. Off by default, following
+	// this package's existing plain-bool-flag convention.
+	ProactiveCues bool `yaml:"proactive_cues"`
+}
+
+// NotifyConfig configures internal/needsyou's shared "needs you" threshold
+// (Slice V-3, docs/slices/V.md §5): the point at which a decision or a
+// pending approval crosses from merely existing to something Today and
+// Notifications actually surface. Duration-shaped keys are seconds-as-int,
+// matching this package's existing convention for a duration-shaped key
+// (router.tier0.timeout_ms is milliseconds-as-int; router.breaker.
+// cooldown_seconds and router.voice_approve.window_seconds are
+// seconds-as-int) rather than a parseable duration string.
+type NotifyConfig struct {
+	// MinSeverity is the lowest decisions.Card.Severity that counts as
+	// "needs you" (notify.min_severity).
+	MinSeverity int `yaml:"min_severity"`
+	// ApprovalGraceSeconds is how long a pending approval waits before it
+	// counts as "needs you" too (notify.approval_grace_seconds): a fresh
+	// approval isn't yet stale enough to escalate.
+	ApprovalGraceSeconds int `yaml:"approval_grace_seconds"`
+	// IntervalSeconds is how often needsyou.Service.Tick recomputes the
+	// snapshot (notify.interval_seconds).
+	IntervalSeconds int `yaml:"interval_seconds"`
+}
+
+// ApprovalGrace is ApprovalGraceSeconds as a time.Duration.
+func (c NotifyConfig) ApprovalGrace() time.Duration {
+	return time.Duration(c.ApprovalGraceSeconds) * time.Second
+}
+
+// Interval is IntervalSeconds as a time.Duration.
+func (c NotifyConfig) Interval() time.Duration {
+	return time.Duration(c.IntervalSeconds) * time.Second
+}
+
+// AgentConfig configures how outward actions identify themselves as the
+// agent, never the CEO.
+type AgentConfig struct {
+	// MailAddress is the "Send mail as" alias (e.g. water.twin@gmail.com)
+	// the CEO verifies on their real Gmail account through Gmail's own web
+	// UI. gmail.send_message/draft_message set the MIME From: header to
+	// this address; sending still uses the real account's existing OAuth
+	// grant. Empty until the CEO sets it, after creating the alias account.
+	MailAddress string `yaml:"mail_address"`
+	// ForwardTo is the CEO's own real address: internal/agentmail's
+	// inbound-triage watcher forwards a message it judges is meant for the
+	// CEO (not the agent) here, as a level-A gmail.send_message approval.
+	// Empty means such mail is logged but never staged, since there is
+	// nowhere configured to send it.
+	ForwardTo string `yaml:"forward_to"`
+	// SignatureName is the CEO's name, used in the disclosure line
+	// gmail.send_message/draft_message append to mail sent under the agent's
+	// identity (e.g. "Sent by Water, an AI assistant, on behalf of Alex —
+	// approved before sending."). Empty by default (twins/ceo/role.md's
+	// environment section is still a placeholder, so there is no real name to
+	// read yet); an empty value omits the "on behalf of" clause entirely
+	// rather than inventing a placeholder name.
+	SignatureName string `yaml:"signature_name"`
+}
+
+// GitHubConfig configures the real github connector (internal/connectors/
+// github).
+type GitHubConfig struct {
+	// Repo is the "owner/name" repo list_prs/list_issues query. Empty by
+	// default: the connector refuses with a clear error until this is set,
+	// rather than guessing a repo.
+	Repo string `yaml:"repo"`
 }
 
 // OnboardConfig records the last verified round trip.
@@ -65,77 +276,17 @@ type OnboardConfig struct {
 	VerifiedAt string `yaml:"verified_at"`
 }
 
-// RootList splits tools.roots.
-func (c *Config) RootList() []string {
-	var out []string
-	for _, r := range strings.Split(c.Tools.Roots, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			out = append(out, Expand(r))
-		}
-	}
-	return out
-}
-
-// SessionMaxAge parses sessions.max_age (0 = disabled).
-func (c *Config) SessionMaxAge() time.Duration {
-	d, err := time.ParseDuration(c.Sessions.MaxAge)
-	if err != nil {
-		return 0
-	}
-	return d
-}
-
 type BackendConfig struct {
 	Preferred    string `yaml:"preferred"` // claude-subscription | codex-subscription | api | auto
 	AllowMetered bool   `yaml:"allow_metered"`
 }
 
-type MemoryConfig struct {
-	Provider   string `yaml:"provider"`
-	MaxEntries int    `yaml:"max_entries"`
-	MaxBytes   int    `yaml:"max_bytes"`
-}
-
+// VoiceConfig configures the single CEO twin's optional speech output.
 type VoiceConfig struct {
 	Provider     string `yaml:"provider"` // os | openai | noop
 	AllowMetered bool   `yaml:"allow_metered"`
 	Model        string `yaml:"model"`
 	CEOVoice     string `yaml:"ceo_voice"`
-	COOVoice     string `yaml:"coo_voice"`
-	CTOVoice     string `yaml:"cto_voice"`
-	DesignVoice  string `yaml:"design_voice"`
-}
-
-// VoiceFor returns the selected voice identifier for a role. Empty values are
-// intentional: providers then use their own safe profile defaults.
-func (c VoiceConfig) VoiceFor(role string) string {
-	switch role {
-	case "ceo":
-		return c.CEOVoice
-	case "coo":
-		return c.COOVoice
-	case "cto":
-		return c.CTOVoice
-	case "design":
-		return c.DesignVoice
-	default:
-		return ""
-	}
-}
-
-type OrchestrationConfig struct {
-	Router        string `yaml:"router"`
-	MaxParallel   int    `yaml:"max_parallel"`
-	Timeout       string `yaml:"timeout"`        // whole-run ceiling
-	CallTimeout   string `yaml:"call_timeout"`   // one model call
-	MaxSteps      int    `yaml:"max_steps"`      // hard step budget per run
-	MaxRounds     int    `yaml:"max_rounds"`     // COO assignment rounds (depth cap)
-	Checkpointer  string `yaml:"checkpointer"`   // file | noop
-	CheckpointDir string `yaml:"checkpoint_dir"` // where run snapshots live
-}
-
-type TelemetryConfig struct {
-	TraceDir string `yaml:"trace_dir"`
 }
 
 // APIConfig holds the metered backend's settings. Key is never written to the
@@ -143,24 +294,6 @@ type TelemetryConfig struct {
 type APIConfig struct {
 	Key   string `yaml:"key,omitempty"`
 	Model string `yaml:"model,omitempty"`
-}
-
-// TimeoutDuration parses orchestration.timeout (the whole-run ceiling).
-func (c *Config) TimeoutDuration() time.Duration {
-	d, err := time.ParseDuration(c.Orchestration.Timeout)
-	if err != nil {
-		return 20 * time.Minute
-	}
-	return d
-}
-
-// CallTimeoutDuration parses orchestration.call_timeout (one model call).
-func (c *Config) CallTimeoutDuration() time.Duration {
-	d, err := time.ParseDuration(c.Orchestration.CallTimeout)
-	if err != nil {
-		return 4 * time.Minute
-	}
-	return d
 }
 
 // Layer names, in precedence order.
@@ -191,38 +324,81 @@ func Keys() []string {
 
 func defaults() map[string]string {
 	return map[string]string{
-		"schema":                       strconv.Itoa(CurrentSchema),
-		"backend.preferred":            "auto",
-		"backend.allow_metered":        "false",
-		"memory.provider":              "markdown",
-		"memory.max_entries":           "200",
-		"memory.max_bytes":             "32768",
-		"voice.provider":               "os",
-		"voice.allow_metered":          "false",
-		"voice.model":                  "gpt-4o-mini-tts",
-		"voice.ceo_voice":              "",
-		"voice.coo_voice":              "",
-		"voice.cto_voice":              "",
-		"voice.design_voice":           "",
-		"orchestration.router":         "hierarchy",
-		"orchestration.max_parallel":   "4",
-		"orchestration.timeout":        "20m",
-		"orchestration.call_timeout":   "4m",
-		"orchestration.max_steps":      "24",
-		"orchestration.max_rounds":     "2",
-		"orchestration.checkpointer":   "file",
-		"orchestration.checkpoint_dir": filepath.Join(Home(), "checkpoints"),
-		"telemetry.trace_dir":          filepath.Join(Home(), "traces"),
-		"api.key":                      "",
-		"api.model":                    "",
-		"sessions.keep":                "30",
-		"sessions.max_age":             "2160h",
-		"tools.enabled":                "false",
-		"tools.roots":                  "",
-		"skills.selector":              "description",
-		"ui.theme":                     "",
-		"onboard.verified_at":          "",
+		"schema":                                strconv.Itoa(CurrentSchema),
+		"backend.preferred":                     "auto",
+		"backend.allow_metered":                 "false",
+		"voice.provider":                        "os",
+		"voice.allow_metered":                   "false",
+		"voice.model":                           "gpt-4o-mini-tts",
+		"voice.ceo_voice":                       "",
+		"api.key":                               "",
+		"api.model":                             "",
+		"onboard.verified_at":                   "",
+		"sync.interval_minutes":                 "10",
+		"sync.mail_interval_seconds":            "60",
+		"brief.ready_after":                     "07:00",
+		"meetings.proactive_cues":               "false",
+		"agent.mail_address":                    "",
+		"agent.forward_to":                      "",
+		"agent.signature_name":                  "",
+		"github.repo":                           "",
+		"router.tier0.enabled":                  "true",
+		"router.tier0.timeout_ms":               "150",
+		"router.main.enabled":                   "true",
+		"router.breaker.failures":               "5",
+		"router.breaker.cooldown_seconds":       "60",
+		"router.breaker.max_miss_rate_pct":      "20",
+		"router.possible_miss_window_seconds":   "60",
+		"router.log_retention_days":             "90",
+		"router.ack_ms":                         "250",
+		"router.voice_filler_ms":                "0",
+		"router.speculation.enabled":            "true",
+		"router.quick_tools.enabled":            "true",
+		"router.voice_approve.enabled":          "false",
+		"router.voice_approve.window_seconds":   "60",
+		"router.voice_approve.internal_domains": "",
+		"router.promotion.enabled":              "false",
+		"router.promotion.min_repeats":          "5",
+		"router.promotion.max_learned":          "20",
+		"router.promotion.demote_miss_rate_pct": "20",
+		"router.promotion.demote_min_samples":   "10",
+		"decider.provider":                      "none",
+		"notify.min_severity":                   "2",
+		"notify.approval_grace_seconds":         "30",
+		"notify.interval_seconds":               "900", // 15 min: each tick re-fetches card evidence through the gate; see TestNotifyIntervalDefaultDoesNotStarveRateCaps
+		"decisions.card_ttl_seconds":            "600", // 10 min: how long decision cards (and their gate-fetched evidence) are reused
 	}
+}
+
+// retiredPrefixes and retiredKeys name config sections and keys removed after
+// the council-to-single-twin rebuild (orchestration, per-role sessions/tools/
+// skills/ui/telemetry/memory knobs, and the COO/CTO/design voices), plus
+// router.tier1.* (the FunctionGemma small-model router tier, retired along
+// with internal/nervous/sidecar and internal/nervous/t1). An old config.yaml
+// that still sets them must keep loading, so Load ignores them instead of
+// failing with "unknown key"; it still rejects anything else it doesn't
+// recognize. There is no schema bump: nothing about the resolved shape of a
+// *current* key changed, only which keys still exist.
+var retiredPrefixes = []string{
+	"orchestration.", "sessions.", "tools.", "skills.", "ui.", "telemetry.", "memory.", "router.tier1.",
+}
+
+var retiredKeys = map[string]bool{
+	"voice.coo_voice":    true,
+	"voice.cto_voice":    true,
+	"voice.design_voice": true,
+}
+
+func retired(key string) bool {
+	if retiredKeys[key] {
+		return true
+	}
+	for _, p := range retiredPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Load resolves configuration. flags are dotted-key overrides supplied by the
@@ -247,6 +423,9 @@ func Load(flags map[string]string) (*Resolved, error) {
 		}
 		for k, v := range flatten("", raw) {
 			if _, known := flat[k]; !known {
+				if retired(k) {
+					continue
+				}
 				return nil, fmt.Errorf("%s: unknown key %q", res.FilePath, k)
 			}
 			flat[k], prov[k] = v, LayerFile
@@ -295,85 +474,149 @@ func (r *Resolved) apply(flat map[string]string) error {
 	r.Schema = atoi("schema")
 	r.Backend.Preferred = flat["backend.preferred"]
 	r.Backend.AllowMetered = abool("backend.allow_metered")
-	r.Memory.Provider = flat["memory.provider"]
-	r.Memory.MaxEntries = atoi("memory.max_entries")
-	r.Memory.MaxBytes = atoi("memory.max_bytes")
 	r.Voice.Provider = flat["voice.provider"]
 	r.Voice.AllowMetered = abool("voice.allow_metered")
 	r.Voice.Model = flat["voice.model"]
 	r.Voice.CEOVoice = flat["voice.ceo_voice"]
-	r.Voice.COOVoice = flat["voice.coo_voice"]
-	r.Voice.CTOVoice = flat["voice.cto_voice"]
-	r.Voice.DesignVoice = flat["voice.design_voice"]
-	r.Orchestration.Router = flat["orchestration.router"]
-	r.Orchestration.MaxParallel = atoi("orchestration.max_parallel")
-	r.Orchestration.Timeout = flat["orchestration.timeout"]
-	r.Orchestration.CallTimeout = flat["orchestration.call_timeout"]
-	r.Orchestration.MaxSteps = atoi("orchestration.max_steps")
-	r.Orchestration.MaxRounds = atoi("orchestration.max_rounds")
-	r.Orchestration.Checkpointer = flat["orchestration.checkpointer"]
-	r.Orchestration.CheckpointDir = Expand(flat["orchestration.checkpoint_dir"])
-	r.Telemetry.TraceDir = Expand(flat["telemetry.trace_dir"])
 	r.API.Key = flat["api.key"]
 	r.API.Model = flat["api.model"]
-	r.Sessions.Keep = atoi("sessions.keep")
-	r.Sessions.MaxAge = flat["sessions.max_age"]
-	r.Tools.Enabled = abool("tools.enabled")
-	r.Tools.Roots = flat["tools.roots"]
-	r.Skills.Selector = flat["skills.selector"]
-	r.UI.Theme = flat["ui.theme"]
 	r.Onboard.VerifiedAt = flat["onboard.verified_at"]
-	if err != nil {
-		return err
+	r.Sync.IntervalMinutes = atoi("sync.interval_minutes")
+	r.Sync.MailIntervalSeconds = atoi("sync.mail_interval_seconds")
+	r.Brief.ReadyAfter = flat["brief.ready_after"]
+	r.Meetings.ProactiveCues = abool("meetings.proactive_cues")
+	r.Agent.MailAddress = flat["agent.mail_address"]
+	r.Agent.ForwardTo = flat["agent.forward_to"]
+	r.Agent.SignatureName = flat["agent.signature_name"]
+	r.GitHub.Repo = flat["github.repo"]
+	r.Router.Tier0.Enabled = abool("router.tier0.enabled")
+	r.Router.Tier0.TimeoutMS = atoi("router.tier0.timeout_ms")
+	r.Router.Main.Enabled = abool("router.main.enabled")
+	r.Router.Breaker.Failures = atoi("router.breaker.failures")
+	r.Router.Breaker.CooldownSeconds = atoi("router.breaker.cooldown_seconds")
+	r.Router.Breaker.MaxMissRatePct = atoi("router.breaker.max_miss_rate_pct")
+	r.Router.PossibleMissWindowSeconds = atoi("router.possible_miss_window_seconds")
+	r.Router.LogRetentionDays = atoi("router.log_retention_days")
+	r.Router.AckMS = atoi("router.ack_ms")
+	if r.Router.AckMS >= 300 && err == nil {
+		err = fmt.Errorf("router.ack_ms: %d is not < 300 (set by %s)", r.Router.AckMS, r.Provenance["router.ack_ms"])
 	}
-	if _, e := time.ParseDuration(r.Orchestration.Timeout); e != nil {
-		return fmt.Errorf("orchestration.timeout: %q is not a duration", r.Orchestration.Timeout)
+	r.Router.VoiceFillerMS = atoi("router.voice_filler_ms")
+	if (r.Router.VoiceFillerMS < 0 || r.Router.VoiceFillerMS > 10000) && err == nil {
+		err = fmt.Errorf("router.voice_filler_ms: %d is not in 0..10000 (set by %s)", r.Router.VoiceFillerMS, r.Provenance["router.voice_filler_ms"])
 	}
-	if _, e := time.ParseDuration(r.Orchestration.CallTimeout); e != nil {
-		return fmt.Errorf("orchestration.call_timeout: %q is not a duration", r.Orchestration.CallTimeout)
+	r.Router.Speculation.Enabled = abool("router.speculation.enabled")
+	r.Router.QuickTools.Enabled = abool("router.quick_tools.enabled")
+	r.Router.VoiceApprove.Enabled = abool("router.voice_approve.enabled")
+	r.Router.VoiceApprove.WindowSeconds = atoi("router.voice_approve.window_seconds")
+	r.Router.VoiceApprove.InternalDomains = flat["router.voice_approve.internal_domains"]
+	r.Router.Promotion.Enabled = abool("router.promotion.enabled")
+	r.Router.Promotion.MinRepeats = atoi("router.promotion.min_repeats")
+	r.Router.Promotion.MaxLearned = atoi("router.promotion.max_learned")
+	r.Router.Promotion.DemoteMissRatePct = atoi("router.promotion.demote_miss_rate_pct")
+	r.Router.Promotion.DemoteMinSamples = atoi("router.promotion.demote_min_samples")
+	r.Decider.Provider = flat["decider.provider"]
+	if r.Decider.Provider != "none" && err == nil {
+		err = fmt.Errorf("decider.provider: only \"none\" is supported")
 	}
-	if r.Sessions.MaxAge != "" && r.Sessions.MaxAge != "0" {
-		if _, e := time.ParseDuration(r.Sessions.MaxAge); e != nil {
-			return fmt.Errorf("sessions.max_age: %q is not a duration", r.Sessions.MaxAge)
+	r.Notify.MinSeverity = atoi("notify.min_severity")
+	r.Notify.ApprovalGraceSeconds = atoi("notify.approval_grace_seconds")
+	r.Notify.IntervalSeconds = atoi("notify.interval_seconds")
+	r.Decisions.CardTTLSeconds = atoi("decisions.card_ttl_seconds")
+	if r.Decisions.CardTTLSeconds < 0 && err == nil {
+		err = fmt.Errorf("decisions.card_ttl_seconds: %d is negative (set by %s)", r.Decisions.CardTTLSeconds, r.Provenance["decisions.card_ttl_seconds"])
+	}
+	if v := r.Brief.ReadyAfter; v != "" && err == nil {
+		// Parsed the same way internal/sync's readyTime does; a bad value
+		// there only logs on every tick and never precomputes the brief.
+		if _, e := time.Parse("15:04", v); e != nil {
+			err = fmt.Errorf("brief.ready_after: %q is not HH:MM (set by %s)", v, r.Provenance["brief.ready_after"])
 		}
 	}
-	return nil
+	return err
 }
+
+// intKeys and boolKeys are the non-string keys (see apply). Save stores these
+// as YAML ints/bools and every other key as a string, so a string value that
+// merely looks numeric or boolean ("0123", "t") is kept verbatim.
+var (
+	intKeys = map[string]bool{
+		"schema": true, "sync.interval_minutes": true, "sync.mail_interval_seconds": true,
+		"router.tier0.timeout_ms":               true,
+		"router.breaker.failures":               true,
+		"router.breaker.cooldown_seconds":       true,
+		"router.breaker.max_miss_rate_pct":      true,
+		"router.possible_miss_window_seconds":   true,
+		"router.log_retention_days":             true,
+		"router.ack_ms":                         true,
+		"router.voice_filler_ms":                true,
+		"router.voice_approve.window_seconds":   true,
+		"router.promotion.min_repeats":          true,
+		"router.promotion.max_learned":          true,
+		"router.promotion.demote_miss_rate_pct": true,
+		"router.promotion.demote_min_samples":   true,
+		"notify.min_severity":                   true,
+		"notify.approval_grace_seconds":         true,
+		"notify.interval_seconds":               true,
+		"decisions.card_ttl_seconds":            true,
+	}
+	boolKeys = map[string]bool{
+		"backend.allow_metered": true, "voice.allow_metered": true, "meetings.proactive_cues": true,
+		"router.tier0.enabled":         true,
+		"router.main.enabled":          true,
+		"router.speculation.enabled":   true,
+		"router.quick_tools.enabled":   true,
+		"router.voice_approve.enabled": true,
+		"router.promotion.enabled":     true,
+	}
+)
 
 // Flat returns the resolved values as dotted keys (for `water config`).
 func (r *Resolved) Flat() map[string]string {
 	return map[string]string{
-		"schema":                       strconv.Itoa(r.Schema),
-		"backend.preferred":            r.Backend.Preferred,
-		"backend.allow_metered":        strconv.FormatBool(r.Backend.AllowMetered),
-		"memory.provider":              r.Memory.Provider,
-		"memory.max_entries":           strconv.Itoa(r.Memory.MaxEntries),
-		"memory.max_bytes":             strconv.Itoa(r.Memory.MaxBytes),
-		"voice.provider":               r.Voice.Provider,
-		"voice.allow_metered":          strconv.FormatBool(r.Voice.AllowMetered),
-		"voice.model":                  r.Voice.Model,
-		"voice.ceo_voice":              r.Voice.CEOVoice,
-		"voice.coo_voice":              r.Voice.COOVoice,
-		"voice.cto_voice":              r.Voice.CTOVoice,
-		"voice.design_voice":           r.Voice.DesignVoice,
-		"orchestration.router":         r.Orchestration.Router,
-		"orchestration.max_parallel":   strconv.Itoa(r.Orchestration.MaxParallel),
-		"orchestration.timeout":        r.Orchestration.Timeout,
-		"orchestration.call_timeout":   r.Orchestration.CallTimeout,
-		"orchestration.max_steps":      strconv.Itoa(r.Orchestration.MaxSteps),
-		"orchestration.max_rounds":     strconv.Itoa(r.Orchestration.MaxRounds),
-		"orchestration.checkpointer":   r.Orchestration.Checkpointer,
-		"orchestration.checkpoint_dir": r.Orchestration.CheckpointDir,
-		"telemetry.trace_dir":          r.Telemetry.TraceDir,
-		"api.key":                      mask(r.API.Key),
-		"api.model":                    r.API.Model,
-		"sessions.keep":                strconv.Itoa(r.Sessions.Keep),
-		"sessions.max_age":             r.Sessions.MaxAge,
-		"tools.enabled":                strconv.FormatBool(r.Tools.Enabled),
-		"tools.roots":                  r.Tools.Roots,
-		"skills.selector":              r.Skills.Selector,
-		"ui.theme":                     r.UI.Theme,
-		"onboard.verified_at":          r.Onboard.VerifiedAt,
+		"schema":                                strconv.Itoa(r.Schema),
+		"backend.preferred":                     r.Backend.Preferred,
+		"backend.allow_metered":                 strconv.FormatBool(r.Backend.AllowMetered),
+		"voice.provider":                        r.Voice.Provider,
+		"voice.allow_metered":                   strconv.FormatBool(r.Voice.AllowMetered),
+		"voice.model":                           r.Voice.Model,
+		"voice.ceo_voice":                       r.Voice.CEOVoice,
+		"api.key":                               mask(r.API.Key),
+		"api.model":                             r.API.Model,
+		"onboard.verified_at":                   r.Onboard.VerifiedAt,
+		"sync.interval_minutes":                 strconv.Itoa(r.Sync.IntervalMinutes),
+		"sync.mail_interval_seconds":            strconv.Itoa(r.Sync.MailIntervalSeconds),
+		"brief.ready_after":                     r.Brief.ReadyAfter,
+		"meetings.proactive_cues":               strconv.FormatBool(r.Meetings.ProactiveCues),
+		"agent.mail_address":                    r.Agent.MailAddress,
+		"agent.forward_to":                      r.Agent.ForwardTo,
+		"agent.signature_name":                  r.Agent.SignatureName,
+		"github.repo":                           r.GitHub.Repo,
+		"router.tier0.enabled":                  strconv.FormatBool(r.Router.Tier0.Enabled),
+		"router.tier0.timeout_ms":               strconv.Itoa(r.Router.Tier0.TimeoutMS),
+		"router.main.enabled":                   strconv.FormatBool(r.Router.Main.Enabled),
+		"router.breaker.failures":               strconv.Itoa(r.Router.Breaker.Failures),
+		"router.breaker.cooldown_seconds":       strconv.Itoa(r.Router.Breaker.CooldownSeconds),
+		"router.breaker.max_miss_rate_pct":      strconv.Itoa(r.Router.Breaker.MaxMissRatePct),
+		"router.possible_miss_window_seconds":   strconv.Itoa(r.Router.PossibleMissWindowSeconds),
+		"router.log_retention_days":             strconv.Itoa(r.Router.LogRetentionDays),
+		"router.ack_ms":                         strconv.Itoa(r.Router.AckMS),
+		"router.voice_filler_ms":                strconv.Itoa(r.Router.VoiceFillerMS),
+		"router.speculation.enabled":            strconv.FormatBool(r.Router.Speculation.Enabled),
+		"router.quick_tools.enabled":            strconv.FormatBool(r.Router.QuickTools.Enabled),
+		"router.voice_approve.enabled":          strconv.FormatBool(r.Router.VoiceApprove.Enabled),
+		"router.voice_approve.window_seconds":   strconv.Itoa(r.Router.VoiceApprove.WindowSeconds),
+		"router.voice_approve.internal_domains": r.Router.VoiceApprove.InternalDomains,
+		"router.promotion.enabled":              strconv.FormatBool(r.Router.Promotion.Enabled),
+		"router.promotion.min_repeats":          strconv.Itoa(r.Router.Promotion.MinRepeats),
+		"router.promotion.max_learned":          strconv.Itoa(r.Router.Promotion.MaxLearned),
+		"router.promotion.demote_miss_rate_pct": strconv.Itoa(r.Router.Promotion.DemoteMissRatePct),
+		"router.promotion.demote_min_samples":   strconv.Itoa(r.Router.Promotion.DemoteMinSamples),
+		"decider.provider":                      r.Decider.Provider,
+		"notify.min_severity":                   strconv.Itoa(r.Notify.MinSeverity),
+		"notify.approval_grace_seconds":         strconv.Itoa(r.Notify.ApprovalGraceSeconds),
+		"notify.interval_seconds":               strconv.Itoa(r.Notify.IntervalSeconds),
+		"decisions.card_ttl_seconds":            strconv.Itoa(r.Decisions.CardTTLSeconds),
 	}
 }
 
@@ -444,24 +687,43 @@ func migrate(raw map[string]any) (map[string]any, error) {
 }
 
 // Save writes only the file layer: the given key/values merged into the
-// existing file (or a fresh one). It never persists env/flag values.
+// existing file (or a fresh one). It never persists env/flag values. Values
+// are validated exactly as Load would parse them, and the existing file is
+// read and migrated exactly as Load does, before anything is written; on any
+// error the file is left untouched.
 func Save(set map[string]string) error {
-	p := Path()
-	raw := map[string]any{}
-	if b, err := os.ReadFile(p); err == nil {
-		if err := yaml.Unmarshal(b, &raw); err != nil {
-			return err
-		}
-	}
-	if raw == nil {
-		raw = map[string]any{}
-	}
-	raw["schema"] = CurrentSchema
+	flat := defaults()
+	prov := map[string]string{}
 	for k, v := range set {
-		if _, known := defaults()[k]; !known {
+		if k == "schema" {
+			return errors.New("schema is managed by water, not settable")
+		}
+		if _, known := flat[k]; !known {
 			return fmt.Errorf("unknown config key %q", k)
 		}
-		setNested(raw, strings.Split(k, "."), coerce(v))
+		flat[k], prov[k] = v, LayerFile
+	}
+	if err := (&Resolved{Provenance: prov}).apply(flat); err != nil {
+		return err
+	}
+
+	p := Path()
+	var raw map[string]any
+	b, err := os.ReadFile(p)
+	switch {
+	case err == nil:
+		if err := yaml.Unmarshal(b, &raw); err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+	case !errors.Is(err, os.ErrNotExist):
+		return err
+	}
+	// migrate stamps CurrentSchema, and refuses a file newer than this binary.
+	if raw, err = migrate(raw); err != nil {
+		return fmt.Errorf("%s: %w", p, err)
+	}
+	for k, v := range set {
+		setNested(raw, strings.Split(k, "."), typed(k, v))
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -470,7 +732,7 @@ func Save(set map[string]string) error {
 	if err != nil {
 		return err
 	}
-	header := "# water configuration (schema 1). Layers: defaults → this file → WATER_* env → flags.\n"
+	header := fmt.Sprintf("# water configuration (schema %d). Layers: defaults → this file → WATER_* env → flags.\n", CurrentSchema)
 	return os.WriteFile(p, append([]byte(header), out...), 0o600)
 }
 
@@ -487,11 +749,15 @@ func setNested(m map[string]any, path []string, v any) {
 	setNested(child, path[1:], v)
 }
 
-func coerce(s string) any {
-	if n, err := strconv.Atoi(s); err == nil {
+// typed returns the YAML value for key k: an int or bool for the typed keys
+// (already validated by Save), the raw string for everything else.
+func typed(k, s string) any {
+	switch {
+	case intKeys[k]:
+		n, _ := strconv.Atoi(s)
 		return n
-	}
-	if b, err := strconv.ParseBool(s); err == nil {
+	case boolKeys[k]:
+		b, _ := strconv.ParseBool(s)
 		return b
 	}
 	return s

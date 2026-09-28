@@ -1,0 +1,984 @@
+// Package gateway is the water daemon: a single long-running process that
+// owns the gate, the approval queue, the audit log, the store and the model
+// sessions, serving every client (water chat, water ask, the macOS app) over
+// one local HTTP-over-Unix-socket API.
+package gateway
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"water/internal/approvals"
+	"water/internal/audit"
+	"water/internal/backend"
+	"water/internal/connectors"
+	"water/internal/dashboards"
+	"water/internal/decisions"
+	"water/internal/gate"
+	"water/internal/meetings"
+	"water/internal/needsyou"
+	"water/internal/nervous"
+	"water/internal/runtime"
+	"water/internal/store"
+	"water/internal/tools"
+	"water/internal/twinlink"
+	"water/internal/twins"
+	"water/internal/webui"
+	"water/internal/workspaces"
+)
+
+// UIPrefix is where the daemon serves the embedded workspace UI
+// (internal/webui). The macOS app loads it as water://app/ui/.
+const UIPrefix = "/ui/"
+
+// Config wires the daemon to one twin's runtime dependencies. All fields are
+// required except Warm.
+type Config struct {
+	Manifest  *twins.Manifest
+	Store     *store.Store
+	Audit     *audit.Log
+	Approvals *approvals.Queue
+	Gate      *gate.Gate
+	Registry  *connectors.Registry
+	Backend   backend.Backend
+	Warm      *backend.WarmSession // optional; preferred for fast-tier turns
+	RoleMD    string
+	// PoliciesMD is twins/<id>/policies.md (docs/slices/UI.md Phase 5b): the
+	// People workspace's "Policies" button, a static read-only document
+	// loaded once at startup exactly like RoleMD above, returned verbatim
+	// by GET /v1/workspaces/{id}'s people tile (never edited, never a
+	// draft, never a decision).
+	PoliciesMD string
+	// Decisions runs the classification-trigger orchestration (see
+	// internal/decisions.Trigger) over today's candidate items. Optional: a
+	// nil Decisions makes /v1/decisions report no cards and the morning
+	// brief's open-cards signal stay absent, rather than erroring.
+	Decisions *decisions.Trigger
+	// Nervous is Slice R's front door: handleTurn calls Nervous.Handle in
+	// place of runtime.RunTurn directly. Required — buildTwinDepsFS's
+	// intents.LoadRegistry never fails on a missing intents directory (an
+	// empty registry, per its own design), so a *nervous.Nervous can always
+	// be built, even for a twin with no twins/<id>/intents/*.yaml at all.
+	Nervous *nervous.Nervous
+	// ProactiveCues gates GET /v1/meetings/{id}/cues (docs/slices/M.md
+	// section 6, config key meetings.proactive_cues). Off by default: the
+	// endpoint still exists and always answers 200, just with an empty,
+	// enabled:false body, so a client can probe for the feature safely.
+	ProactiveCues bool
+	Clients       *Clients
+	// SocketPath is this daemon's own socket, handed to the twin-mode MCP
+	// bridge so a model-initiated tool call can reach back in.
+	SocketPath string
+
+	// Home is $WATER_HOME, used only to locate the promotion loop's
+	// pending/learned intent directories (POST /v1/intents/draft|promote,
+	// R-23/R-26).
+	Home string
+	// PromotionEnabled mirrors router.promotion.enabled: it gates both
+	// POST /v1/intents/draft and POST /v1/intents/promote (`water intent
+	// promote`, R-26), exactly like drafting/promoting are gated everywhere
+	// else in Design §16 item 2 ("Draft (flag on)"). Candidate listing (GET
+	// /v1/route/candidates, R-22) and manual demote/enable are never gated
+	// by this.
+	PromotionEnabled bool
+	// MaxLearned bounds promote.ValidateLearned's active-learned-intent
+	// cap; <= 0 uses promote.DefaultMaxLearned.
+	MaxLearned int
+	// ReloadIntents rebuilds the twin's intents registry from its current
+	// on-disk state (the embedded intent files, the learned overlay
+	// directory when PromotionEnabled, and the store's intent_state table)
+	// and atomically swaps it into Nervous (POST /v1/intents/reload,
+	// Design §5.4's last paragraph). Nil only in tests that don't exercise
+	// the endpoint; a real daemon always sets it
+	// (internal/cli/cmd_daemon.go's daemonIntentsReloader).
+	ReloadIntents func(ctx context.Context) error
+	// NeedsYou holds the last computed "needs you" snapshot (Slice V-3/V-4,
+	// docs/slices/V.md §5): GET /v1/today reads it via Snapshot(), never
+	// recomputing on the request path itself (see internal/needsyou's own
+	// cost warning). Recomputation happens on its own background tick in
+	// internal/cli/cmd_daemon.go's runDaemon, independent of this Config.
+	// Optional: nil (a twin whose decisions trigger never built, or a test
+	// that doesn't exercise it) makes GET /v1/today report an empty
+	// needs_you list rather than erroring.
+	NeedsYou *needsyou.Service
+	// Workspaces and Dashboards are the loaded twins/<id>/workspaces/*.yaml
+	// and twins/<id>/dashboards/*.yaml registries (docs/slices/UI.md Phase
+	// 1a, internal/cli's twinDeps), read by GET /v1/workspaces and GET
+	// /v1/dashboards (Phase 2). Optional: nil answers an empty list rather
+	// than erroring, the same posture NeedsYou and Decisions already have.
+	Workspaces *workspaces.Registry
+	Dashboards *dashboards.Registry
+	// Compute answers GET /v1/dashboards/{id}'s actual metric/breakdown/
+	// callout tiles (docs/slices/UI.md Phase 4, internal/dashboards.
+	// Compute). Optional like Dashboards itself: a nil Compute makes the
+	// route answer every tile as "unavailable" rather than erroring.
+	Compute *dashboards.Compute
+	// StyleBlock is the twin's style.yaml prompt block
+	// (render.Style.PromptBlock()), appended to every main-path system
+	// prompt through baseEnv. internal/cli's daemonPrewarmer must warm with
+	// the same string (see SystemPrompt). Empty sends the role alone.
+	StyleBlock string
+	// MaxChars is style.yaml's max_chars per channel, for TurnPrompt's
+	// channel hint. Nil leaves the number out of the hint.
+	MaxChars map[runtime.Channel]int
+}
+
+// turnAuth is what a tool-proxy token grants: an origin and a taint. In
+// production the only such token is the daemon's stable session token (see
+// stableSessionToken), whose taint only ever escalates.
+type turnAuth struct {
+	Origin  gate.Origin
+	Taint   gate.Taint
+	Expires time.Time
+}
+
+// Daemon serves the HTTP API described in docs/slices/A2.md.
+type Daemon struct {
+	cfg      Config
+	meetings *meetings.Manager
+
+	mu           sync.Mutex
+	tasks        map[string]context.CancelFunc
+	turnTok      map[string]turnAuth
+	sessionToken string // the one long-lived tool-proxy token; see stableSessionToken
+	// sinks are the open turn streams, by task id.
+	sinks map[string]*turnSink
+	// activeTask is the task id of the turn that currently holds modelSlot
+	// (its model call is running), or "". A queued tool call is announced
+	// as approval_required on that turn's stream only; see
+	// notifyApprovalRequired.
+	activeTask string
+	// modelSlot is a one-slot semaphore: one model turn at a time, so a
+	// tool call the model makes belongs to exactly one open stream. The
+	// warm session serializes its turns anyway; taking this slot first just
+	// makes the daemon know which turn that is.
+	modelSlot chan struct{}
+	// partialLimiter bounds POST /v1/turns/{id}/partial's rate (Design
+	// §11.5: at most 20/s per turn id).
+	partialLimiter *partialLimiter
+
+	// recapMu/recaps track each meeting session's after-meeting recap
+	// (recap-on-stop, workspace_meetings.go) while it runs or once it
+	// failed/was skipped. In memory only: a finished recap's durable form
+	// is the store.Meeting summary Recap writes.
+	recapMu sync.Mutex
+	recaps  map[string]recapState
+	// bg tracks background work the daemon starts on its own (the recap
+	// model call, the research runner below), so tests can wait for it.
+	bg sync.WaitGroup
+
+	// researchMu/researchQueue/researchRunning are the research runner's
+	// FIFO queue (docs/slices/UI.md Phase 5c, research_runner.go): run ids
+	// waiting their turn, and whether a worker goroutine is already
+	// draining the queue (so queueResearchRun starts at most one).
+	researchMu      sync.Mutex
+	researchQueue   []string
+	researchRunning bool
+}
+
+func New(cfg Config) *Daemon {
+	return &Daemon{cfg: cfg, meetings: meetings.New(cfg.Store), tasks: map[string]context.CancelFunc{}, turnTok: map[string]turnAuth{},
+		sinks: map[string]*turnSink{}, modelSlot: make(chan struct{}, 1), partialLimiter: newPartialLimiter(),
+		recaps: map[string]recapState{}}
+}
+
+// turnSink is one open POST /v1/turns stream. Writes from the turn itself
+// and from a concurrent tool-invoke handler are serialized, and nothing is
+// written once the stream's final done/error event has gone out.
+type turnSink struct {
+	mu     sync.Mutex
+	closed bool
+	write  func(runtime.Event)
+	// channel is this stream's runtime.Channel (cli/voice/text-bar), so
+	// notifyApprovalRequired knows whether a model-queued tool call's
+	// approval should also be recorded as a voice read-back (R-21).
+	channel runtime.Channel
+}
+
+func (s *turnSink) emit(e runtime.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.write(e)
+	if e.Kind == runtime.EventDone || e.Kind == runtime.EventError {
+		s.closed = true
+	}
+}
+
+func (s *turnSink) close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+}
+
+func (d *Daemon) registerSink(id string, s *turnSink) {
+	d.mu.Lock()
+	d.sinks[id] = s
+	d.mu.Unlock()
+}
+
+func (d *Daemon) unregisterSink(id string) {
+	d.mu.Lock()
+	delete(d.sinks, id)
+	d.mu.Unlock()
+}
+
+// beginModel is the runtime.Env.BeginModel hook for task id: it waits for
+// the model slot (or ctx), marks id as the turn whose model call is running,
+// and returns the func that undoes both.
+func (d *Daemon) beginModel(id string) func(ctx context.Context) (func(), error) {
+	return func(ctx context.Context) (func(), error) {
+		select {
+		case d.modelSlot <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		d.mu.Lock()
+		d.activeTask = id
+		d.mu.Unlock()
+		return func() {
+			d.mu.Lock()
+			if d.activeTask == id {
+				d.activeTask = ""
+			}
+			d.mu.Unlock()
+			<-d.modelSlot
+		}, nil
+	}
+}
+
+// notifyApprovalRequired reports a tool call the model made that was queued
+// for approval, as approval_required, on the stream of the turn whose model
+// call is running (activeTask). Every turn shares the one session tool token
+// (see stableSessionToken), so the token cannot say which turn a call came
+// from; the model slot can, since only the active turn's model is running.
+// Other open streams (turns still waiting for the slot) get nothing. A call
+// that lands when no turn is active, or after its stream closed, is still
+// queued, just not announced inline: GET /v1/approvals, the brief and
+// `water approve` list it.
+func (d *Daemon) notifyApprovalRequired(env approvals.Envelope) {
+	d.mu.Lock()
+	s := d.sinks[d.activeTask]
+	d.mu.Unlock()
+	if s == nil {
+		return
+	}
+	if d.cfg.Nervous != nil {
+		// The read-back below is what's actually reaching this sink's
+		// stream; on a voice sink, record it so a later bare yes/no on that
+		// same channel can bind to it (Design §13). RecordReadback itself
+		// ignores anything that isn't the voice channel.
+		d.cfg.Nervous.RecordReadback(s.channel, env.ID, env.PayloadHash, time.Now())
+	}
+	s.emit(runtime.ApprovalRequiredEvent(env))
+}
+
+// genericStepLabel is a step's label when its function id resolves to
+// nothing this daemon knows: the id came from the model, so it is never
+// shown as the label (and Tool is left empty).
+const genericStepLabel = "Using a tool"
+
+// toolStep is one model tool call shown live on a turn stream as a
+// tool_start/tool_end pair (docs/slices/V.md §7.4 V-events). Both events go
+// to the sink that was active when the call arrived, so a pair never splits
+// across streams. A nil sink (no active turn) emits nothing.
+type toolStep struct {
+	sink *turnSink
+	ev   runtime.Event
+}
+
+// beginStep announces a tool call as tool_start on the stream of the turn
+// whose model call is running, routed exactly like notifyApprovalRequired:
+// d.sinks[d.activeTask], nothing when no turn is active, and nothing once
+// that stream has closed. tool and label must be code-built (see
+// toolStepLabel and handleQuickInvoke), never the call's arguments. The
+// caller ends the step on every return path, with a defer.
+func (d *Daemon) beginStep(tool, label string) *toolStep {
+	d.mu.Lock()
+	s := d.sinks[d.activeTask]
+	d.mu.Unlock()
+	st := &toolStep{sink: s, ev: runtime.Event{StepID: newID("stp"), Tool: tool, Label: label}}
+	st.emit(runtime.EventToolStart, "")
+	return st
+}
+
+// end sends the step's tool_end with its outcome.
+func (st *toolStep) end(status runtime.StepStatus) {
+	st.emit(runtime.EventToolEnd, status)
+}
+
+// artifact sends an artifact event for this step (same sink, step id and
+// tool as its tool_start). Callers send it only after the call ran
+// successfully; a nil sink or artifact emits nothing.
+func (st *toolStep) artifact(a *runtime.Artifact) {
+	if st.sink == nil || a == nil {
+		return
+	}
+	st.sink.emit(runtime.Event{Kind: runtime.EventArtifact, StepID: st.ev.StepID, Tool: st.ev.Tool, Artifact: a})
+}
+
+func (st *toolStep) emit(kind runtime.EventKind, status runtime.StepStatus) {
+	if st.sink == nil {
+		return
+	}
+	e := st.ev
+	e.Kind, e.Status = kind, status
+	st.sink.emit(e)
+}
+
+// toolStepLabel is a connector call's step tool and label: the function id
+// and its spec's Label (Activity, then Description, then the id) when the
+// registry knows the id; otherwise no tool and genericStepLabel.
+func (d *Daemon) toolStepLabel(fn string) (tool, label string) {
+	if d.cfg.Registry != nil {
+		if _, spec, ok := d.cfg.Registry.Lookup(fn); ok {
+			return fn, spec.Label(fn)
+		}
+	}
+	return "", genericStepLabel
+}
+
+func newID(prefix string) string {
+	var b [12]byte
+	_, _ = rand.Read(b[:])
+	return prefix + "_" + hex.EncodeToString(b[:])
+}
+
+// Mux builds the HTTP handler, with token auth applied to every route.
+func (d *Daemon) Mux() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", d.handleHealth) // unauthenticated: a liveness probe only
+	mux.Handle("POST /v1/turns", d.auth(d.handleTurn))
+	mux.Handle("GET /v1/approvals", d.auth(d.handleListApprovals))
+	mux.Handle("GET /v1/approvals/{id}", d.auth(d.handleGetApproval))
+	mux.Handle("POST /v1/approvals/{id}/decision", d.auth(d.handleDecideApproval))
+	mux.Handle("GET /v1/state", d.auth(d.handleState))
+	mux.Handle("GET /v1/today", d.auth(d.handleToday))
+	mux.Handle("GET /v1/decisions", d.auth(d.handleListDecisions))
+	mux.Handle("POST /v1/decisions/{id}/email", d.auth(d.handleEmailDecisionReport))
+	mux.Handle("POST /v1/tasks/{id}/cancel", d.auth(d.handleCancel))
+	mux.Handle("POST /v1/meetings/start", d.auth(d.handleMeetingStart))
+	mux.Handle("POST /v1/meetings/{id}/segments", d.auth(d.handleMeetingSegment))
+	mux.Handle("POST /v1/meetings/{id}/stop", d.auth(d.handleMeetingStop))
+	mux.Handle("GET /v1/meetings/{id}/cues", d.auth(d.handleMeetingCues))
+	// Workspace UI (Slice V-ui, docs/slices/V.md §5).
+	mux.Handle("POST /v1/approvals/{id}/edit", d.auth(d.handleEditApproval))
+	mux.Handle("POST /v1/approvals/{id}/request-changes", d.auth(d.handleRequestChanges))
+	// docs/slices/BRAND.md task 8: the approval card's "Preview full email"
+	// control (app.js's emailPreviewSection), a gmail.send_message-only
+	// read. Named "/preview", not "/email_preview" or "/email" -- api.js's
+	// own allowlist test (webui_test.go) refuses any UI-reachable path
+	// containing "/email" outright (that substring is reserved for the
+	// native-only POST /v1/decisions/{id}/email report route), so this
+	// route's own name has to steer clear of it.
+	mux.Handle("GET /v1/approvals/{id}/preview", d.auth(d.handleApprovalEmailPreview))
+	mux.Handle("POST /v1/decisions/{id}/stage", d.auth(d.handleStageDecision))
+	mux.Handle("POST /v1/decisions/{id}/dismiss", d.auth(d.handleDismissDecision))
+	// Slice UI Phase 3b: the per-action stage endpoint replaces the
+	// function-keyed route above for the redesigned decision card's
+	// suggestion rows (the old route is kept, unchanged, for one release),
+	// and the related-data panel behind "View related data (N)".
+	mux.Handle("POST /v1/decisions/{id}/actions/{action_id}/stage", d.auth(d.handleStageDecisionAction))
+	mux.Handle("GET /v1/decisions/{id}/related", d.auth(d.handleRelatedDecision))
+	// Slice UI Phase 3c: the Drafts editor (U10-A, a real drafts table
+	// rather than an envelope-as-draft). Save never proposes anything;
+	// submit never saves -- see drafts.go's own comments.
+	mux.Handle("GET /v1/drafts", d.auth(d.handleListDrafts))
+	mux.Handle("GET /v1/drafts/{id}", d.auth(d.handleGetDraft))
+	mux.Handle("POST /v1/drafts/{id}", d.auth(d.handleSaveDraft))
+	mux.Handle("POST /v1/drafts/{id}/submit", d.auth(d.handleSubmitDraft))
+	mux.Handle("GET /v1/threads", d.auth(d.handleListThreads))
+	mux.Handle("POST /v1/threads", d.auth(d.handleCreateThread))
+	mux.Handle("POST /v1/threads/anchor", d.auth(d.handleAnchorThread))
+	mux.Handle("GET /v1/threads/{id}", d.auth(d.handleGetThread))
+	mux.Handle("POST /v1/threads/{id}/messages", d.auth(d.handlePostThreadMessage))
+	mux.Handle("GET /v1/meetings", d.auth(d.handleListMeetings))
+	mux.Handle("GET /v1/meetings/{id}", d.auth(d.handleGetMeeting))
+	// Slice UI Phase 2: the sidebar's Dashboards page and Workspaces
+	// disclosure, read-only from the registries Phase 1a already loaded.
+	mux.Handle("GET /v1/workspaces", d.auth(d.handleListWorkspaces))
+	// Phase 5a: one workspace's filtered existing sections plus its own
+	// control-room tiles (internal/gateway/workspace_detail.go).
+	mux.Handle("GET /v1/workspaces/{id}", d.auth(d.handleGetWorkspace))
+	// Phase 5b: the People workspace's "Message a team"/"Send pulse check"
+	// buttons, each creating one drafts row (store.CreateDraft) with a
+	// code-built body -- never an approval envelope, never a decision.
+	mux.Handle("POST /v1/workspaces/{id}/drafts", d.auth(d.handleCreateWorkspaceDraft))
+	// Phase 5c: Ideas (ideas.go) and Research (research_runs.go,
+	// research_runner.go).
+	mux.Handle("GET /v1/ideas", d.auth(d.handleListIdeas))
+	mux.Handle("POST /v1/ideas", d.auth(d.handleCreateIdea))
+	mux.Handle("POST /v1/ideas/{id}/research", d.auth(d.handleStartIdeaResearch))
+	mux.Handle("POST /v1/ideas/{id}/propose", d.auth(d.handleProposeIdeaDraft))
+	mux.Handle("GET /v1/research/runs", d.auth(d.handleListResearchRuns))
+	mux.Handle("GET /v1/research/runs/{id}", d.auth(d.handleGetResearchRun))
+	mux.Handle("POST /v1/research/runs/{id}/attach", d.auth(d.handleAttachResearchRun))
+	mux.Handle("GET /v1/dashboards", d.auth(d.handleListDashboards))
+	// Phase 4: one dashboard's actual computed tiles (internal/dashboards.
+	// Compute), alongside the list route above.
+	mux.Handle("GET /v1/dashboards/{id}", d.auth(d.handleGetDashboard))
+	// V-notify: native-only (never in api.js or the water:// allowlist).
+	mux.Handle("GET /v1/notifications", d.auth(d.handleListNotifications))
+	mux.Handle("POST /v1/notifications/{id}/delivered", d.auth(d.handleMarkNotificationDelivered))
+	// The workspace UI's own static assets (internal/webui), behind the same
+	// client-token auth as every route. The security headers are set before
+	// auth runs, so every response under the prefix, a 401 included,
+	// carries webui.CSP.
+	uiAssets := d.auth(webui.Handler(UIPrefix).ServeHTTP)
+	mux.Handle("GET "+UIPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webui.SetSecurityHeaders(w.Header())
+		uiAssets.ServeHTTP(w, r)
+	}))
+	mux.Handle("GET /v1/router", d.auth(d.handleRouterHealth))
+	mux.Handle("GET /v1/route/report", d.auth(d.handleRouteReport))
+	mux.Handle("GET /v1/route/candidates", d.auth(d.handleRouteCandidates))
+	mux.Handle("POST /v1/intents/draft", d.auth(d.handleIntentsDraft))
+	mux.Handle("POST /v1/intents/reload", d.auth(d.handleIntentsReload))
+	mux.Handle("GET /v1/intents", d.auth(d.handleIntentsList))
+	mux.Handle("POST /v1/intents/promote", d.auth(d.handleIntentsPromote))
+	mux.Handle("POST /v1/intents/demote", d.auth(d.handleIntentsDemote))
+	mux.Handle("POST /v1/intents/enable", d.auth(d.handleIntentsEnable))
+	mux.Handle("GET /v1/voice/profile", d.auth(d.handleVoiceProfile))
+	mux.Handle("POST /v1/turns/{id}/partial", d.auth(d.handleTurnPartial))
+	mux.Handle("GET /v1/twinlink/messages", d.auth(d.handleTwinList))
+	mux.Handle("POST /v1/twinlink/outbox", d.auth(d.handleTwinOutbox))
+	// Inbound twin messages are authenticated by a peer token only (a
+	// clients.json entry named "twin:<id>"), never a client token; see
+	// peerAuth.
+	mux.Handle("POST "+twinlink.ReceivePath, d.peerAuth(d.handleTwinReceive))
+	// /v1/tools/invoke is authenticated separately (the session tool-proxy
+	// token, not a client token): it is called by the MCP bridge subprocess,
+	// not a client.
+	mux.HandleFunc("POST /v1/tools/invoke", d.handleToolInvoke)
+	// /v1/quick/invoke uses the same session tool-proxy token as
+	// /v1/tools/invoke, but never reaches the gate: see quick.go.
+	mux.HandleFunc("POST /v1/quick/invoke", d.handleQuickInvoke)
+	return mux
+}
+
+func (d *Daemon) auth(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok, ok := bearerToken(r)
+		if !ok {
+			http.Error(w, "missing bearer token", http.StatusUnauthorized)
+			return
+		}
+		name, ok := d.cfg.Clients.Valid(tok)
+		if !ok {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		if isPeerClient(name) {
+			// Another twin's token may only deliver a message (peerAuth);
+			// it can never act as one of this CEO's own clients.
+			http.Error(w, "a peer twin's token may only deliver twin messages", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	})
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	const p = "Bearer "
+	if len(h) <= len(p) || h[:len(p)] != p {
+		return "", false
+	}
+	return h[len(p):], true
+}
+
+func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "twin": d.cfg.Manifest.ID})
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// registerTask associates a task id with a cancel func for the duration of
+// one turn.
+func (d *Daemon) registerTask(id string, cancel context.CancelFunc) {
+	d.mu.Lock()
+	d.tasks[id] = cancel
+	d.mu.Unlock()
+}
+
+func (d *Daemon) unregisterTask(id string) {
+	d.mu.Lock()
+	delete(d.tasks, id)
+	d.mu.Unlock()
+}
+
+// RunningTasks and CancelTasksExcept satisfy reflex.TaskControl, over the
+// same task-cancellation bookkeeping POST /v1/tasks/{id}/cancel already
+// uses, so control.stop cancels other in-flight turns through the one
+// existing mechanism rather than a second one.
+func (d *Daemon) RunningTasks() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.tasks)
+}
+
+func (d *Daemon) CancelTasksExcept(exceptID string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for id, cancel := range d.tasks {
+		if id == exceptID {
+			continue
+		}
+		cancel()
+		n++
+	}
+	return n
+}
+
+func (d *Daemon) handleCancel(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	d.mu.Lock()
+	cancel, ok := d.tasks[id]
+	d.mu.Unlock()
+	if !ok {
+		http.Error(w, "no such task", http.StatusNotFound)
+		return
+	}
+	cancel()
+	writeJSON(w, http.StatusOK, map[string]any{"cancelled": id})
+}
+
+// maxMeetingBody bounds a meetings request body: a segment is a sentence or
+// two of text, never audio.
+const maxMeetingBody = 64 << 10
+
+func (d *Daemon) handleMeetingStart(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		EventID string `json:"event_id"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMeetingBody)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s, err := d.meetings.Start(r.Context(), body.EventID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": s.ID, "started_at": s.StartedAt})
+}
+
+// handleMeetingSegment records one transcript segment. Meeting speech is
+// untrusted on both channels, the CEO's own mic included (a hot mic hears
+// anyone near it): the session is escalated to tainted first, before the
+// body is even read, so no failure path can skip it. Only an explicit
+// /v1/turns request is ever an instruction to the twin.
+//
+// Body: {"channel": "mic"|"system", "text": "...", "at": RFC3339}. at is
+// optional: when the speech began, with a zone (UTC recommended). It orders
+// the transcript and is clamped to [session start, now + 5s]. Help's and
+// cues' "recent" windows go by when the daemon received the segment, not by
+// at, so posting a long utterance late does not hide it.
+func (d *Daemon) handleMeetingSegment(w http.ResponseWriter, r *http.Request) {
+	d.escalateTaint(true)
+	var body struct {
+		At      time.Time `json:"at"`
+		Channel string    `json:"channel"`
+		Text    string    `json:"text"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxMeetingBody)).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	err := d.meetings.AddSegment(r.Context(), r.PathValue("id"), meetings.Segment{At: body.At, Channel: meetings.Channel(body.Channel), Text: body.Text})
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleMeetingStop ends a session and, when this call is the one that
+// ended it, starts its after-meeting recap in the background
+// (startRecapOnStop, workspace_meetings.go; docs/slices/V.md §0.6). The
+// response adds "recap": the recap's state right after stopping
+// ("running", "skipped", or "none" for a session that was already
+// stopped); GET /v1/meetings/{id} reports how it finished.
+func (d *Daemon) handleMeetingStop(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	before, err := d.meetings.Get(r.Context(), id)
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	s, err := d.meetings.Stop(r.Context(), id)
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	recap := "none"
+	if before.EndedAt == nil {
+		recap = d.startRecapOnStop(r.Context(), s.ID)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": s.ID, "ended_at": s.EndedAt, "recap": recap})
+}
+
+// handleMeetingCues serves docs/slices/M.md section 6's quiet proactive
+// cues, behind the meetings.proactive_cues config flag (default false).
+// This is a read of already-tainted meeting content for the client's own
+// side panel, not a new instruction and not a model call, so unlike
+// handleMeetingSegment it does not escalate taint. Disabled answers 200
+// with enabled:false and no items, so a client can probe for the feature
+// safely; an unknown or malformed id 404s exactly like the other meeting
+// endpoints.
+func (d *Daemon) handleMeetingCues(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !d.cfg.ProactiveCues {
+		writeJSON(w, http.StatusOK, map[string]any{"session_id": id, "enabled": false, "items": []meetings.CueItem{}})
+		return
+	}
+	cs, err := d.meetings.Cues(r.Context(), id, time.Now())
+	if err != nil {
+		meetingError(w, err)
+		return
+	}
+	items := cs.Items
+	if items == nil {
+		items = []meetings.CueItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": cs.SessionID, "enabled": true, "items": items})
+}
+
+func meetingError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, meetings.ErrNotFound):
+		http.Error(w, "no such meeting session", http.StatusNotFound)
+	case errors.Is(err, meetings.ErrEnded):
+		http.Error(w, err.Error(), http.StatusConflict)
+	case errors.Is(err, meetings.ErrBadSegment):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	default:
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// mintTurnToken issues a token with an explicit origin, taint and lifetime.
+// Production never calls it — every turn uses the one stable session token
+// (stableSessionToken) — it exists only so tests can present scoped or
+// expired tokens at /v1/tools/invoke. Expired tokens are swept lazily on
+// lookup.
+func (d *Daemon) mintTurnToken(origin gate.Origin, taint gate.Taint, ttl time.Duration) string {
+	tok := newID("tt")
+	d.mu.Lock()
+	d.turnTok[tok] = turnAuth{Origin: origin, Taint: taint, Expires: time.Now().Add(ttl)}
+	d.mu.Unlock()
+	return tok
+}
+
+func (d *Daemon) lookupTurnToken(tok string) (turnAuth, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ta, ok := d.turnTok[tok]
+	if !ok || time.Now().After(ta.Expires) {
+		delete(d.turnTok, tok)
+		return turnAuth{}, false
+	}
+	return ta, true
+}
+
+// stableSessionToken returns the daemon's one long-lived tool-proxy token,
+// minting it on first use. It must not rotate per turn: the MCP bridge child
+// a warm session spawns reads its --mcp-config policy file once at its own
+// startup and keeps running across many turns, so a fresh token every turn
+// would leave every call after the first presenting a token the daemon has
+// already forgotten.
+func (d *Daemon) stableSessionToken() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ensureSessionTokenLocked()
+}
+
+// ensureSessionTokenLocked mints the session token (Clean) if it does not
+// exist yet. Both stableSessionToken and escalateTaint go through it, so a
+// taint escalation that happens before any turn has built its tool policy —
+// the first turn after a daemon start escalates before turnEnv runs — is
+// applied to the token rather than silently dropped.
+func (d *Daemon) ensureSessionTokenLocked() string {
+	if d.sessionToken == "" {
+		d.sessionToken = newID("tt")
+		d.turnTok[d.sessionToken] = turnAuth{Origin: gate.P0, Taint: gate.Clean, Expires: time.Now().Add(365 * 24 * time.Hour)}
+	}
+	return d.sessionToken
+}
+
+// escalateTaint marks the stable session token tainted for the rest of the
+// daemon's run once any turn's assembled context pulled in external content.
+// It only ever escalates — a later clean turn does not un-taint a session
+// that has already seen untrusted content — which is the conservative
+// direction to err in given one token now serves every turn in a warm
+// session's life rather than one token per turn.
+func (d *Daemon) escalateTaint(tainted bool) {
+	if !tainted {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	tok := d.ensureSessionTokenLocked()
+	if ta, ok := d.turnTok[tok]; ok {
+		ta.Taint = gate.Tainted
+		d.turnTok[tok] = ta
+	}
+}
+
+// twinFunctions renders every manifest function (except level B, which is
+// never callable) as a tools.TwinFunction, for the MCP bridge's tool list.
+func (d *Daemon) twinFunctions() []tools.TwinFunction {
+	var out []tools.TwinFunction
+	for _, id := range d.cfg.Manifest.FunctionIDs() {
+		f, _ := d.cfg.Manifest.Function(id)
+		if f.Level == twins.B {
+			continue
+		}
+		_, spec, ok := d.cfg.Registry.Lookup(id)
+		if !ok {
+			continue
+		}
+		schema, _ := json.Marshal(spec.Schema)
+		out = append(out, tools.TwinFunction{ID: id, Tool: tools.TwinToolName(id), Description: spec.Description, Schema: schema})
+	}
+	return out
+}
+
+// TwinToolPolicy builds the tools.Policy the model's tool calls go through:
+// every manifest function, routed back to this daemon's own socket with the
+// daemon's single stable session token (see stableSessionToken), whose taint
+// is session-sticky (see escalateTaint).
+func (d *Daemon) TwinToolPolicy() *tools.Policy {
+	var quick []tools.QuickFunction
+	if d.cfg.Nervous != nil {
+		quick = d.cfg.Nervous.QuickFunctions()
+	}
+	return &tools.Policy{
+		Role:       "ceo",
+		Twin:       d.twinFunctions(),
+		TwinSocket: d.cfg.SocketPath,
+		TwinToken:  d.stableSessionToken(),
+		Quick:      quick,
+	}
+}
+
+// handleToolInvoke is the model-tool bridge's only entry point: a
+// "connector.function" call, authorized at the session token's origin (P0)
+// and current taint. That taint is escalated for the daemon's lifetime once
+// any turn, meeting segment or tool result brings in untrusted content, and
+// /clear does not reset it, so once a session is tainted an S-level call
+// answers "queued" rather than running inline. An A-level call (or a tainted
+// S-level one) is queued for approval rather than executed, per the spec:
+// the model never runs an outward action inline.
+//
+// status is "ok" (output), "queued" (approval_id), "denied" (reason; nothing
+// ran) or "executed_with_error" (output and error: the action ran and only
+// its audit record or result indexing failed).
+func (d *Daemon) handleToolInvoke(w http.ResponseWriter, r *http.Request) {
+	tok, ok := bearerToken(r)
+	if !ok {
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return
+	}
+	ta, ok := d.lookupTurnToken(tok)
+	if !ok {
+		http.Error(w, "invalid or expired turn token", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		Function string         `json:"function"`
+		Args     map[string]any `json:"args"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// From here on every return path ends the step (V-events): status is
+	// set right before each response, and the deferred end sends it. A path
+	// that forgets to set it reads as an error, never as a step left
+	// running.
+	step := d.beginStep(d.toolStepLabel(body.Function))
+	status := runtime.StepError
+	defer func() { step.end(status) }()
+	// Belt and suspenders: the gate would deny a "quick." id anyway (no
+	// manifest connector named quick), but this makes the split with
+	// handleQuickInvoke explicit and directly testable, rather than relying
+	// solely on the gate's own default-deny.
+	if strings.HasPrefix(body.Function, "quick.") || strings.HasPrefix(body.Function, "quick__") {
+		status = runtime.StepDenied
+		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": "quick tools are served at /v1/quick/invoke, not /v1/tools/invoke"})
+		return
+	}
+	if body.Args == nil {
+		body.Args = map[string]any{}
+	}
+	// Every attempted call counts toward the in-flight main turn's class
+	// (docs/slices/W.md D6), whether it then runs, is queued or is refused:
+	// a turn whose only call was a queued send is still a company turn.
+	if d.cfg.Nervous != nil {
+		d.cfg.Nervous.RecordToolAttempt(body.Function)
+	}
+
+	if f, ok := d.cfg.Manifest.Function(body.Function); ok && gate.NeedsEnvelope(f.Level, ta.Taint) {
+		env, err := proposeEnvelope(r.Context(), d.cfg.Registry, d.cfg.Approvals, d.cfg.Manifest.ID, body.Function, body.Args, ta.Origin)
+		if err != nil {
+			status = runtime.StepDenied
+			writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
+			return
+		}
+		d.notifyApprovalRequired(env)
+		status = runtime.StepQueued
+		writeJSON(w, http.StatusOK, map[string]any{"status": "queued", "approval_id": env.ID})
+		return
+	}
+
+	res, err := d.cfg.Gate.Invoke(r.Context(), gate.Call{Function: body.Function, Args: body.Args, Origin: ta.Origin, Taint: ta.Taint})
+	if err != nil && res.Output == nil {
+		// Nothing ran: refused, or the connector call itself failed.
+		status = runtime.StepDenied
+		writeJSON(w, http.StatusOK, map[string]any{"status": "denied", "reason": err.Error()})
+		return
+	}
+	// The result carries content written by someone else (mail, an invited
+	// event, a shared doc): every later call this session makes must be
+	// treated as tainted too, per escalateTaint's doc comment.
+	d.escalateTaint(res.Untrusted)
+	// A real connector call just executed (res.Output != nil is guaranteed
+	// here: the res.Output == nil case already returned above), so — like
+	// handleQuickInvoke's own RecordToolUse call — attribute it to whichever
+	// main-path turn is in flight. Without this, route_log's quick_only
+	// classification can't tell a turn that also performed a real,
+	// non-quick connector write (e.g. gmail.draft_message) from one that
+	// only ever called read-only quick.* tools, and promote/candidates.go
+	// treats QuickOnly as a hard safety gate for auto-promoting a pattern
+	// into a learned Tier-0 intent.
+	if d.cfg.Nervous != nil {
+		d.cfg.Nervous.RecordToolUse(body.Function)
+	}
+	if err != nil {
+		// The action ran (a draft was created, a note saved) and only
+		// something after it failed: its audit record, or indexing its
+		// result. It must never read as "denied", which would invite the
+		// model to try it again.
+		status = runtime.StepError
+		writeJSON(w, http.StatusOK, map[string]any{"status": "executed_with_error", "output": res.Output, "error": err.Error()})
+		return
+	}
+	status = runtime.StepOK
+	// A draft the CEO asked for, or what the model chose to put on screen
+	// (display.show), is shown to the client as an artifact event, only now
+	// that it ran cleanly, never on a denied, queued or errored call.
+	step.artifact(turnArtifact(body.Function, body.Args, res.Output))
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "output": res.Output})
+}
+
+func functionRisk(reg *connectors.Registry, id string) connectors.Risk {
+	_, spec, ok := reg.Lookup(id)
+	if !ok {
+		return connectors.RiskMedium
+	}
+	return spec.Risk
+}
+
+// Paths bundles the filesystem locations a daemon instance uses, all under
+// one water home directory.
+type Paths struct {
+	Home string
+}
+
+func (p Paths) RunDir() string      { return filepath.Join(p.Home, "run") }
+func (p Paths) SocketPath() string  { return filepath.Join(p.RunDir(), "water.sock") }
+func (p Paths) LockPath() string    { return filepath.Join(p.RunDir(), "daemon.lock") }
+func (p Paths) ClientsPath() string { return filepath.Join(p.RunDir(), "clients.json") }
+
+// Listen prepares the daemon's socket: the run directory (0700), the
+// single-instance flock, and a fresh 0600 Unix socket. The returned unlock
+// releases the flock; callers defer it after a successful Listen.
+func Listen(paths Paths) (net.Listener, func(), error) {
+	if err := os.MkdirAll(paths.RunDir(), 0o700); err != nil {
+		return nil, nil, err
+	}
+	unlock, err := lockFile(paths.LockPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	sock := paths.SocketPath()
+	_ = os.Remove(sock) // safe: we hold the single-instance lock
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		l.Close()
+		unlock()
+		return nil, nil, err
+	}
+	return l, unlock, nil
+}
+
+// baseEnv is the runtime.Env shared by every read of state (fast paths, the
+// system prompt, GET /v1/state): no tool policy, since nothing here lets the
+// model call a connector function.
+func (d *Daemon) baseEnv() runtime.Env {
+	env := runtime.Env{
+		Manifest:  d.cfg.Manifest,
+		Store:     d.cfg.Store,
+		Approvals: d.cfg.Approvals,
+		RoleMD:    d.cfg.RoleMD,
+		Backend:   d.cfg.Backend,
+		Warm:      d.cfg.Warm,
+		// A fast path that pulls in external content (the morning brief)
+		// escalates the session the same way a tainted model turn does.
+		OnTaint: d.escalateTaint,
+		// The style block and channel caps (docs/slices/V.md D5). The same
+		// StyleBlock goes into the prewarm request (internal/cli's
+		// daemonPrewarmer), so the warm session's system prompt matches the
+		// real turn's and its process is not restarted on the first turn.
+		StyleBlock: d.cfg.StyleBlock,
+		MaxChars:   d.cfg.MaxChars,
+	}
+	// Assigned only when non-nil: a nil *decisions.Trigger boxed into the
+	// runtime.DecisionSource interface would be a non-nil interface holding
+	// a nil pointer, which Env.Decisions != nil checks would miss.
+	if d.cfg.Decisions != nil {
+		env.Decisions = d.cfg.Decisions
+	}
+	return env
+}
+
+// SystemPrompt is the system prompt every main-path turn sends
+// (runtime.RoleSystem over baseEnv). A prewarm must send exactly this, or
+// the warm session restarts its process on the first real turn.
+func (d *Daemon) SystemPrompt() string {
+	return runtime.RoleSystem(d.baseEnv())
+}
+
+// turnEnv builds the runtime.Env for turn taskID, with the twin's tool
+// policy (the stable session proxy token — see stableSessionToken) and the
+// model-slot hook that ties the model's queued tool calls to this turn's
+// stream (see notifyApprovalRequired).
+func (d *Daemon) turnEnv(taskID string) runtime.Env {
+	env := d.baseEnv()
+	env.Tools = d.TwinToolPolicy()
+	env.BeginModel = d.beginModel(taskID)
+	return env
+}

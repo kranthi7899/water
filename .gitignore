@@ -1,5 +1,8 @@
 /bin/
 /dist/
+/water
+/blandcall
 /.water-test/
 /.agents-dev/
 *.tmp
+/.claude/worktrees/

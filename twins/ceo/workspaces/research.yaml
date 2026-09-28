@@ -1,0 +1,8 @@
+# Domain workspace: Research, sourced from the research connector
+# (internal/connectors/research, research.web). No membership rule yet:
+# research_runs (Phase 1d) will carry its own idea_id, not a rule this
+# workspace's spec needs to declare.
+id: research
+name: Research
+template: research
+source: research

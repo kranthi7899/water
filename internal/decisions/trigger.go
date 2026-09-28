@@ -1,0 +1,283 @@
+package decisions
+
+// This file answers a question `docs/slices/C.md` and
+// `docs/slice-c-planning.md` deliberately leave open: WHEN does Classify
+// actually run, and on WHAT items? Classifying every synced record would be
+// wasteful (most mail, meetings and documents never need a CEO decision) and
+// expensive (one model call per item). The design filled in here:
+//
+//  1. An item is only ever a classification candidate if the cheap,
+//     code-only "needs attention" heuristic already flags it — the same
+//     heuristic `internal/runtime/brief.go` computes to decide which
+//     messages the morning brief calls out (see attention.go). Nothing
+//     else is a candidate; a record type brief.go doesn't look at (a
+//     calendar event, a commit, a contact) is never classified by Trigger.
+//  2. Each candidate is classified at most once, ever, via two layered
+//     caches: Triager's own in-memory cache (classify.go, dedup within one
+//     process/run) sits in front of StoreCache below, which persists the
+//     verdict in the store's decision_classifications table
+//     (internal/store/decision_classifications.go, migration 0004) keyed by
+//     the item's own (Source, SourceID). A later sync tick, or a daemon
+//     restart, never re-classifies the same item. Two exceptions: a
+//     Fallback verdict (the model's reply was unreadable) is never
+//     persisted and is retried after Triager.FallbackRetry, and
+//     Triager.Forget clears both layers so the item is asked again.
+//
+// A note on attention.go's duplication. This package cannot import
+// internal/runtime to call its private needsAttention directly (it's
+// unexported, and this task's scope does not permit editing brief.go to
+// export it). Separately, C.md says the morning brief itself gains a new
+// signal from this package ("ranked open cards" over Card.Severity/
+// Deadline) — once that lands, internal/runtime will import
+// internal/decisions, so internal/decisions must not import
+// internal/runtime in the other direction. attention.go's NeedsAttention is
+// therefore a deliberate, documented copy of brief.go's heuristic, not the
+// start of an import cycle. The two copies must be kept in sync until
+// whoever wires the brief/CLI next (this task's explicit follow-up) deletes
+// brief.go's private needsAttention and has it call decisions.Candidate
+// instead — the natural point to do that is exactly when brief.go starts
+// importing this package for the new open-cards signal anyway.
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"water/internal/store"
+)
+
+// StoreCache wraps a Classifier with a durable cache keyed by an item's own
+// (Source, SourceID) identity, persisted via the store's
+// decision_classifications table. It is what makes "classify an item at
+// most once" survive a daemon restart; Triager's own cache only dedups
+// within one process. An item with no store identity (Ref returns "") is
+// never cached and always falls through to Inner.
+type StoreCache struct {
+	Store *store.Store
+	Inner Classifier
+}
+
+// Classify implements Classifier.
+func (c *StoreCache) Classify(ctx context.Context, item store.Record) (Classification, error) {
+	if c == nil || c.Store == nil || c.Inner == nil {
+		return Classification{}, fmt.Errorf("decisions: store cache needs a store and an inner classifier")
+	}
+	m := Meta(item)
+	if m == nil || m.Source == "" || m.SourceID == "" {
+		return c.Inner.Classify(ctx, item)
+	}
+	if cached, ok, err := c.Store.GetDecisionClassification(ctx, m.Source, m.SourceID); err != nil {
+		return Classification{}, fmt.Errorf("decisions: reading cached classification: %w", err)
+	} else if ok {
+		return Classification{NeedsDecision: cached.NeedsDecision, TypeID: cached.TypeID, Confidence: cached.Confidence}, nil
+	}
+	result, err := c.Inner.Classify(ctx, item)
+	if err != nil {
+		return Classification{}, err
+	}
+	if result.Fallback {
+		// An unreadable reply is not a verdict: don't pin the item to
+		// generic forever (the Triager in front bounds how often it retries).
+		return result, nil
+	}
+	if err := c.Store.SetDecisionClassification(ctx, store.DecisionClassification{
+		Source: m.Source, SourceID: m.SourceID,
+		NeedsDecision: result.NeedsDecision, TypeID: result.TypeID, Confidence: result.Confidence,
+		ClassifiedAt: time.Now(),
+	}); err != nil {
+		return Classification{}, fmt.Errorf("decisions: caching classification: %w", err)
+	}
+	return result, nil
+}
+
+// Forget deletes ref's ("source:source_id") persisted verdict, so the next
+// Classify asks Inner again. It implements Forgetter.
+func (c *StoreCache) Forget(ctx context.Context, ref string) error {
+	if c == nil || c.Store == nil {
+		return nil
+	}
+	source, id, ok := strings.Cut(ref, ":")
+	if !ok || source == "" || id == "" {
+		return fmt.Errorf("decisions: forget: %q is not a source:source_id ref", ref)
+	}
+	return c.Store.DeleteDecisionClassification(ctx, source, id)
+}
+
+// DefaultWindow is how far back Trigger.Run looks for candidate messages
+// when Window is unset. It only bounds the store scan: an item already
+// classified (in either cache) costs nothing extra beyond the scan itself,
+// so this can be generous without repeating model calls.
+const DefaultWindow = 7 * 24 * time.Hour
+
+// Trigger is the reusable orchestration piece: given a store to scan, a
+// Triager (which already carries the candidate predicate and a Classifier —
+// typically a StoreCache wrapping a ModelClassifier) and a Builder, it
+// finds candidate messages, classifies the ones not already classified, and
+// builds a Card for every one that needs a decision. Wiring this into the
+// daemon's sync tick or the CLI is a separate task; Trigger only needs a
+// *store.Store, a *Triager and a *Builder to run standalone in a test.
+type Trigger struct {
+	Store   *store.Store
+	Triager *Triager
+	Builder *Builder
+	// Window bounds how far back Run looks ("Since" on store.Query). Zero
+	// means DefaultWindow.
+	Window time.Duration
+	// CardTTL is how long a pass's cards are reused before Run builds them
+	// again (config decisions.card_ttl_seconds). Every build fetches each
+	// card's evidence through the gate, so without it the needs-you ticker,
+	// GET /v1/decisions and the brief each spend the hourly rate caps the
+	// CEO's own questions share. Zero caches nothing (every Run rebuilds).
+	CardTTL time.Duration
+
+	// The card cache (see RunReport). mu guards cached, cachedAt and gen;
+	// buildMu is held for a whole rebuild so racing callers on a stale
+	// cache share one build instead of each fetching every card's evidence.
+	mu       sync.Mutex
+	buildMu  sync.Mutex
+	cached   *Report
+	cachedAt time.Time
+	gen      uint64
+}
+
+// Invalidate drops the cached pass, so the next Run rebuilds every card. A
+// pass already being built when Invalidate is called is still returned to
+// its own caller but is not cached. Nothing needs to call it for card
+// state: dismissed cards are filtered and staged state is read from the
+// store on every request (internal/gateway, internal/needsyou), never from
+// the cached cards. It is for a change to what a card itself is built
+// from that must show before CardTTL runs out.
+func (tr *Trigger) Invalidate() {
+	tr.mu.Lock()
+	tr.cached = nil
+	tr.gen++
+	tr.mu.Unlock()
+}
+
+// fresh returns a copy of the cached pass when one was built within
+// CardTTL of now. A now earlier than the cached build (a clock that went
+// backwards, or a caller asking about the past) is never served from it.
+func (tr *Trigger) fresh(now time.Time) (Report, uint64, bool) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.cached == nil || now.Before(tr.cachedAt) || now.Sub(tr.cachedAt) >= tr.CardTTL {
+		return Report{}, tr.gen, false
+	}
+	return tr.cached.clone(), tr.gen, true
+}
+
+// clone copies r's slices, so a caller sorting or filtering the cards it
+// got (decisions.Rank sorts in place) never touches the cached pass. The
+// cards themselves are shared and read-only, as they always were between
+// the gateway handlers and the brief.
+func (r Report) clone() Report {
+	return Report{Cards: append([]*Card(nil), r.Cards...), Skipped: append([]error(nil), r.Skipped...)}
+}
+
+// Report is one RunReport pass: the cards that built, and one error per
+// candidate item that could not be classified or built this time (a
+// usage-cap refusal, a backend outage). A skipped item is retried on the
+// next run; it never takes the other items' cards down with it.
+type Report struct {
+	Cards   []*Card
+	Skipped []error
+}
+
+// Run scans messages created since now-Window and, for each the Triager's
+// candidate predicate flags, classifies it (a no-op against either cache
+// once already classified) and builds a Card when the classification says a
+// decision is needed. Nothing here persists cards themselves (only the
+// classification verdict is stored); with CardTTL set, the last pass is
+// kept in memory and returned again until it is CardTTL old, so a card
+// reflects gate/connector state as of at most CardTTL ago (see RunReport).
+//
+// A per-item failure is skipped, not fatal: the cards that did build are
+// still returned (use RunReport to see what was skipped). Only failing to
+// list the store at all is an error.
+func (tr *Trigger) Run(ctx context.Context, now time.Time) ([]*Card, error) {
+	rep, err := tr.RunReport(ctx, now)
+	return rep.Cards, err
+}
+
+// RunReport is Run, also reporting each skipped item.
+//
+// With CardTTL set, a pass built less than CardTTL ago is returned again
+// (skipped items included: they are retried when the pass is rebuilt)
+// instead of rebuilding. Only a complete pass is cached: a listing error
+// or a context that ended mid-build (whose failed fetches became card
+// gaps) is returned to its caller and never served to anyone else.
+func (tr *Trigger) RunReport(ctx context.Context, now time.Time) (Report, error) {
+	if tr == nil || tr.Store == nil || tr.Triager == nil || tr.Builder == nil {
+		return Report{}, fmt.Errorf("decisions: trigger needs a store, a triager and a builder")
+	}
+	if tr.CardTTL <= 0 {
+		return tr.build(ctx, now)
+	}
+	if rep, _, ok := tr.fresh(now); ok {
+		return rep, nil
+	}
+	tr.buildMu.Lock()
+	defer tr.buildMu.Unlock()
+	rep, gen, ok := tr.fresh(now) // another caller may have rebuilt meanwhile
+	if ok {
+		return rep, nil
+	}
+	rep, err := tr.build(ctx, now)
+	if err != nil || ctx.Err() != nil {
+		return rep, err
+	}
+	tr.mu.Lock()
+	if tr.gen == gen {
+		c := rep.clone()
+		tr.cached, tr.cachedAt = &c, now
+	}
+	tr.mu.Unlock()
+	return rep, nil
+}
+
+// build is one uncached pass: list, classify, build.
+func (tr *Trigger) build(ctx context.Context, now time.Time) (Report, error) {
+	window := tr.Window
+	if window <= 0 {
+		window = DefaultWindow
+	}
+	msgs, err := store.List[store.Message, *store.Message](ctx, tr.Store, store.Query{Since: now.Add(-window)})
+	if err != nil {
+		return Report{}, fmt.Errorf("decisions: trigger: listing messages: %w", err)
+	}
+	cutoff := now.Add(-window)
+	var rep Report
+	for i := range msgs {
+		if err := ctx.Err(); err != nil {
+			return rep, err
+		}
+		item := &msgs[i]
+		// The Since filter above bounds created_at (when the row was
+		// ingested), not SentAt (when the message was actually sent): a
+		// backfill or a model search can row an old message into the store
+		// today, and that must not count as a fresh candidate just because
+		// it was ingested inside the window. A message with no SentAt
+		// (zero time) is not excluded by this check — it has nothing to
+		// compare, and created_at already bounded it.
+		if !item.SentAt.IsZero() && item.SentAt.Before(cutoff) {
+			continue
+		}
+		c, ok, err := tr.Triager.Triage(ctx, item)
+		if err != nil {
+			rep.Skipped = append(rep.Skipped, fmt.Errorf("decisions: trigger: classifying %s: %w", Ref(item), err))
+			continue
+		}
+		if !ok || !c.NeedsDecision {
+			continue
+		}
+		card, err := tr.Builder.Build(ctx, item, c)
+		if err != nil {
+			rep.Skipped = append(rep.Skipped, fmt.Errorf("decisions: trigger: building card for %s: %w", Ref(item), err))
+			continue
+		}
+		rep.Cards = append(rep.Cards, card)
+	}
+	return rep, nil
+}

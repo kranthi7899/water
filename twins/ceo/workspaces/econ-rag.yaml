@@ -1,0 +1,7 @@
+# Project workspace: Econ-RAG, twins/ceo/seed/people.yaml's "econ-rag"
+# team, Linear key ECO.
+id: econ-rag
+name: Econ-RAG
+template: project
+source: linear_team:ECO
+teams: [ECO]

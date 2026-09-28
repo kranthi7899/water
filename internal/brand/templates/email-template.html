@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>Water</title></head>
+<body style="margin:0;padding:0;background:#0f1116">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0f1116"><tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:100%;background:#0B0B14;font-family:Arial, Helvetica, sans-serif">
+<tr><td bgcolor="#0B0B14" style="background:#0B0B14;padding:0"><img src="cid:water-header" width="600" height="110" alt="Water. Trust the flow." style="display:block;border:0;width:100%;height:auto;font:bold 22px Arial, Helvetica, sans-serif;color:#ECEAE3;padding:24px"></td></tr>
+<tr><td bgcolor="#ffffff" style="background:#ffffff;padding:28px 24px 8px;font:15px/1.6 Arial, Helvetica, sans-serif;color:#1a1a1f">{{.Body}}</td></tr>
+<tr><td bgcolor="#ffffff" style="background:#ffffff;padding:8px 24px 28px;font:15px/1.6 Arial, Helvetica, sans-serif;color:#1a1a1f">
+<p style="margin:0 0 16px">{{.Signature.Signoff}}</p><p style="margin:0;font-weight:bold">{{.Signature.Name}}</p><p style="margin:0">{{.Signature.Title}}</p><p style="margin:0 0 12px">{{.Signature.Company}}</p>
+{{range .Signature.Links}}<p style="margin:0 0 6px;font-size:14px"><a href="{{.URL}}" style="color:#3B94F2;text-decoration:underline">{{.Label}}</a></p>
+{{end}}{{if .Signature.CTA}}<p style="margin:0;font-size:14px"><a href="{{.Signature.CTA.URL}}" style="color:#3B94F2;font-weight:bold;text-decoration:underline">{{.Signature.CTA.Label}}</a></p>{{end}}</td></tr>
+<tr><td bgcolor="#0B0B14" background="cid:water-glass" style="background:#0B0B14 url('cid:water-glass') center/cover no-repeat;padding:20px 24px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+<td width="120" valign="middle"><img src="cid:water-koi" width="120" height="120" alt="Water" style="display:block;border:0"></td>
+<td valign="middle" style="padding-left:20px;font:12px/1.6 Arial, Helvetica, sans-serif;color:#8FB0E8">
+<div style="font:bold 13px Arial, Helvetica, sans-serif;letter-spacing:0.18em;color:#ECEAE3;padding-bottom:6px">TRUST THE FLOW</div>Sent by Water, an AI assistant, on behalf of {{.Signature.Name}}.</td></tr></table></td></tr>
+</table></td></tr></table></body></html>

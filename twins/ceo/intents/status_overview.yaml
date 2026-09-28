@@ -1,0 +1,27 @@
+id: status.overview
+description: What the daemon is doing right now
+function: status.overview
+templates:
+  - "what's [my] status"
+  - "give me a status check"
+  - "how's everything running"
+  - "what's the system status"
+  - "are [all] [my] connectors working"
+  - "what's connected [right now]"
+  - "give me a system status"
+  - "how are things looking"
+  - "status check"
+  - "what's running [right now]"
+  - "is everything connected"
+  - "give me an overview"
+  - "what's [my] daemon status"
+examples:
+  - "are connectors working"
+  - "what's connected"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "are connectors working", intent: status.overview}
+  - {utterance: "what's connected", intent: status.overview}
+  - {utterance: "what's running", intent: status.overview}
+  - {utterance: "what's the exchange rate for euros today", intent: none}

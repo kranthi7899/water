@@ -1,0 +1,7 @@
+# Project workspace: Voice_text, twins/ceo/seed/people.yaml's "voice-text"
+# team, Linear key VOI.
+id: voice-text
+name: Voice_text
+template: project
+source: linear_team:VOI
+teams: [VOI]

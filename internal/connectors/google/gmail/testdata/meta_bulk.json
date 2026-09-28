@@ -1,0 +1,19 @@
+{
+  "id": "mbulk",
+  "threadId": "tbulk",
+  "snippet": "Check out this week's deals.",
+  "internalDate": "1758623400000",
+  "labelIds": ["CATEGORY_PROMOTIONS", "INBOX"],
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "Deals <updates@bulk-mail.example>"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "This week's deals"},
+      {"name": "Date", "value": "Tue, 23 Sep 2026 09:30:00 -0400"},
+      {"name": "List-Unsubscribe", "value": "<mailto:unsub@bulk-mail.example>"},
+      {"name": "List-Id", "value": "<deals.bulk-mail.example>"},
+      {"name": "Precedence", "value": "bulk"},
+      {"name": "Auto-Submitted", "value": "auto-generated"}
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+id: mail.draft_reply
+description: Draft a dictated reply to someone's latest message, without sending it
+kind: write
+action: gmail.draft_message
+proposer: mail.reply
+slots:
+  who: {type: person, required: true}
+  body: {type: text, required: true}
+templates:
+  - "reply to {who} saying {body}"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "reply to priya saying sounds good, catch you then", intent: mail.draft_reply, slots: {who: "priya nair <priya@example.com>", body: "sounds good, catch you then"}}
+  - {utterance: "what's the weather like", intent: "none"}
+---
+Needs the latest message from "who" in the store, to build "Re: <subject>"
+(no such message is Unresolved -- never a guess at what's being replied to).
+gmail.draft_message is granted at level D ("nothing leaves") in the CEO
+twin's manifest, so this intent's RequiresApproval is false (checkAction):
+the draft is delivered directly as the answer, with no envelope and no gate
+call at all (docs/slices/R.md Risk item 24, resolved by R-20). "draft" is
+deliberately never a template word here (it is an escalate_word, per
+_shared.yaml, so the head chef owns open-ended drafting) -- only literally
+dictated text ("saying ...") ever reaches this intent.

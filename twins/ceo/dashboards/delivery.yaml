@@ -1,0 +1,11 @@
+# Delivery dashboard spec (Phase 1a: spec only). docs/slices/UI.md Phase 4:
+# counts are open (by state.type), blocked (an open inverse "blocks"
+# relation) and urgent (priority=1); the breakdown is by team key; the
+# callout is the issue that blocks the most open issues. source is
+# "linear_all" (internal/dashboards' one cross-team source kind) since
+# delivery spans every Linear team, not one workspace's own team.
+name: Delivery
+source: linear_all
+metrics: [open_issues, blocked_issues, urgent_issues]
+breakdown: issues_by_team
+callout: top_blocker_issue

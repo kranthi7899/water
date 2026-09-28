@@ -1,0 +1,10 @@
+{
+  "items": [
+    {
+      "id": "e11",
+      "summary": "Cancelled 1:1",
+      "status": "cancelled"
+    }
+  ],
+  "nextSyncToken": "st-incremental-next"
+}

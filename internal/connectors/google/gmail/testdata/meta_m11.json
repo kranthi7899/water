@@ -1,0 +1,15 @@
+{
+  "id": "m11",
+  "threadId": "t11",
+  "snippet": "Invoice attached.",
+  "internalDate": "1758700100000",
+  "historyId": "160",
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "billing@acme.com"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "Invoice"},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 08:01:40 -0400"}
+    ]
+  }
+}

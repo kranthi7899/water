@@ -1,0 +1,1056 @@
+// Package gmail is the Gmail connector: it lists and reads the CEO's mail,
+// and drafts/sends mail as the agent, through the shared gapi HTTP client.
+// Every message list_messages/get_message return was written by someone
+// else, so both are External; draft_message/send_message originate their
+// own content, so neither is.
+package gmail
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"net/textproto"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"water/internal/brand"
+	"water/internal/connectors"
+	"water/internal/connectors/google/gapi"
+	"water/internal/gate/permit"
+	"water/internal/spokenemail"
+	"water/internal/store"
+	"water/internal/twins"
+)
+
+const connName = "gmail"
+
+// maxBodyBytes caps a message body pulled from get_message.
+const maxBodyBytes = 20 << 10
+
+// maxPages bounds list_messages pagination regardless of what a server says,
+// so a misbehaving nextPageToken can't loop forever. It applies to both the
+// query-based messages.list path and the incremental history.list path.
+const maxPages = 20
+
+// ErrHistoryTooOld is returned when since_history_id names a history record
+// Gmail no longer has (history.list answers 404). The caller should retry
+// list_messages without since_history_id to get a full resync and a fresh
+// history_id to resume from next time.
+var ErrHistoryTooOld = errors.New("gmail: history too old, full resync needed")
+
+// Gmail is the connector. opts is nil in production and set in tests to
+// point at a fake server. mailAddress is the agent's verified "Send mail
+// as" alias (config's agent.mail_address): draft_message/send_message
+// always set MIME From: to this address, never the primary account's own,
+// and never anything an args map supplies (there is no "from" argument).
+// signature is the Water brand signature block (loaded from
+// twins/ceo/brand/signature.yaml via internal/brand.LoadSignature, see
+// internal/cli's buildCEORegistryModel): it supplies the Name/Title/
+// Company/Signoff/Links/CTA that internal/brand.RenderEmail renders into
+// the disclosure and signature footer on mail actually sent under the
+// agent's identity (see renderSendBody), never draft_for_review. Config's
+// older agent.signature_name field is retired for this purpose --
+// signature.yaml's Name is now the one source of "who is signing this
+// email" (docs/slices/BRAND.md task 5).
+type Gmail struct {
+	opts        *gapi.Options
+	mailAddress string
+	signature   *brand.Signature
+}
+
+func New(mailAddress string) *Gmail { return &Gmail{mailAddress: mailAddress} }
+
+// NewWithOptions builds a Gmail connector against test doubles.
+func NewWithOptions(mailAddress string, o *gapi.Options) *Gmail {
+	return &Gmail{mailAddress: mailAddress, opts: o}
+}
+
+// SetSignature sets the brand signature block used to render the
+// disclosure/signature footer on mail sent or drafted under the agent's
+// identity (draft_message, send_message), and returns g so it can be
+// chained onto New/NewWithOptions. Left unset (nil), those two functions
+// refuse to send rather than silently omitting the signature -- see
+// readMessageArgs. draft_for_review never reads this: that draft must read
+// as the CEO's own unedited writing, byte for byte.
+func (g *Gmail) SetSignature(sig *brand.Signature) *Gmail {
+	g.signature = sig
+	return g
+}
+
+func (*Gmail) Name() string                 { return connName }
+func (*Gmail) Credential() (string, string) { return gapi.Service, gapi.DefaultAccount }
+
+func (*Gmail) Functions() []connectors.Function {
+	return []connectors.Function{
+		{
+			Name:        "list_messages",
+			Description: "List Gmail messages matching a search query, newest first.",
+			Activity:    "Searching your email",
+			Level:       twins.R,
+			Risk:        connectors.RiskLow,
+			External:    true,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{
+					"query":            {Type: "string", Description: "Gmail search syntax, e.g. \"from:dana newer_than:1d\""},
+					"max":              {Type: "integer", Description: "max messages to return (default 20, cap 100)"},
+					"since_history_id": {Type: "string", Description: "optional: resume from this Gmail historyId instead of query, for incremental sync"},
+				},
+			},
+		},
+		{
+			Name:        "get_message",
+			Description: "Get one Gmail message's full body.",
+			Activity:    "Reading an email",
+			Level:       twins.R,
+			Risk:        connectors.RiskLow,
+			External:    true,
+			Schema: connectors.Schema{
+				Properties: map[string]connectors.Property{"id": {Type: "string", Description: "message id"}},
+				Required:   []string{"id"},
+			},
+		},
+		{
+			Name:        "draft_message",
+			Description: "Create a Gmail draft from the agent alias. Nothing is sent.",
+			Activity:    "Drafting an email",
+			Level:       twins.D,
+			Risk:        connectors.RiskLow,
+			External:    false,
+			Schema:      writeMessageSchema,
+		},
+		{
+			Name:        "send_message",
+			Description: "Send a Gmail message from the agent alias. This has an external effect and cannot be undone.",
+			Activity:    "Preparing an email to send",
+			Level:       twins.A,
+			Risk:        connectors.RiskHigh,
+			External:    false,
+			Schema:      sendMessageSchema,
+		},
+		{
+			Name:        "draft_for_review",
+			Description: "Create a Gmail draft in the CEO's own account, from the CEO's own address, for the CEO to review and send personally. Never uses the agent alias. Nothing is sent.",
+			Activity:    "Drafting an email for you to review",
+			Level:       twins.D,
+			Risk:        connectors.RiskLow,
+			External:    false,
+			Schema:      writeMessageSchema,
+		},
+	}
+}
+
+// writeMessageSchema is shared by draft_message and send_message: there is
+// deliberately no "from" property, so no args map can ever set it -- the
+// From address is always g.mailAddress, read from config, never from a
+// caller.
+var writeMessageSchema = connectors.Schema{
+	Properties: map[string]connectors.Property{
+		"to":              {Type: "array", Items: &connectors.Property{Type: "string"}, Description: "recipient email addresses"},
+		"subject":         {Type: "string", Description: "subject line"},
+		"body":            {Type: "string", Description: "plain-text body"},
+		"html_attachment": {Type: "string", Description: "optional pre-rendered HTML alternative body"},
+		"confirm_unusual_recipient": {Type: "boolean", Description: "set true only after the CEO confirmed the spelled-out address, " +
+			"when an earlier call was refused because the domain looks like a misheard one (e.g. close to gmail.com); an approval then still needs a tap"},
+	},
+	Required: []string{"to", "subject", "body"},
+}
+
+// sendMessageSchema is send_message's own schema, not shared with
+// draft_message/draft_for_review: writeMessageSchema's properties plus the
+// three brand payload-hash fields addBrandPayloadFields
+// (internal/gateway/brand_payload.go) adds to every gmail.send_message
+// envelope before it is proposed (docs/slices/BRAND.md task 9).
+//
+// Found live (2026-09-28, the owner's real test send): the gate re-hashes
+// the exact args a claimed envelope executes with and refuses unless that
+// hash equals the envelope's own PayloadHash (internal/approvals/queue.go's
+// Claim) -- an intentional, load-bearing invariant ("an approval covers
+// exactly what you saw"), not a bug. That means these three keys MUST
+// reach Schema.Validate as part of the same, unmodified payload that was
+// hashed at Propose time; stripping them before execution (tried first,
+// reverted) makes the executed args hash differently from the approved
+// envelope and the gate correctly refuses that as "payload changed after
+// approval." So they have to be declared here instead. None of them are
+// ever read by Invoke below -- they exist only so this schema accepts them
+// and PayloadHash covers them, nothing else. asset_hashes is a single
+// combined string (brand.CombinedAssetHash), not a map, because
+// connectors.Property's Type has no "object" case
+// (internal/connectors/schema.go) to declare a map with.
+var sendMessageSchema = connectors.Schema{
+	Properties: map[string]connectors.Property{
+		"to":                        writeMessageSchema.Properties["to"],
+		"subject":                   writeMessageSchema.Properties["subject"],
+		"body":                      writeMessageSchema.Properties["body"],
+		"html_attachment":           writeMessageSchema.Properties["html_attachment"],
+		"confirm_unusual_recipient": writeMessageSchema.Properties["confirm_unusual_recipient"],
+		"template_version":          {Type: "string", Description: "internal/brand.TemplateVersion at propose time; hash coverage only, never read"},
+		"signature_hash":            {Type: "string", Description: "hash of the loaded brand signature at propose time; hash coverage only, never read"},
+		"asset_hashes":              {Type: "string", Description: "combined hash of the header/koi/glass-band assets at propose time; hash coverage only, never read"},
+	},
+	Required: writeMessageSchema.Required,
+}
+
+// message is the JSON shape Invoke returns and Normalize reads back, shared
+// by both functions. list_messages fills Body with the snippet; get_message
+// fills it with the extracted body.
+//
+// LabelIds, ListUnsubscribe, ListID, Precedence and AutoSubmitted
+// (docs/slices/UI.md Phase 0, 0a) are the bulk-mail signals
+// internal/mailnoise classifies from: Gmail's own labels plus the raw
+// List-Unsubscribe, List-Id, Precedence and Auto-Submitted header values.
+// toRecord copies them straight into store.Message's own fields of the same
+// name (migration 0016).
+type message struct {
+	ID              string   `json:"id"`
+	ThreadID        string   `json:"threadId"`
+	From            string   `json:"from"`
+	To              []string `json:"to"`
+	Subject         string   `json:"subject"`
+	Body            string   `json:"body"`
+	InternalDate    string   `json:"internalDate"`
+	LabelIds        []string `json:"label_ids,omitempty"`
+	ListUnsubscribe string   `json:"list_unsubscribe,omitempty"`
+	ListID          string   `json:"list_id,omitempty"`
+	Precedence      string   `json:"precedence,omitempty"`
+	AutoSubmitted   string   `json:"auto_submitted,omitempty"`
+}
+
+type header struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type mimePart struct {
+	MimeType string   `json:"mimeType"`
+	Headers  []header `json:"headers"`
+	Body     struct {
+		Data string `json:"data"`
+	} `json:"body"`
+	Parts []mimePart `json:"parts"`
+}
+
+type gmailMessage struct {
+	ID           string   `json:"id"`
+	ThreadID     string   `json:"threadId"`
+	Snippet      string   `json:"snippet"`
+	InternalDate string   `json:"internalDate"`
+	HistoryID    string   `json:"historyId"`
+	Payload      mimePart `json:"payload"`
+	// LabelIds is Gmail's own label list (e.g. "CATEGORY_PROMOTIONS"),
+	// always present regardless of the format= a request asked for.
+	LabelIds []string `json:"labelIds"`
+}
+
+// idPair is a message ID paired with its thread ID, as returned by both
+// messages.list and history.list before either's per-message metadata has
+// been fetched.
+type idPair struct{ id, thread string }
+
+// listMessagesOutput is list_messages' JSON output: the messages plus a
+// history ID a caller can persist as the next incremental-sync cursor
+// (gmail:history_id). On the incremental path it never lies past a message
+// that was not returned (see listMessagesSinceHistory).
+type listMessagesOutput struct {
+	Messages  []message `json:"messages"`
+	HistoryID string    `json:"history_id,omitempty"`
+}
+
+func (g *Gmail) Invoke(ctx context.Context, p permit.Permit) (json.RawMessage, error) {
+	v, err := p.Open()
+	if err != nil {
+		return nil, err
+	}
+	cl, err := gapi.FromSecret(v.Credential, g.opts)
+	if err != nil {
+		return nil, err
+	}
+	switch v.Function {
+	case "list_messages":
+		return g.listMessages(ctx, cl, v.Args)
+	case "get_message":
+		return g.getMessage(ctx, cl, v.Args)
+	case "draft_message":
+		return g.draftMessage(ctx, cl, v.Args)
+	case "send_message":
+		return g.sendMessage(ctx, cl, v.Args)
+	case "draft_for_review":
+		return g.draftForReview(ctx, cl, v.Args)
+	}
+	return nil, fmt.Errorf("gmail: unknown function %q", v.Function)
+}
+
+func (g *Gmail) listMessages(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	max, err := gapi.ArgInt(args, "max", 20, 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	if since := gapi.ArgString(args, "since_history_id"); since != "" {
+		return g.listMessagesSinceHistory(ctx, cl, since, max)
+	}
+	return g.listMessagesByQuery(ctx, cl, args, max)
+}
+
+// listMessagesByQuery is the original query-based search: unchanged from
+// before since_history_id existed, aside from wrapping its result in
+// listMessagesOutput and reporting the highest historyId seen along the way
+// (messages.list itself carries no historyId field to read).
+func (g *Gmail) listMessagesByQuery(ctx context.Context, cl *gapi.Client, args map[string]any, max int) (json.RawMessage, error) {
+	query := gapi.ArgString(args, "query")
+
+	var ids []idPair
+	pageToken := ""
+	for page := 0; len(ids) < max && page < maxPages; page++ {
+		q := url.Values{"maxResults": {strconv.Itoa(max - len(ids))}}
+		if query != "" {
+			q.Set("q", query)
+		}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		var resp struct {
+			Messages []struct {
+				ID       string `json:"id"`
+				ThreadID string `json:"threadId"`
+			} `json:"messages"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/messages", q, &resp); err != nil {
+			return nil, err
+		}
+		for _, m := range resp.Messages {
+			ids = append(ids, idPair{m.ID, m.ThreadID})
+			if len(ids) >= max {
+				break
+			}
+		}
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+
+	out := make([]message, 0, len(ids))
+	historyID := ""
+	for _, id := range ids {
+		m, mHistoryID, err := fetchMetadata(ctx, cl, id.id)
+		if err != nil {
+			return nil, err
+		}
+		if m.ThreadID == "" {
+			m.ThreadID = id.thread
+		}
+		out = append(out, m)
+		historyID = laterHistoryID(historyID, mHistoryID)
+	}
+	return json.Marshal(listMessagesOutput{Messages: out, HistoryID: historyID})
+}
+
+// skipLabels are the labels whose messages the incremental path drops
+// before fetching them: messages.list (the query path this replaces) leaves
+// SPAM and TRASH out by default, and DRAFT autosaves are the CEO's own
+// unsent writing, each save a fresh messageAdded record.
+var skipLabels = map[string]bool{"SPAM": true, "TRASH": true, "DRAFT": true}
+
+// listMessagesSinceHistory serves list_messages when since_history_id is
+// set: it walks users.history.list for messageAdded records instead of
+// searching, then reuses fetchMetadata for each newly-added message ID so
+// the output/record shape matches the query-based path exactly.
+//
+// The returned history_id is the next call's cursor, so it must never move
+// past a message this call did not return. The walk stops once max
+// messages are collected (on a history-record boundary, so a record is
+// never half-consumed and the output may exceed max by the rest of that one
+// record) or after maxPages pages; in either case the cursor is the id of
+// the last history record actually processed, and the next call resumes
+// right after it. Only a walk that reached the end of the history uses the
+// mailbox's latest historyId.
+func (g *Gmail) listMessagesSinceHistory(ctx context.Context, cl *gapi.Client, sinceHistoryID string, max int) (json.RawMessage, error) {
+	var ids []idPair
+	seen := map[string]bool{}
+	latest := ""  // mailbox's current historyId, from history.list itself
+	lastRec := "" // id of the last history record processed
+	complete := false
+	pageToken := ""
+walk:
+	for page := 0; page < maxPages; page++ {
+		q := url.Values{"startHistoryId": {sinceHistoryID}, "historyTypes": {"messageAdded"}}
+		if pageToken != "" {
+			q.Set("pageToken", pageToken)
+		}
+		var resp struct {
+			History []struct {
+				ID            string `json:"id"`
+				MessagesAdded []struct {
+					Message struct {
+						ID       string   `json:"id"`
+						ThreadID string   `json:"threadId"`
+						LabelIDs []string `json:"labelIds"`
+					} `json:"message"`
+				} `json:"messagesAdded"`
+			} `json:"history"`
+			NextPageToken string `json:"nextPageToken"`
+			HistoryID     string `json:"historyId"`
+		}
+		if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/history", q, &resp); err != nil {
+			if gapi.Status(err) == http.StatusNotFound {
+				return nil, fmt.Errorf("gmail: %w", ErrHistoryTooOld)
+			}
+			return nil, err
+		}
+		latest = laterHistoryID(latest, resp.HistoryID)
+		for i, rec := range resp.History {
+			for _, a := range rec.MessagesAdded {
+				if a.Message.ID == "" || seen[a.Message.ID] || hasSkipLabel(a.Message.LabelIDs) {
+					continue
+				}
+				seen[a.Message.ID] = true
+				ids = append(ids, idPair{a.Message.ID, a.Message.ThreadID})
+			}
+			lastRec = laterHistoryID(lastRec, rec.ID)
+			if len(ids) >= max {
+				// Complete only if nothing at all is left after this record.
+				complete = i == len(resp.History)-1 && resp.NextPageToken == ""
+				break walk
+			}
+		}
+		if resp.NextPageToken == "" {
+			complete = true
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+
+	out := make([]message, 0, len(ids))
+	historyID := lastRec
+	if complete {
+		historyID = latest
+	}
+	for _, id := range ids {
+		m, mHistoryID, err := fetchMetadata(ctx, cl, id.id)
+		if err != nil {
+			// A message added-then-deleted between history.list and this
+			// fetch is a normal race, not the stale-cursor condition: skip
+			// it rather than failing the whole call.
+			if gapi.Status(err) == http.StatusNotFound {
+				continue
+			}
+			return nil, err
+		}
+		if m.ThreadID == "" {
+			m.ThreadID = id.thread
+		}
+		out = append(out, m)
+		if complete {
+			// A message's own historyId can postdate records this walk
+			// never reached, so it may only advance a complete walk's cursor.
+			historyID = laterHistoryID(historyID, mHistoryID)
+		}
+	}
+	return json.Marshal(listMessagesOutput{Messages: out, HistoryID: historyID})
+}
+
+func hasSkipLabel(labels []string) bool {
+	for _, l := range labels {
+		if skipLabels[l] {
+			return true
+		}
+	}
+	return false
+}
+
+// metadataHeaders is the header allowlist fetchMetadata asks Gmail for:
+// the three original headers plus the four bulk-mail signal headers
+// internal/mailnoise classifies from (docs/slices/UI.md Phase 0, 0a). Date
+// is requested but not read into message (InternalDate is authoritative).
+var metadataHeaders = []string{"From", "To", "Subject", "Date", "List-Unsubscribe", "List-Id", "Precedence", "Auto-Submitted"}
+
+func fetchMetadata(ctx context.Context, cl *gapi.Client, id string) (message, string, error) {
+	var raw gmailMessage
+	q := url.Values{"format": {"metadata"}, "metadataHeaders": metadataHeaders}
+	if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/messages/"+url.PathEscape(id), q, &raw); err != nil {
+		return message{}, "", err
+	}
+	from, to, subject, bulk := headerValues(raw.Payload.Headers)
+	m := message{
+		ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: capBody(raw.Snippet), InternalDate: raw.InternalDate,
+		LabelIds: raw.LabelIds, ListUnsubscribe: bulk.ListUnsubscribe, ListID: bulk.ListID, Precedence: bulk.Precedence, AutoSubmitted: bulk.AutoSubmitted,
+	}
+	return m, raw.HistoryID, nil
+}
+
+// laterHistoryID returns whichever of a, b is the more recent Gmail history
+// ID, treating "" as absent. History IDs are decimal strings that increase
+// over time; unparseable or differently-sized values fall back to a length,
+// then lexical, comparison, which still holds for any all-digit string.
+func laterHistoryID(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	ai, aerr := strconv.ParseUint(a, 10, 64)
+	bi, berr := strconv.ParseUint(b, 10, 64)
+	if aerr == nil && berr == nil {
+		if bi > ai {
+			return b
+		}
+		return a
+	}
+	if len(a) != len(b) {
+		if len(b) > len(a) {
+			return b
+		}
+		return a
+	}
+	if b > a {
+		return b
+	}
+	return a
+}
+
+func (g *Gmail) getMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	id := gapi.ArgString(args, "id")
+	if id == "" {
+		return nil, errors.New("gmail: id is required")
+	}
+	var raw gmailMessage
+	// format=full always returns every header (unlike format=metadata, which
+	// is filtered by metadataHeaders), so no explicit header allowlist is
+	// needed here: headerValues picks the same four bulk-mail headers out of
+	// whatever full set comes back.
+	q := url.Values{"format": {"full"}}
+	if err := cl.GetJSON(ctx, gapi.GmailBase+"/users/me/messages/"+url.PathEscape(id), q, &raw); err != nil {
+		return nil, err
+	}
+	from, to, subject, bulk := headerValues(raw.Payload.Headers)
+	body := capBody(extractBody(raw.Payload))
+	m := message{
+		ID: raw.ID, ThreadID: raw.ThreadID, From: from, To: splitAddrs(to), Subject: subject, Body: body, InternalDate: raw.InternalDate,
+		LabelIds: raw.LabelIds, ListUnsubscribe: bulk.ListUnsubscribe, ListID: bulk.ListID, Precedence: bulk.Precedence, AutoSubmitted: bulk.AutoSubmitted,
+	}
+	return json.Marshal(m)
+}
+
+// writeMessageOutput is draft_message/send_message's JSON output: the ids
+// Gmail assigned plus the content that was actually built, since Gmail's
+// create/send responses don't echo the message back. Normalize reads this
+// to index what the agent said, not what the API returned.
+type writeMessageOutput struct {
+	ID       string   `json:"id"`
+	ThreadID string   `json:"thread_id,omitempty"`
+	DraftID  string   `json:"draft_id,omitempty"`
+	From     string   `json:"from"`
+	To       []string `json:"to"`
+	Subject  string   `json:"subject"`
+	Body     string   `json:"body"`
+}
+
+func (g *Gmail) draftMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	to, subject, body, htmlAttachment, err := g.readMessageArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	textOut, htmlOut, err := g.renderSendBody(body, htmlAttachment)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage(g.mailAddress, to, subject, textOut, htmlOut)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Message struct {
+			ID       string `json:"id"`
+			ThreadID string `json:"threadId"`
+		} `json:"message"`
+	}
+	payload := map[string]any{"message": map[string]any{"raw": raw}}
+	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/drafts", nil, payload, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, From: g.mailAddress, To: to, Subject: subject, Body: textOut})
+}
+
+// draftForReview serves the "draft into your own account, as yourself" mode:
+// content the agent wrote, landing in the CEO's OWN Gmail drafts, from the
+// CEO's OWN real address, so hitting send on it is indistinguishable from
+// something the CEO personally typed. Two differences from draftMessage:
+// no From header at all (buildRawMessage lets Gmail default it to the
+// account's own primary address -- the primary account's real address isn't
+// known to this code, and hardcoding a guess would be wrong), and no
+// disclosure signature (that would defeat the point: this draft must read as
+// the CEO's own unedited writing). It still runs through the primary
+// account's own credential (Credential() never changes for this function),
+// so the draft lands in the CEO's own mailbox, not the agent's.
+func (g *Gmail) draftForReview(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	to, subject, body, html, err := g.readWriteArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage("", to, subject, body, html)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ID      string `json:"id"`
+		Message struct {
+			ID       string `json:"id"`
+			ThreadID string `json:"threadId"`
+		} `json:"message"`
+	}
+	payload := map[string]any{"message": map[string]any{"raw": raw}}
+	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/drafts", nil, payload, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(writeMessageOutput{ID: resp.Message.ID, ThreadID: resp.Message.ThreadID, DraftID: resp.ID, To: to, Subject: subject, Body: body})
+}
+
+// sendMessage sends exactly once through gapi.PostJSON. A returned
+// gapi.ErrSendOutcomeUnknown is passed straight back, never swallowed into
+// a generic error, so a caller can errors.Is it and surface "uncertain,
+// check Sent folder" instead of assuming success or retrying on its own.
+func (g *Gmail) sendMessage(ctx context.Context, cl *gapi.Client, args map[string]any) (json.RawMessage, error) {
+	to, subject, body, htmlAttachment, err := g.readMessageArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	textOut, htmlOut, err := g.renderSendBody(body, htmlAttachment)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := buildRawMessage(g.mailAddress, to, subject, textOut, htmlOut)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		ID       string `json:"id"`
+		ThreadID string `json:"threadId"`
+	}
+	payload := map[string]any{"raw": raw}
+	if err := cl.PostJSON(ctx, gapi.GmailBase+"/users/me/messages/send", nil, payload, &resp); err != nil {
+		return nil, err
+	}
+	return json.Marshal(writeMessageOutput{ID: resp.ID, ThreadID: resp.ThreadID, From: g.mailAddress, To: to, Subject: subject, Body: textOut})
+}
+
+// readMessageArgs reads to/subject/body/html_attachment from args for the
+// two functions that send as the agent (draft_message, send_message): both
+// require agent.mail_address to be configured first, since that's the From
+// address they'll use. There is no "from" argument to read: the schema
+// declares none, and even a caller that smuggled one into args (bypassing
+// schema validation) would be ignored here -- the From address is always
+// g.mailAddress, the CEO's configured agent alias, set once at connect
+// time, not per call.
+func (g *Gmail) readMessageArgs(args map[string]any) (to []string, subject, body, html string, err error) {
+	if g.mailAddress == "" {
+		return nil, "", "", "", errors.New("gmail: agent.mail_address is not configured; verify the agent's Gmail alias and set it before sending")
+	}
+	if g.signature == nil {
+		return nil, "", "", "", errors.New("gmail: no brand signature configured; twins/ceo/brand/signature.yaml must load before sending (see Gmail.SetSignature)")
+	}
+	return g.readWriteArgs(args)
+}
+
+// readWriteArgs reads to/subject/body/html_attachment from args, common to
+// all three write functions. draft_for_review calls this directly (skipping
+// readMessageArgs' agent.mail_address check): it never sends as the agent,
+// so that config key is irrelevant to it.
+//
+// Every recipient must pass the pure recipient checks before anything is
+// built or any request is made (docs/slices/W.md D4c): a malformed address
+// is refused, and so is a domain that looks like a misheard public provider
+// ("therightgmail.com") unless confirm_unusual_recipient says the CEO
+// confirmed it. The same checks, plus company domains and an MX lookup, run
+// again when a send is proposed as an approval envelope. The confirm key is
+// never put into the built message.
+func (g *Gmail) readWriteArgs(args map[string]any) (to []string, subject, body, html string, err error) {
+	to = argStrings(args, "to")
+	if len(to) == 0 {
+		return nil, "", "", "", errors.New("gmail: to is required")
+	}
+	confirmed, _ := args["confirm_unusual_recipient"].(bool)
+	known := spokenemail.KnownProviders()
+	for _, a := range to {
+		if _, err := spokenemail.CheckRecipient(a, known, confirmed); err != nil {
+			return nil, "", "", "", fmt.Errorf("gmail: %w", err)
+		}
+	}
+	return to, gapi.ArgString(args, "subject"), gapi.ArgString(args, "body"), gapi.ArgString(args, "html_attachment"), nil
+}
+
+// renderSendBody turns a model-drafted body (plus an optional caller
+// pre-rendered HTML alternative) into the final plain-text and HTML parts
+// send_message/draft_message hand to buildRawMessage. This is the send
+// path's one connection point into internal/brand: body is closer-stripped
+// (stripCloser, closer.go) and sanitized to the brand template's allowlist
+// (sanitizeBody, sanitize.go) exactly once, then rendered through
+// brand.RenderEmail with g.signature -- so the signature block and
+// disclosure line come from the brand template exactly once, never from
+// the retired appendSignature/plainSignature/htmlSignature mechanism (no
+// double disclosure). draft_for_review never calls this: that draft must
+// read as the CEO's own unedited writing, byte for byte.
+//
+// htmlAttachment, when non-empty, is a caller pre-rendered HTML document
+// (e.g. internal/gateway's decision-card report, card.HTMLReport via
+// html_attachment) -- it is not model-drafted free text, so running it
+// through the body allowlist would mangle it; it is used verbatim as the
+// HTML alternative instead of RenderEmail's own template output. The
+// plain-text alternative still always carries the brand signature and
+// disclosure from RenderEmail, regardless of htmlAttachment.
+func (g *Gmail) renderSendBody(body, htmlAttachment string) (textOut, htmlOut string, err error) {
+	if g.signature == nil {
+		return "", "", errors.New("gmail: no brand signature configured; twins/ceo/brand/signature.yaml must load before sending")
+	}
+	sanitized := sanitizeBody(stripCloser(body))
+	htmlOut, textOut, err = brand.RenderEmail(sanitized, *g.signature)
+	if err != nil {
+		return "", "", fmt.Errorf("gmail: rendering email: %w", err)
+	}
+	if htmlAttachment != "" {
+		htmlOut = htmlAttachment
+	}
+	return textOut, htmlOut, nil
+}
+
+func argStrings(args map[string]any, key string) []string {
+	switch v := args[key].(type) {
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return v
+	}
+	return nil
+}
+
+// sanitizeHeaderValue strips CR/LF so no argument can inject an extra
+// header or smuggle content past the blank line ending the header block.
+func sanitizeHeaderValue(s string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+}
+
+// buildRawMessage builds an RFC 2822 message, base64url encoded as Gmail's
+// drafts.create/messages.send "raw" field wants. When html is empty the
+// message is a single text/plain part. Otherwise it is a multipart/related
+// envelope (docs/slices/BRAND.md task 4) wrapping a multipart/alternative
+// plain+html pair (so a client with no HTML rendering still shows the plain
+// text) plus the three Water brand images (internal/brand's AssetHeader/
+// AssetKoi/AssetGlass) as inline image parts, each carrying the Content-ID
+// the brand email template references as cid:water-header/cid:water-koi/
+// cid:water-glass (see inlineAssets, writeInlineImages). When from is
+// empty, the From header is omitted entirely rather than set to a guess --
+// Gmail then defaults it to the sending account's own primary address,
+// which is what draft_for_review wants and this code has no other way to
+// know.
+func buildRawMessage(from string, to []string, subject, body, html string) (string, error) {
+	var head bytes.Buffer
+	hdr := func(k, v string) { fmt.Fprintf(&head, "%s: %s\r\n", k, sanitizeHeaderValue(v)) }
+	if from != "" {
+		hdr("From", from)
+	}
+	hdr("To", strings.Join(to, ", "))
+	hdr("Subject", mime.QEncoding.Encode("UTF-8", subject))
+	head.WriteString("MIME-Version: 1.0\r\n")
+
+	if html == "" {
+		head.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
+		head.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+		head.WriteString(body)
+		return base64.URLEncoding.EncodeToString(head.Bytes()), nil
+	}
+
+	altBytes, altBoundary, err := buildAlternativePart(body, html)
+	if err != nil {
+		return "", err
+	}
+
+	var related bytes.Buffer
+	rw := multipart.NewWriter(&related)
+	altPart, err := rw.CreatePart(textproto.MIMEHeader{
+		"Content-Type": {fmt.Sprintf(`multipart/alternative; boundary=%q`, altBoundary)},
+	})
+	if err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if _, err := altPart.Write(altBytes); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if err := writeInlineImages(rw); err != nil {
+		return "", err
+	}
+	relatedBoundary := rw.Boundary()
+	if err := rw.Close(); err != nil {
+		return "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	fmt.Fprintf(&head, "Content-Type: multipart/related; boundary=%q\r\n\r\n", relatedBoundary)
+	head.Write(related.Bytes())
+	return base64.URLEncoding.EncodeToString(head.Bytes()), nil
+}
+
+// buildAlternativePart builds the inner multipart/alternative plain+html
+// pair (body as the plain part, html as the html part) as raw MIME bytes
+// plus the boundary buildRawMessage needs to declare its Content-Type, so
+// that pair can be nested inside the outer multipart/related envelope as
+// one part.
+func buildAlternativePart(body, html string) ([]byte, string, error) {
+	var parts bytes.Buffer
+	mw := multipart.NewWriter(&parts)
+	plainPart, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {`text/plain; charset="UTF-8"`},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if _, err := plainPart.Write([]byte(body)); err != nil {
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	htmlPart, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {`text/html; charset="UTF-8"`},
+		"Content-Transfer-Encoding": {"8bit"},
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	if _, err := htmlPart.Write([]byte(html)); err != nil {
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	boundary := mw.Boundary()
+	if err := mw.Close(); err != nil {
+		return nil, "", fmt.Errorf("gmail: building message: %s", err)
+	}
+	return parts.Bytes(), boundary, nil
+}
+
+// inlineAssets is the three Water brand images embedded as inline parts of
+// the outer multipart/related envelope, in the order buildRawMessage/
+// writeInlineImages add them, keyed by internal/brand's asset names -- also
+// the exact Content-ID (and so the cid: reference) each one gets.
+var inlineAssets = []string{brand.AssetHeader, brand.AssetKoi, brand.AssetGlass}
+
+// writeInlineImages adds inlineAssets' bytes to rw as base64-encoded
+// image/png parts, each with a Content-ID of "<name>" (matching the brand
+// email template's cid:water-header/cid:water-koi/cid:water-glass
+// references) and Content-Disposition: inline, so mail clients display them
+// as part of the message body rather than as attachments.
+func writeInlineImages(rw *multipart.Writer) error {
+	for _, name := range inlineAssets {
+		data, err := brand.AssetBytes(name)
+		if err != nil {
+			return fmt.Errorf("gmail: building message: %w", err)
+		}
+		part, err := rw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {"image/png"},
+			"Content-Transfer-Encoding": {"base64"},
+			"Content-ID":                {"<" + name + ">"},
+			"Content-Disposition":       {fmt.Sprintf(`inline; filename="%s.png"`, name)},
+		})
+		if err != nil {
+			return fmt.Errorf("gmail: building message: %s", err)
+		}
+		if err := writeBase64Body(part, data); err != nil {
+			return fmt.Errorf("gmail: building message: %s", err)
+		}
+	}
+	return nil
+}
+
+// writeBase64Body writes data to w as standard base64, wrapped at 76
+// characters per line (RFC 2045 §6.8) with CRLF line endings, matching the
+// Content-Transfer-Encoding: base64 header writeInlineImages sets.
+func writeBase64Body(w io.Writer, data []byte) error {
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(data)))
+	base64.StdEncoding.Encode(encoded, data)
+	const lineLen = 76
+	for i := 0; i < len(encoded); i += lineLen {
+		end := i + lineLen
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		if _, err := w.Write(encoded[i:end]); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte("\r\n")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bulkHeaders is the raw value of the four bulk-mail headers
+// internal/mailnoise classifies from (docs/slices/UI.md Phase 0, 0a), or ""
+// when a header is absent.
+type bulkHeaders struct {
+	ListUnsubscribe, ListID, Precedence, AutoSubmitted string
+}
+
+func headerValues(hs []header) (from, to, subject string, bulk bulkHeaders) {
+	for _, h := range hs {
+		switch strings.ToLower(h.Name) {
+		case "from":
+			from = h.Value
+		case "to":
+			to = h.Value
+		case "subject":
+			subject = h.Value
+		case "list-unsubscribe":
+			bulk.ListUnsubscribe = h.Value
+		case "list-id":
+			bulk.ListID = h.Value
+		case "precedence":
+			bulk.Precedence = h.Value
+		case "auto-submitted":
+			bulk.AutoSubmitted = h.Value
+		}
+	}
+	return
+}
+
+func splitAddrs(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// extractBody walks the MIME tree for the first text/plain part, falling
+// back to the first text/html part stripped of tags.
+func extractBody(p mimePart) string {
+	var plain, htmlPart string
+	walkParts(p, &plain, &htmlPart)
+	if plain != "" {
+		return decodeB64URL(plain)
+	}
+	if htmlPart != "" {
+		return stripHTML(decodeB64URL(htmlPart))
+	}
+	return ""
+}
+
+func walkParts(p mimePart, plain, htmlPart *string) {
+	switch p.MimeType {
+	case "text/plain":
+		if *plain == "" && p.Body.Data != "" {
+			*plain = p.Body.Data
+		}
+	case "text/html":
+		if *htmlPart == "" && p.Body.Data != "" {
+			*htmlPart = p.Body.Data
+		}
+	}
+	for _, part := range p.Parts {
+		walkParts(part, plain, htmlPart)
+	}
+}
+
+// decodeB64URL decodes Gmail's base64url body data, which may or may not be
+// padded.
+func decodeB64URL(s string) string {
+	s = strings.TrimRight(s, "=")
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+var tagPattern = regexp.MustCompile(`<[^>]*>`)
+
+func stripHTML(s string) string {
+	s = tagPattern.ReplaceAllString(s, " ")
+	s = html.UnescapeString(s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func capBody(s string) string {
+	if len(s) <= maxBodyBytes {
+		return s
+	}
+	return strings.ToValidUTF8(s[:maxBodyBytes], "")
+}
+
+func parseInternalDate(s string) time.Time {
+	ms, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms).UTC()
+}
+
+func (*Gmail) Normalize(fn string, raw json.RawMessage) ([]store.Record, error) {
+	switch fn {
+	case "list_messages":
+		var lm listMessagesOutput
+		if err := json.Unmarshal(raw, &lm); err != nil {
+			return nil, err
+		}
+		out := make([]store.Record, 0, len(lm.Messages))
+		for _, m := range lm.Messages {
+			out = append(out, toRecord(m, false))
+		}
+		return out, nil
+	case "get_message":
+		var m message
+		if err := json.Unmarshal(raw, &m); err != nil {
+			return nil, err
+		}
+		return []store.Record{toRecord(m, true)}, nil
+	case "send_message":
+		var w writeMessageOutput
+		if err := json.Unmarshal(raw, &w); err != nil {
+			return nil, err
+		}
+		m := message{ID: w.ID, ThreadID: w.ThreadID, From: w.From, To: w.To, Subject: w.Subject, Body: w.Body, InternalDate: strconv.FormatInt(time.Now().UnixMilli(), 10)}
+		// Stays External: a sent body can quote someone else's mail
+		// verbatim (agentmail's forwards do), so it is not clean content.
+		return []store.Record{toRecord(m, true)}, nil
+	}
+	return nil, nil
+}
+
+// toRecord builds the stored message. full is true only for get_message,
+// whose Body is the extracted message text; list_messages only has the
+// snippet, and store.Upsert will not let that overwrite a full body.
+func toRecord(m message, full bool) store.Record {
+	return &store.Message{
+		Meta:            store.Meta{Source: connName, SourceID: m.ID, External: true},
+		Channel:         "email",
+		Thread:          m.ThreadID,
+		From:            m.From,
+		To:              m.To,
+		Subject:         m.Subject,
+		Body:            m.Body,
+		BodyFull:        full,
+		SentAt:          parseInternalDate(m.InternalDate),
+		Labels:          m.LabelIds,
+		ListUnsubscribe: m.ListUnsubscribe,
+		ListID:          m.ListID,
+		Precedence:      m.Precedence,
+		AutoSubmitted:   m.AutoSubmitted,
+	}
+}

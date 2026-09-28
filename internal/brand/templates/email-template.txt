@@ -1,0 +1,10 @@
+{{.Body}}
+
+{{.Signature.Signoff}}
+{{.Signature.Name}}
+{{.Signature.Title}}
+{{.Signature.Company}}
+{{range .Signature.Links}}{{.Label}}: {{.URL}}
+{{end}}{{if .Signature.CTA}}{{.Signature.CTA.Label}}: {{.Signature.CTA.URL}}
+{{end}}
+Sent by Water, an AI assistant, on behalf of {{.Signature.Name}}.

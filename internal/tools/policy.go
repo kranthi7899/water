@@ -1,11 +1,11 @@
-// Package tools is Water's own tool layer (Part 5, Option C via MCP).
+// Package tools is Water's tool layer: the twin's connector functions,
+// exposed to the model as MCP tools and proxied to the daemon's gate, which
+// is the only place that actually decides whether a call may run.
 //
-// The subprocess model reasons and *requests*; Water parses the request,
-// enforces the role's permissions, executes, traces, and returns. Nothing in
-// this package trusts the working directory, the environment, or the caller:
-// every path is resolved against explicitly declared roots, every call is
-// logged with its permission decision, and a policy with nothing granted
-// exposes zero tools.
+// Nothing in this package trusts the working directory or the caller's
+// argument as-is; ResolveWithinRoots exists for any future connector that
+// needs to resolve a path against explicitly declared roots rather than the
+// process's cwd.
 package tools
 
 import (
@@ -14,324 +14,85 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 )
 
-// Tool names exposed over MCP (prefixed mcp__water__ on the claude side).
-const (
-	ToolReadFile  = "read_file"
-	ToolListDir   = "list_dir"
-	ToolWriteFile = "write_file"
-	ToolRun       = "run"
-	// ToolApplyActions is an explicit, bounded action plan. Interactive chat
-	// exposes this instead of raw write/run calls so one human decision can
-	// cover a reviewed set of related effects without becoming a broad grant.
-	ToolApplyActions = "apply_actions"
-	// ToolOpenPage shows a finished, self-contained page in the user's
-	// browser. It exists only as an action inside an approved plan.
-	ToolOpenPage = "open_page"
-)
-
-// Policy is the resolved, role-scoped permission set. It is serialised to a
-// 0600 file and handed to the MCP child process by path.
+// Policy is what one MCP-serve child is handed by path: the twin's connector
+// functions available this turn, and how to reach the daemon's gate to
+// actually run one.
 type Policy struct {
-	Role   string `json:"role"`
-	RoleID string `json:"role_id,omitempty"`
-	RunID  string `json:"run_id,omitempty"`
+	Role string `json:"role"`
 
-	Filesystem FSPolicy    `json:"filesystem"`
-	Shell      ShellPolicy `json:"shell"`
-	Network    string      `json:"network"` // none
-	// ApprovalSocket is a private session socket used only by an interactive
-	// chat parent to approve one write or shell action. It is absent for
-	// orchestration and headless runs, which therefore remain deny-by-default.
-	ApprovalSocket string `json:"approval_socket,omitempty"`
-	// BatchActions makes apply_actions the only consequential tool exposed.
-	// It is used exclusively by interactive chat; headless policies retain
-	// their declared per-tool surface and never gain a batch escape hatch.
-	BatchActions bool `json:"batch_actions,omitempty"`
-	// Trace is the narrow verification capability (Part 1 follow-up):
-	// "current-run" lets the role resolve evidence references against the
-	// trace of the run it is participating in. Not an MCP tool; it never
-	// reaches the subprocess. "" = none.
-	Trace string `json:"trace,omitempty"`
+	// Twin lists the manifest's connector functions exposed as tools for this
+	// call, proxied to the daemon's gate at TwinSocket with TwinToken (a
+	// long-lived, session-scoped token; the gate itself decides level,
+	// taint, approval and rate caps, never this process).
+	Twin       []TwinFunction `json:"twin,omitempty"`
+	TwinSocket string         `json:"twin_socket,omitempty"`
+	TwinToken  string         `json:"twin_token,omitempty"`
 
-	// MaxReadBytes caps a single read (default 256 KiB).
-	MaxReadBytes int64 `json:"max_read_bytes,omitempty"`
-
-	// Protected paths are never readable or writable through tools, even when
-	// they sit under a declared root. Water sets this to its own home, which
-	// holds every role's memory, transcripts, traces and the signing keyring:
-	// a root like "~" must not become a path around per-role isolation.
-	Protected []string `json:"protected,omitempty"`
-}
-
-// FSPolicy is the filesystem grant.
-type FSPolicy struct {
-	Mode  string   `json:"mode"`  // none | read-only | read-write
-	Roots []string `json:"roots"` // absolute, explicitly declared; never inherited
-}
-
-// ShellPolicy is the shell grant. No role uses shell in v1; the type exists so
-// the policy shape is complete and the deny path is exercised.
-type ShellPolicy struct {
-	Mode      string   `json:"mode"` // none | allowlist | confirm-each | unrestricted
-	Allowlist []string `json:"allowlist,omitempty"`
+	// Quick lists the sous chef's read-only reflex handlers exposed as
+	// tools, proxied to POST /v1/quick/invoke instead of the gate (see
+	// quick.go) — a fast, cheap local lookup the model can call directly,
+	// never a connector call.
+	Quick []QuickFunction `json:"quick,omitempty"`
 }
 
 // ErrDenied is the base error for every permission refusal.
 var ErrDenied = errors.New("denied by tool policy")
 
-// HasTrace reports whether the role may resolve evidence references in its
-// own run's trace.
-func (p *Policy) HasTrace() bool { return p != nil && p.Trace == "current-run" }
-
-// RequiresApproval identifies the actions with external effects. Reads and
-// directory listings within an already-approved workspace do not prompt; a
-// write or process launch always does.
-func (p *Policy) RequiresApproval(tool string) bool {
-	return p != nil && p.ApprovalSocket != "" && (tool == ToolWriteFile || tool == ToolRun || tool == ToolApplyActions || tool == ToolOpenPage)
-}
-
-// InteractiveWorkspacePolicy is the local-chat baseline: one explicit
-// workspace is readable and writable, while every write and command waits for
-// approval from the person at the terminal. It is never used for headless
-// runs or orchestration.
-func InteractiveWorkspacePolicy(role, roleID, workspace, protected, approvalSocket string) *Policy {
-	return &Policy{
-		Role:           role,
-		RoleID:         roleID,
-		ApprovalSocket: approvalSocket,
-		BatchActions:   true,
-		Filesystem:     FSPolicy{Mode: "read-write", Roots: []string{workspace}},
-		Shell:          ShellPolicy{Mode: "confirm-each"},
-		Network:        "none",
-		Protected:      []string{protected},
-	}
-}
-
-// Empty reports whether the policy grants no subprocess tools at all. Trace
-// access is deliberately excluded: it is served in-process, never over MCP.
-func (p *Policy) Empty() bool {
-	if p == nil {
-		return true
-	}
-	fs := p.Filesystem.Mode != "" && p.Filesystem.Mode != "none" && len(p.Filesystem.Roots) > 0
-	sh := p.Shell.Mode != "" && p.Shell.Mode != "none"
-	return !fs && !sh
-}
+// Empty reports whether the policy grants no tools at all.
+func (p *Policy) Empty() bool { return p == nil || (len(p.Twin) == 0 && len(p.Quick) == 0) }
 
 // ToolNames lists the tools this policy exposes, sorted.
 func (p *Policy) ToolNames() []string {
 	if p.Empty() {
 		return nil
 	}
-	var out []string
-	switch p.Filesystem.Mode {
-	case "read-only":
-		if len(p.Filesystem.Roots) > 0 {
-			out = append(out, ToolReadFile, ToolListDir)
-		}
-	case "read-write":
-		if len(p.Filesystem.Roots) > 0 {
-			out = append(out, ToolReadFile, ToolListDir)
-			if !p.BatchActions {
-				out = append(out, ToolWriteFile)
-			}
-		}
+	out := make([]string, 0, len(p.Twin)+len(p.Quick))
+	for _, f := range p.Twin {
+		out = append(out, f.Tool)
 	}
-	switch p.Shell.Mode {
-	case "allowlist", "confirm-each", "unrestricted":
-		if !p.BatchActions {
-			out = append(out, ToolRun)
-		}
-	}
-	if p.BatchActions && (p.Filesystem.Mode == "read-write" || p.Shell.Mode != "" && p.Shell.Mode != "none") {
-		out = append(out, ToolApplyActions)
+	for _, f := range p.Quick {
+		out = append(out, f.Tool)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// Decision is the outcome of an authorisation check, recorded in the trace.
+// Decision is the outcome of an authorisation check.
 type Decision struct {
 	Allowed bool   `json:"allowed"`
 	Basis   string `json:"basis"` // human-readable rule that decided it
 }
 
-// Authorize decides whether tool may run with args under this policy. It
-// resolves paths against roots (symlinks and .. included) and never consults
-// the process working directory.
+// Authorize decides whether tool may run. A twin function is proxied to the
+// daemon's gate, which alone decides level, taint, approval and rate caps —
+// this only checks the call is structurally routable to it. A quick
+// function is a local, read-only reflex lookup that never reaches the gate
+// at all: there is nothing further to authorize once it's found, since
+// internal/nervous/reflex's own handler table is the only thing that can
+// ever grant one (see quick.go).
 func (p *Policy) Authorize(tool string, args map[string]any) (Decision, map[string]any) {
-	if p.Empty() {
-		return Decision{false, "policy grants nothing"}, args
+	if tf, ok := p.twinByTool(tool); ok {
+		if p.TwinSocket == "" || p.TwinToken == "" {
+			return Decision{false, "twin tool proxy is not configured for this call"}, args
+		}
+		return Decision{true, "proxied to the daemon gate for " + tf.ID}, args
 	}
-	str := func(k string) string {
-		v, _ := args[k].(string)
-		return v
-	}
-	switch tool {
-	case ToolApplyActions:
-		if !p.BatchActions || p.ApprovalSocket == "" {
-			return Decision{false, "action plans are available only in an interactive workspace session"}, args
-		}
-		return Decision{true, "interactive workspace action plan; every action will be validated before approval"}, args
-	case ToolReadFile, ToolListDir:
-		if p.Filesystem.Mode != "read-only" && p.Filesystem.Mode != "read-write" {
-			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode)}, args
-		}
-		resolved, root, err := ResolveWithinRoots(p.Filesystem.Roots, str("path"))
-		if err != nil {
-			return Decision{false, "path outside declared roots: " + err.Error()}, args
-		}
-		if prot, hit := p.protectedHit(resolved); hit {
-			return Decision{false, "path is inside water's own state directory (" + prot + "), which holds other roles' memory and the keyring"}, args
-		}
-		out := cloneArgs(args)
-		out["path"] = resolved
-		return Decision{true, "filesystem.mode=" + p.Filesystem.Mode + " root=" + root}, out
-	case ToolWriteFile:
-		if p.BatchActions {
-			return Decision{false, "interactive workspace requires apply_actions so related effects can be reviewed together"}, args
-		}
-		if p.Filesystem.Mode != "read-write" {
-			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode) + " (write requires read-write)"}, args
-		}
-		if _, ok := args["content"].(string); !ok {
-			return Decision{false, "write_file requires string content"}, args
-		}
-		// Resolve the leaf too: an existing output file can itself be a
-		// symlink. Checking only its parent permits writes outside the root.
-		target, root, err := ResolveWithinRoots(p.Filesystem.Roots, str("path"))
-		if err != nil {
-			return Decision{false, "target outside declared roots: " + err.Error()}, args
-		}
-		if prot, hit := p.protectedHit(target); hit {
-			return Decision{false, "path is inside water's own state directory (" + prot + ")"}, args
-		}
-		out := cloneArgs(args)
-		out["path"] = target
-		return Decision{true, "filesystem.mode=read-write root=" + root}, out
-	case ToolOpenPage:
-		// The browser runs outside the command sandbox, so this is never a
-		// standalone or headless capability: only an action in a plan the
-		// person at the terminal approves.
-		if p.ApprovalSocket == "" {
-			return Decision{false, "open_page is available only in an interactive session with approvals"}, args
-		}
-		if p.BatchActions {
-			return Decision{false, "open_page is available only as an action inside apply_actions"}, args
-		}
-		if p.Filesystem.Mode != "read-only" && p.Filesystem.Mode != "read-write" {
-			return Decision{false, "filesystem.mode=" + orNone(p.Filesystem.Mode)}, args
-		}
-		target, root, err := ResolveWithinRoots(p.Filesystem.Roots, str("path"))
-		if err != nil {
-			return Decision{false, "page outside declared roots: " + err.Error()}, args
-		}
-		if prot, hit := p.protectedHit(target); hit {
-			return Decision{false, "path is inside water's own state directory (" + prot + ")"}, args
-		}
-		if ext := strings.ToLower(filepath.Ext(target)); ext != ".html" && ext != ".htm" {
-			return Decision{false, "open_page opens .html files only"}, args
-		}
-		out := cloneArgs(args)
-		out["path"] = target
-		return Decision{true, "open self-contained page in browser root=" + root}, out
-	case ToolRun:
-		if p.BatchActions {
-			return Decision{false, "interactive workspace requires apply_actions so related effects can be reviewed together"}, args
-		}
-		mode := orNone(p.Shell.Mode)
-		if strings.TrimSpace(str("command")) == "" {
-			return Decision{false, "run requires a nonempty command"}, args
-		}
-		// argv is derived only by the allowlist matcher, never accepted from
-		// a request that the user reviewed as a different shell command.
-		if _, supplied := args["argv"]; supplied {
-			return Decision{false, "argv is internal; supply command only"}, args
-		}
-		if mode == "none" {
-			return Decision{false, "shell.mode=none"}, args
-		}
-		// Codex allows commands no rule matched only where a platform sandbox
-		// enforces the boundary, and never without one. Water has no approval
-		// channel inside a tool call, so without a sandbox it refuses.
-		if !SandboxAvailable() {
-			return Decision{false, "shell.mode=" + mode + " refused: no OS sandbox on " + runtime.GOOS + ", so a command's effects cannot be confined"}, args
-		}
-		switch mode {
-		case "unrestricted":
-			return Decision{true, "shell.mode=unrestricted (confined by sandbox)"}, args
-		case "confirm-each":
-			if p.ApprovalSocket == "" {
-				return Decision{false, "shell.mode=confirm-each needs an interactive approval channel, which this build does not have"}, args
-			}
-			return Decision{true, "shell.mode=confirm-each; awaiting user approval (confined by sandbox)"}, args
-		case "allowlist":
-			cmd := strings.TrimSpace(str("command"))
-			// The allowlist names single simple commands. Chaining, pipes,
-			// redirection and substitution would let "ls" authorise anything.
-			if strings.ContainsAny(cmd, ";&|$`<>()\\\n\r") {
-				return Decision{false, "shell.mode=allowlist: compound, piped, redirected or substituted command refused; the allowlist matches one simple command"}, args
-			}
-			fields := strings.Fields(cmd)
-			if len(fields) == 0 {
-				return Decision{false, "shell.mode=allowlist: empty command"}, args
-			}
-			for _, a := range p.Shell.Allowlist {
-				if a == fields[0] || a == cmd {
-					out := cloneArgs(args)
-					out["argv"] = fields
-					return Decision{true, "shell.mode=allowlist match " + a + " (argument effects confined by sandbox)"}, out
-				}
-			}
-			return Decision{false, "shell.mode=allowlist: " + fields[0] + " not in allowlist"}, args
-		}
-		return Decision{false, "shell.mode=" + mode + " is not recognised"}, args
+	if qf, ok := p.quickByTool(tool); ok {
+		return Decision{true, "local quick lookup (no connector, no gate) for " + qf.ID}, args
 	}
 	return Decision{false, "unknown tool " + tool}, args
-}
-
-// protectedHit reports the protected path that contains p, if any.
-func (p *Policy) protectedHit(path string) (string, bool) {
-	rp, err := realPath(path)
-	if err != nil {
-		rp = path
-	}
-	for _, prot := range p.Protected {
-		pp, err := realPath(prot)
-		if err != nil {
-			continue
-		}
-		if rp == pp || strings.HasPrefix(rp, pp+string(filepath.Separator)) {
-			return prot, true
-		}
-	}
-	return "", false
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "none"
-	}
-	return s
-}
-
-func cloneArgs(a map[string]any) map[string]any {
-	out := make(map[string]any, len(a))
-	for k, v := range a {
-		out[k] = v
-	}
-	return out
 }
 
 // ResolveWithinRoots resolves p to an absolute, symlink-free path and returns
 // it with the root that contains it. Relative paths are resolved against the
 // FIRST root, never against the process working directory. A path that
-// escapes every root via .. or a symlink is refused.
+// escapes every root via .. or a symlink is refused. No current connector
+// uses this yet; it is kept for one that resolves paths against declared
+// roots (a future file-creation connector, Slice D).
 func ResolveWithinRoots(roots []string, p string) (resolved, root string, err error) {
 	if strings.TrimSpace(p) == "" {
 		return "", "", errors.New("empty path")
@@ -402,7 +163,12 @@ func ExpandRoots(roots []string) []string {
 }
 
 // WritePolicyFile serialises the policy to a 0600 file and returns its path.
+// The policy is validated first (Validate, quick.go): a policy whose Twin
+// and Quick lists collide or are misnamed never reaches disk.
 func WritePolicyFile(dir string, p *Policy) (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -420,7 +186,9 @@ func WritePolicyFile(dir string, p *Policy) (string, error) {
 	return f.Name(), nil
 }
 
-// LoadPolicyFile reads a policy written by WritePolicyFile.
+// LoadPolicyFile reads a policy written by WritePolicyFile. It is validated
+// again on read (Validate, quick.go), defense in depth against a hand-edited
+// or otherwise tampered file.
 func LoadPolicyFile(path string) (*Policy, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -430,36 +198,8 @@ func LoadPolicyFile(path string) (*Policy, error) {
 	if err := json.Unmarshal(b, &p); err != nil {
 		return nil, fmt.Errorf("policy file %s: %w", path, err)
 	}
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("policy file %s: %w", path, err)
+	}
 	return &p, nil
-}
-
-// FromGrant resolves a role.yaml tools block plus the user's configured roots
-// into a Policy. A nil grant yields an empty policy no matter what roots the
-// user configured: roots widen only what a role already declares. Roots
-// declared in role.yaml and in config are both expanded; the working
-// directory is never implied.
-func FromGrant(role, roleID string, grant any, configRoots []string) *Policy {
-	p := &Policy{Role: role, RoleID: roleID, Network: "none"}
-	g, ok := grant.(interface {
-		FS() (mode string, roots []string)
-		SH() (mode string, allow []string)
-		NET() string
-		TR() string
-	})
-	if !ok || grant == nil {
-		return p
-	}
-	p.Trace = g.TR()
-	mode, roots := g.FS()
-	p.Filesystem.Mode = orNone(mode)
-	if p.Filesystem.Mode != "none" {
-		p.Filesystem.Roots = ExpandRoots(append(append([]string{}, roots...), configRoots...))
-	}
-	sm, allow := g.SH()
-	p.Shell.Mode = orNone(sm)
-	p.Shell.Allowlist = allow
-	if n := g.NET(); n != "" {
-		p.Network = n
-	}
-	return p
 }

@@ -1,0 +1,28 @@
+id: mail.latest
+description: The most recent email(s)
+function: store.latest_messages
+slots:
+  n: {type: count, default: "5", min: 1, max: 20}
+templates:
+  - "what's [my] latest email"
+  - "show me [my] last {n} emails"
+  - "what are [my] most recent emails"
+  - "show me the latest {n} emails"
+  - "what's the newest email [i got]"
+  - "give me [my] recent mail"
+  - "show me [my] last {n} messages"
+  - "what came in [most] recently"
+  - "latest emails [please]"
+  - "show me [my] newest messages"
+  - "what's new in [my] inbox"
+  - "recent mail [please]"
+examples:
+  - "show me my last 2 emails"
+  - "what's the newest email"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "show me my last 2 emails", intent: mail.latest, slots: {n: "2"}}
+  - {utterance: "what's the newest email", intent: mail.latest}
+  - {utterance: "show me my last 20 emails", intent: mail.latest, slots: {n: "20"}}
+  - {utterance: "what's the latest movie in theaters", intent: none}

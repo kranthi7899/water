@@ -1,0 +1,28 @@
+# A second, minimal twin (Slice E): the counterparty in the twin-to-twin
+# loopback demo — say, the finance lead's agent at a partner company, or
+# another executive's twin. It runs from the same binary as the CEO twin with
+# no code branch of its own: `water --twin counterparty daemon` under its own
+# WATER_HOME (its own store, audit log, approvals, socket and client tokens).
+#
+# It has no Google or other connectors at all — only the twin link: it can
+# read what other twins sent it (untrusted, level R) and send one message at a
+# time with its own human's approval (level A). See docs/slices/E.md.
+id: counterparty
+name: Counterparty twin (Slice E demo)
+
+usage:
+  window: 5h
+  model_calls: 50
+  auto_model_calls: 0
+
+models:
+  fast: haiku
+  strong: ""
+
+connectors:
+  - name: twinlink
+    functions:
+      - {name: send_message, level: A, rate: {max: 10, per: 1h}}
+  - name: twininbox
+    functions:
+      - {name: list_messages, level: R, rate: {max: 60, per: 1h}}

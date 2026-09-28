@@ -1,0 +1,621 @@
+package nervous
+
+import (
+	"context"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"water/internal/approvals"
+	"water/internal/audit"
+	"water/internal/backend"
+	"water/internal/nervous/intents"
+	"water/internal/nervous/render"
+	"water/internal/nervous/turn"
+	"water/internal/runtime"
+	"water/internal/store"
+	"water/internal/twins"
+)
+
+const tier0BriefYAML = `
+id: brief.today
+description: Today's cached morning brief
+function: store.cached_brief
+templates:
+  - "what's my brief"
+  - "my brief"
+reflex_eligible: true
+escalate_if: [slot_unresolved, ambiguous_match]
+tests:
+  - {utterance: "my brief", intent: brief.today}
+  - {utterance: "gibberish nonsense", intent: "none"}
+`
+
+// nervousTestEnv builds a real (temp-dir-backed) runtime.Env, reusing
+// tier0_test.go's fixture manifest/clock so a schedule.on_date intent built
+// against tier0FixtureRegistry resolves against the same "gcal" connector
+// the manifest declares.
+func nervousTestEnv(t *testing.T) (runtime.Env, context.Context, *backend.Fake) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "water.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	log, err := audit.Open(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { log.Close() })
+	q := approvals.NewQueue(st, log)
+	q.Now = func() time.Time { return tier0FixedNow }
+	m, err := twins.Parse([]byte(tier0ManifestYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fk := backend.NewFake("fake")
+	env := runtime.Env{
+		Store: st, Approvals: q, Manifest: m, Backend: fk,
+		Now: func() time.Time { return tier0FixedNow },
+	}
+	return env, context.Background(), fk
+}
+
+func nervousFor(t *testing.T, reg *intents.Registry, clock Clock) *Nervous {
+	t.Helper()
+	if clock == nil {
+		clock = realClock{}
+	}
+	n, err := New(Config{
+		Registry:     func() *intents.Registry { return reg },
+		Style:        render.DefaultStyle(),
+		Tier0Enabled: true,
+		MainEnabled:  true,
+		Clock:        clock,
+		AckAfter:     DefaultAckAfter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func collect(events *[]runtime.Event, mu *sync.Mutex) func(runtime.Event) {
+	return func(e runtime.Event) {
+		mu.Lock()
+		*events = append(*events, e)
+		mu.Unlock()
+	}
+}
+
+func kinds(events []runtime.Event) []runtime.EventKind {
+	out := make([]runtime.EventKind, len(events))
+	for i, e := range events {
+		out[i] = e.Kind
+	}
+	return out
+}
+
+// TestHandleTier0Hit: a schedule.on_date match answers with zero backend
+// calls, and the turn ends StateDone/OwnerQuick.
+func TestHandleTier0Hit(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	if err := env.Store.Upsert(ctx, &store.Event{
+		Meta:    store.Meta{Source: "gcal", SourceID: "e1", CreatedAt: tier0FixedNow},
+		Title:   "Board sync",
+		StartAt: tier0FixedNow.Add(2 * time.Hour),
+		EndAt:   tier0FixedNow.Add(3 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	table := turn.NewTable(func() time.Time { return tier0FixedNow })
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Turns: table, Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []runtime.Event
+	var mu sync.Mutex
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar today", TaskID: "t1"}, collect(&events, &mu))
+
+	if fk.Calls() != 0 {
+		t.Fatalf("backend calls = %d, want 0 (Tier 0 must never call the model)", fk.Calls())
+	}
+	ks := kinds(events)
+	if len(ks) < 2 || ks[0] != runtime.EventAck || ks[len(ks)-1] != runtime.EventDone {
+		t.Fatalf("events = %v, want ack ... done", ks)
+	}
+	tn, ok := table.Get("t1")
+	if !ok || tn.State != turn.StateDone || tn.Owner != turn.OwnerQuick {
+		t.Fatalf("turn = %+v, want StateDone/OwnerQuick", tn)
+	}
+}
+
+// TestHandleEscalatesToMain: an escalate-word utterance ("should") never
+// reaches Tier 0 at all, and the main path answers via the backend.
+func TestHandleEscalatesToMain(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	fk.Reply = func(req backend.Request) string { return "You should focus on the board deck." }
+
+	table := turn.NewTable(func() time.Time { return tier0FixedNow })
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Turns: table, Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []runtime.Event
+	var mu sync.Mutex
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i prioritize today", TaskID: "t2"}, collect(&events, &mu))
+
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls = %d, want 1", fk.Calls())
+	}
+	ks := kinds(events)
+	if len(ks) < 2 || ks[0] != runtime.EventAck || ks[len(ks)-1] != runtime.EventDone {
+		t.Fatalf("events = %v, want ack ... done", ks)
+	}
+	tn, ok := table.Get("t2")
+	if !ok || tn.State != turn.StateDone || tn.Owner != turn.OwnerMain {
+		t.Fatalf("turn = %+v, want StateDone/OwnerMain", tn)
+	}
+}
+
+// TestHandleBriefCacheMiss: brief.today's handler returns
+// reflex.ErrBriefCacheMiss on an empty cache. Handle must not treat this as
+// a generic conversational escalation — it computes and caches the brief
+// through runtime.ComputeAndCacheBrief, the one deliberate model call the
+// quick tiers themselves never make (Design §11.4 step 7 / Risk 7).
+func TestHandleBriefCacheMiss(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"brief_today": tier0BriefYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	fk.Reply = func(req backend.Request) string { return "Nothing urgent today." }
+
+	n := nervousFor(t, reg, realClock{})
+	var events []runtime.Event
+	var mu sync.Mutex
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's my brief", TaskID: "t3"}, collect(&events, &mu))
+
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls = %d, want exactly 1 (the one deliberate brief compute)", fk.Calls())
+	}
+	ks := kinds(events)
+	last := events[len(ks)-1]
+	if last.Kind != runtime.EventDone || last.Text != "Nothing urgent today." {
+		t.Fatalf("last event = %+v, want done with the computed brief text", last)
+	}
+
+	// A second ask must not compute again: the brief is now cached, so this
+	// is an ordinary Tier 0 hit with zero further backend calls.
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's my brief", TaskID: "t3b"}, func(runtime.Event) {})
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls after a second ask = %d, want still 1 (cache hit)", fk.Calls())
+	}
+}
+
+// TestEveryTurnStartsAtT0: two unrelated, sequential turns on the same
+// Nervous never share state — a prior turn's outcome can't skip the
+// cascade for a later one.
+func TestEveryTurnStartsAtT0(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	fk.Reply = func(req backend.Request) string { return "You should reprioritize." }
+	n := nervousFor(t, reg, realClock{})
+
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i do today", TaskID: "a1"}, func(runtime.Event) {})
+	if fk.Calls() != 1 {
+		t.Fatalf("first turn: backend calls = %d, want 1", fk.Calls())
+	}
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar today", TaskID: "a2"}, func(runtime.Event) {})
+	if fk.Calls() != 1 {
+		t.Fatalf("second turn (a plain Tier 0 match) made a backend call: calls = %d, want still 1", fk.Calls())
+	}
+}
+
+// TestExactlyOneOwner: once Handle has routed and finished a turn, no other
+// caller can route it again — turn.Table's CAS Route rejects it.
+func TestExactlyOneOwner(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, _ := nervousTestEnv(t)
+	table := turn.NewTable(func() time.Time { return tier0FixedNow })
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Turns: table, Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar today", TaskID: "one-owner"}, func(runtime.Event) {})
+
+	if err := table.Route("one-owner", turn.OwnerMain); err == nil {
+		t.Fatal("Route succeeded on an already-done turn; exactly one owner must ever be assigned")
+	}
+}
+
+// TestTier0WhileMainBlocked: Tier 0 shares no lock or semaphore with the
+// main path. A concurrent Tier-0-matchable turn must complete quickly even
+// while another turn's main-path call is blocked. (R-12 has no warm
+// session yet, so this proves the invariant at internal/nervous's own
+// level — turn.Table and Tier 0 hold no resource a slow main-path call
+// keeps — rather than against a real WarmSession's one-slot semaphore,
+// which is a later task's integration concern.)
+func TestTier0WhileMainBlocked(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	block := make(chan struct{})
+	started := make(chan struct{})
+	fk.Reply = func(req backend.Request) string {
+		close(started)
+		<-block
+		return "answer"
+	}
+	n := nervousFor(t, reg, realClock{})
+
+	done := make(chan struct{})
+	go func() {
+		n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what should i do today", TaskID: "blocked"}, func(runtime.Event) {})
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked turn's backend call never started")
+	}
+
+	quickDone := make(chan struct{})
+	go func() {
+		n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar today", TaskID: "quick"}, func(runtime.Event) {})
+		close(quickDone)
+	}()
+	select {
+	case <-quickDone:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("Tier 0 turn did not complete within 250ms while the main path was blocked")
+	}
+
+	close(block)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked turn never finished after being released")
+	}
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls = %d, want 1 (only the blocked main-path turn)", fk.Calls())
+	}
+}
+
+// TestPartialsNeverAnswer: 50 partials against the same client id never
+// produce any event on any stream and never write a route_log row — only
+// the eventual final transcript's own Handle call does either of those
+// (Design §11.5).
+func TestPartialsNeverAnswer(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, _ := nervousTestEnv(t)
+	n := nervousFor(t, reg, realClock{})
+
+	for i := 1; i <= 50; i++ {
+		if _, err := n.Partial(ctx, "never-answer", runtime.ChannelCLI, "what's on my calendar today", i); err != nil {
+			t.Fatalf("Partial #%d: %v", i, err)
+		}
+	}
+
+	if env.Store == nil {
+		t.Fatal("test setup: nil store")
+	}
+	rows, err := env.Store.ListRoutes(ctx, time.Time{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("route_log rows after 50 partials (no final turn) = %d, want 0", len(rows))
+	}
+}
+
+// TestNoDoubleAnswer: the final transcript matches Tier 0 exactly the same
+// way the speculative dry match already did, so Handle reuses the cached
+// answer — and, either way, exactly one done event is produced, never two,
+// regardless of whether reuse fired.
+func TestNoDoubleAnswer(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	if err := env.Store.Upsert(ctx, &store.Event{
+		Meta:    store.Meta{Source: "gcal", SourceID: "nda1", CreatedAt: tier0FixedNow},
+		Title:   "Board sync",
+		StartAt: tier0FixedNow.Add(2 * time.Hour),
+		EndAt:   tier0FixedNow.Add(3 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	table := turn.NewTable(func() time.Time { return tier0FixedNow })
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Turns: table, Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+		Speculation: true, Store: env.Store, ReadStore: env.Store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := n.Partial(ctx, "no-double", runtime.ChannelCLI, "what's on my calendar today", 1); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []runtime.Event
+	var mu sync.Mutex
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's on my calendar today", TaskID: "nda-final", ClientID: "no-double"}, collect(&events, &mu))
+
+	if fk.Calls() != 0 {
+		t.Fatalf("backend calls = %d, want 0", fk.Calls())
+	}
+	doneCount := 0
+	for _, e := range events {
+		if e.Kind == runtime.EventDone {
+			doneCount++
+		}
+	}
+	if doneCount != 1 {
+		t.Fatalf("done events = %d, want exactly 1", doneCount)
+	}
+	tn, ok := table.Get("nda-final")
+	if !ok || tn.State != turn.StateDone || tn.Owner != turn.OwnerQuick {
+		t.Fatalf("turn = %+v, want StateDone/OwnerQuick", tn)
+	}
+}
+
+// fakeClock is a controllable Clock for testing the ack timer without a
+// real sleep: AfterFunc records a pending callback, and Advance fires every
+// callback whose deadline has passed.
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	mu      sync.Mutex
+	fire    time.Time
+	f       func()
+	fired   bool
+	stopped bool
+}
+
+func (ft *fakeTimer) Stop() {
+	ft.mu.Lock()
+	ft.stopped = true
+	ft.mu.Unlock()
+}
+
+func newFakeClock(start time.Time) *fakeClock { return &fakeClock{now: start} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) AfterFunc(d time.Duration, f func()) Timer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ft := &fakeTimer{fire: c.now.Add(d), f: f}
+	c.timers = append(c.timers, ft)
+	return ft
+}
+
+// Advance moves the fake clock forward and synchronously runs every timer
+// whose deadline is now due (and not stopped), in the goroutine that calls
+// Advance — the same way a real time.AfterFunc callback would run in its
+// own goroutine relative to whoever scheduled it, except deterministic.
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	var due []*fakeTimer
+	for _, ft := range c.timers {
+		ft.mu.Lock()
+		if !ft.fired && !ft.stopped && !ft.fire.After(c.now) {
+			ft.fired = true
+			due = append(due, ft)
+		}
+		ft.mu.Unlock()
+	}
+	c.mu.Unlock()
+	for _, ft := range due {
+		ft.f()
+	}
+}
+
+// TestAckTimerFiresAndStops is a direct unit test of the Clock/Timer
+// plumbing Handle relies on (Design §11.4 step 1/6): AfterFunc schedules
+// exactly one callback at the right virtual deadline, and Stop prevents it.
+func TestAckTimerFiresAndStops(t *testing.T) {
+	start := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	c := newFakeClock(start)
+
+	fired := 0
+	timer := c.AfterFunc(DefaultAckAfter, func() { fired++ })
+	c.Advance(DefaultAckAfter - time.Millisecond)
+	if fired != 0 {
+		t.Fatalf("fired = %d before the deadline, want 0", fired)
+	}
+	c.Advance(time.Millisecond)
+	if fired != 1 {
+		t.Fatalf("fired = %d at the deadline, want 1", fired)
+	}
+
+	timer2 := c.AfterFunc(DefaultAckAfter, func() { fired++ })
+	timer2.Stop()
+	c.Advance(DefaultAckAfter)
+	if fired != 1 {
+		t.Fatalf("fired = %d after Stop, want still 1", fired)
+	}
+	_ = timer
+}
+
+// TestHandoffAckBeforeMainOutput: on escalation, the handoff acknowledgement
+// is always visible before the main path's first output — Handle fires it
+// explicitly at the moment it routes to main (answerMain), rather than
+// waiting for AckAfter to elapse, so even a slow model's first delta is
+// always preceded by an ack. Since Slice W (D3) that holds on voice too, and
+// the handoff is a silent ack there as well: no sentence is emitted before
+// the model's own output, and route_log.ack_ms is still recorded. (See
+// TestAckTimerFiresAndStops above for the timer mechanism tested directly.)
+func TestHandoffAckBeforeMainOutput(t *testing.T) {
+	for _, ch := range []runtime.Channel{runtime.ChannelCLI, runtime.ChannelVoice} {
+		t.Run(string(ch), func(t *testing.T) {
+			reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+			env, ctx, fk := nervousTestEnv(t)
+			release := make(chan struct{})
+			fk.Reply = func(req backend.Request) string {
+				<-release
+				return "answer"
+			}
+			n := nervousWithLoggingFor(t, reg, env.Store, realClock{})
+
+			var events []runtime.Event
+			var mu sync.Mutex
+			done := make(chan struct{})
+			go func() {
+				n.Handle(ctx, env, Turn{Channel: ch, Text: "what should i do today", TaskID: "ack-order-" + string(ch)}, collect(&events, &mu))
+				close(done)
+			}()
+
+			// Wait for both acks (router ack + handoff ack) while the main
+			// path is still blocked.
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				mu.Lock()
+				got := len(events)
+				mu.Unlock()
+				if got >= 2 {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			mu.Lock()
+			before := append([]runtime.Event(nil), events...)
+			mu.Unlock()
+			if len(before) < 2 {
+				t.Fatalf("events before main output = %+v, want the router ack and the handoff ack", before)
+			}
+			for _, e := range before {
+				if e.Kind != runtime.EventAck {
+					t.Fatalf("before main output got %q (%q); the handoff must be a silent ack", e.Kind, e.Text)
+				}
+			}
+
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("turn never finished after being released")
+			}
+			if fk.Calls() != 1 {
+				t.Fatalf("backend calls = %d, want 1", fk.Calls())
+			}
+			if row := lastRoute(t, env.Store, tier0FixedNow.Add(-24*time.Hour)); row.AckMS == nil {
+				t.Fatal("route_log ack_ms is null on an escalated turn")
+			}
+		})
+	}
+}
+
+// TestTier0BreakerResolvesOnCleanEscalation is a regression test for a
+// breaker bug: a clean Tier 0 escalation (no_match) must still resolve a
+// half-open trial one way or the other (breaker.go's trialInFlight only
+// clears inside RecordSuccess/RecordFailure), or it would strand the
+// breaker open forever. This scenario is now covered belt-and-braces by two
+// independent call sites: nervous.go's own RecordSuccess call on a clean
+// "no_match" escalation, AND mainpath.go's answerMain, which calls
+// tier0Breaker.RecordSuccess() as a safety net whenever a turn reaches the
+// main model — and, with no Tier 1 to intercept a clean Tier 0 escalation,
+// every such escalation now reaches answerMain, so both call sites fire.
+func TestTier0BreakerResolvesOnCleanEscalation(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, fk := nervousTestEnv(t)
+	fk.Reply = func(req backend.Request) string { return "escalated" }
+
+	clock := newFakeClock(tier0FixedNow)
+	cfg := testBreakerConfig()
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Tier0Enabled: true, MainEnabled: true,
+		Clock: clock, AckAfter: DefaultAckAfter, Breaker: cfg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < cfg.Failures; i++ {
+		n.tier0Breaker.Allow()
+		n.tier0Breaker.RecordFailure("boom")
+	}
+	if st, _, _ := n.Tier0Breaker(); st != BreakerOpen {
+		t.Fatalf("state after %d failures = %s, want open", cfg.Failures, st)
+	}
+	clock.Advance(cfg.Cooldown)
+
+	// tier0ScheduleYAML's own templates require "calendar"/"schedule" in
+	// the utterance, so this cleanly misses Tier 0 (the half-open trial,
+	// no_match) and falls through to the main path.
+	n.Handle(ctx, env, Turn{Channel: runtime.ChannelCLI, Text: "what's happening tomorrow", TaskID: "breaker-t0"}, func(runtime.Event) {})
+
+	if fk.Calls() != 1 {
+		t.Fatalf("backend calls = %d, want 1 (the clean escalation reached main)", fk.Calls())
+	}
+	st, reason, _ := n.Tier0Breaker()
+	if st != BreakerClosed {
+		t.Fatalf("breaker state after a clean-escalation half-open trial = %s (reason %q), want closed — trialInFlight must not strand the breaker", st, reason)
+	}
+	if !n.tier0Breaker.Allow() {
+		t.Fatal("breaker should allow a normal Tier 0 attempt again after resolving the half-open trial")
+	}
+}
+
+// TestEntitiesFallsBackToConfigStoreForSpeculation is a regression test:
+// entities() fell back from Config.ReadStore only to env.Store, never to
+// Config.Store (unlike specStore(), whose own doc comment claims — falsely,
+// until this fix — that entities() shares its fallback chain). Partial's
+// speculative call passes a zero-value runtime.Env{} (no per-turn
+// env.Store to fall back to, since a partial transcript isn't a full
+// turn), so a daemon wired with only Config.Store set (no optional
+// Config.ReadStore — the ordinary case) always got an empty entity list
+// during speculation, silently defeating speculative prefetch for every
+// person-slotted intent with no error anywhere. Calls entities() the same
+// way Partial does, directly, to isolate the fallback chain itself from
+// the rest of speculation's machinery.
+func TestEntitiesFallsBackToConfigStoreForSpeculation(t *testing.T) {
+	reg := tier0FixtureRegistry(t, map[string]string{"schedule_on_date": tier0ScheduleYAML})
+	env, ctx, _ := nervousTestEnv(t)
+	if err := env.Store.Upsert(ctx, &store.Message{
+		Meta: store.Meta{Source: "gmail", SourceID: "m1", CreatedAt: tier0FixedNow, UpdatedAt: tier0FixedNow},
+		From: "Jordan Lee <jordan@x.com>", Subject: "hi", SentAt: tier0FixedNow,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := New(Config{
+		Registry: func() *intents.Registry { return reg }, Style: render.DefaultStyle(),
+		Tier0Enabled: true, MainEnabled: true, Clock: realClock{}, AckAfter: DefaultAckAfter,
+		Store:        env.Store, // only Store set, no ReadStore: the exact gap
+		SenderWindow: 180 * 24 * time.Hour, SenderLimit: 500,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Partial's own zero-value env{} is exactly what exposed the bug.
+	ents := n.entities(ctx, runtime.Env{}, tier0FixedNow)
+	if len(ents.People) != 1 || ents.People[0].Email != "jordan@x.com" {
+		t.Fatalf("entities(ctx, Env{}, at) with only Config.Store set = %+v, want the one seeded sender (jordan@x.com) — Partial's speculative person-slot resolution must not silently see nobody", ents.People)
+	}
+}

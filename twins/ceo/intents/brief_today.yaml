@@ -1,0 +1,25 @@
+id: brief.today
+description: Today's cached morning brief
+function: store.cached_brief
+templates:
+  - "what needs my attention"
+  - "what's [my] brief [for today]"
+  - "give me [my] morning brief"
+  - "is [my] [morning] brief ready"
+  - "what's on my plate [today]"
+  - "brief me [on today]"
+  - "what's [my] daily brief"
+  - "catch me up [for today]"
+  - "give me today's brief"
+  - "what do i need to know today"
+  - "morning brief [please]"
+examples:
+  - "is my morning brief ready"
+  - "brief me"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "is my morning brief ready", intent: brief.today}
+  - {utterance: "brief me", intent: brief.today}
+  - {utterance: "what's on my plate", intent: brief.today}
+  - {utterance: "what's the tallest building in the world", intent: none}

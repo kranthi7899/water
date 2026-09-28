@@ -1,0 +1,38 @@
+id: inbound_decision
+title: Inbound decision
+trigger: >-
+  Someone outside a recognized category — a customer, a partner, a vendor,
+  a candidate, a member of the public — asks the CEO to decide something
+  inbound: say yes or no, prioritize it, or respond a particular way.
+needs:
+  - name: sender_history
+    fetch: gmail.list_messages
+    kind: lookup
+    args: {query: "from:{sender}"}
+  - name: related_documents
+    fetch: gdrive.search_files
+    kind: research
+    args: {query: "{keywords}"}
+default_rule: >-
+  No auto-approval: every inbound decision routes to the CEO with whatever
+  sender history and related documents were found.
+staged_actions:
+  - gmail.send_message
+severity_weight: 2
+---
+Stub type for Slice C-base (`docs/slices/C.md` section 5): a valid,
+schema-complete registry entry proving the registry holds more than one
+non-`budget_request` type, per the amendment's "stub as registry entries"
+ask. Its `needs` are the same keyword/sender-lookup shape `generic` and
+`investor_request` use; there is no `inbound_decision`-specific computation,
+so a card of this type is usually `missing_info` until a later slice fills
+it in with something type-specific (e.g. a lookup against `role.md`'s
+People/Projects sections to say whether the sender is already a known
+contact).
+
+This is deliberately the closest stub to `generic` in shape: the point of
+having it as a *named* type rather than relying on `generic` is severity
+ranking in the brief (`severity_weight: 2`, above `generic`'s implicit 1)
+and giving `Classify` a real bucket for "an outsider wants a decision" separate
+from "nothing recognized fits" — not a claim that this type does more
+research than `generic` today.

@@ -1,0 +1,164 @@
+# The CEO twin. A connector function exists for this twin only if it is
+# listed here, at the level stated. A3 replaced the in-memory fake_*
+# connectors with the real, read-only Google connectors (internal/connectors/
+# google/{gcal,gmail,gdrive}); the fakes now live only in tests
+# (internal/connectors/fake), which the gate, guards and gateway tests
+# exercise against their own hand-written manifests, not this file.
+id: ceo
+name: CEO twin
+
+usage:
+  window: 5h
+  model_calls: 200
+  auto_model_calls: 40
+
+# fast serves the conversation plane; strong serves packet/playbook work.
+# "" for strong means the claude CLI's own default model.
+models:
+  fast: haiku
+  strong: ""
+
+connectors:
+  - name: gcal
+    functions:
+      - {name: list_events, level: R, rate: {max: 120, per: 1h}}
+      - {name: create_event, level: A, rate: {max: 20, per: 1h}}
+      - {name: move_event, level: A, rate: {max: 20, per: 1h}}
+  - name: gmail
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+      - {name: get_message, level: R, rate: {max: 120, per: 1h}}
+      - {name: draft_message, level: D, rate: {max: 40, per: 1h}}
+      - {name: send_message, level: A, rate: {max: 20, per: 1h}}
+      - {name: draft_for_review, level: D, rate: {max: 40, per: 1h}}
+  - name: gdrive
+    functions:
+      - {name: search_files, level: R, rate: {max: 60, per: 1h}}
+      - {name: read_file, level: R, rate: {max: 60, per: 1h}}
+  # agentmail is a second identity of the gmail connector, pointed at the
+  # agent's own verified mailbox (a distinct vault credential, account
+  # "agent" -- see docs/agent-identity-setup.md), for internal/agentmail's
+  # inbound-triage watcher. Only list_messages is granted: draft_message/
+  # send_message/get_message stay unreachable through this identity no
+  # matter what the underlying connector implements, because the gate
+  # checks this manifest before it ever looks at a connector.
+  - name: agentmail
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+  # Slice E: messages with another twin (another person's agent, running its
+  # own daemon). Sending is level A — the CEO approves the exact message
+  # before it leaves, like an email. Reading the inbox is level R and its
+  # output is external: a received twin message is untrusted data, never an
+  # instruction. Peers (socket + token) live in the vault under
+  # water.twinlink/<this twin's id>; see docs/slices/E.md.
+  - name: twinlink
+    functions:
+      - {name: send_message, level: A, rate: {max: 20, per: 1h}}
+  - name: twininbox
+    functions:
+      - {name: list_messages, level: R, rate: {max: 120, per: 1h}}
+  # github, linear and hubspot are real connectors
+  # (internal/connectors/{github,linear,hubspot}), always registered
+  # (see buildCEORegistry's doc comment for why), but each one's own token
+  # is optional: an owner who never runs `water connect <name>` sees a
+  # clear per-call "not connected" error rather than a daemon that fails to
+  # start. github.repo must also be set in config for github's functions to
+  # do anything (see docs/real-connectors-setup.md).
+  - name: github
+    functions:
+      - {name: list_prs, level: R, rate: {max: 60, per: 1h}}
+      - {name: list_issues, level: R, rate: {max: 60, per: 1h}}
+  # linear is read-only (list_issues) plus two write functions
+  # (docs/slices/UI.md U4, 2026-09-28): create_comment and
+  # set_issue_priority, both level A like every other outward write in
+  # this manifest (gcal.create_event/move_event) -- gate-enforced, refused
+  # without an approved envelope. Neither is on demo mode's own
+  # auto_allowlist below, and demo_routing.yaml's issue allowlist (U4's own
+  # demo-mode restriction) doesn't exist yet -- that's Phase 7 scope, not
+  # built by this change; today the only backstop is the standard
+  # approval envelope every A-level call already requires.
+  - name: linear
+    functions:
+      - {name: list_issues, level: R, rate: {max: 60, per: 1h}}
+      - {name: create_comment, level: A, rate: {max: 20, per: 1h}}
+      - {name: set_issue_priority, level: A, rate: {max: 20, per: 1h}}
+  - name: hubspot
+    functions:
+      - {name: list_deals, level: R, rate: {max: 60, per: 1h}}
+      - {name: list_contacts, level: R, rate: {max: 60, per: 1h}}
+  # company_finance (internal/connectors/google/gsheets) is a real,
+  # read-only connector over Renaissance_Finance, the company's actual
+  # financial model — a native Google Sheet, read through the Sheets API
+  # (values.get on a specific tab and A1 range, never the whole file), on
+  # the same shared water.google/ceo credential gcal/gmail/gdrive already
+  # use. Requires the spreadsheets.readonly scope (see gapi.Scopes()); an
+  # owner connected before this scope existed needs one `water connect
+  # google` re-run to pick it up (see docs/google-setup.md). No write
+  # function exists for this connector, here or in the connector's own
+  # Functions() — a "propose a budget change" feature, if ever built,
+  # would produce a decision packet for approval, never write to the sheet.
+  - name: company_finance
+    functions:
+      - {name: cash_position, level: R, rate: {max: 60, per: 1h}}
+      - {name: budget_status, level: R, rate: {max: 60, per: 1h}}
+      - {name: spend_breakdown, level: R, rate: {max: 60, per: 1h}}
+      - {name: outstanding_invoices, level: R, rate: {max: 60, per: 1h}}
+      - {name: revenue_by_application, level: R, rate: {max: 60, per: 1h}}
+      - {name: funding_history, level: R, rate: {max: 60, per: 1h}}
+      # spend_breakdown_all/monthly_costs: Phase 4's two new read-only
+      # functions (docs/slices/UI.md, U4 sub-question) for the Finance
+      # dashboard (internal/dashboards/compute.go). Read-only extensions to
+      # this already-real, already-granted connector, not a new connector.
+      - {name: spend_breakdown_all, level: R, rate: {max: 60, per: 1h}}
+      - {name: monthly_costs, level: R, rate: {max: 60, per: 1h}}
+  # company_customers (internal/connectors/google/gsheets.Customers) is
+  # docs/slices/UI.md's named, owner-approved exception to "no new
+  # connectors" (U3-A): a second, read-only gsheets connector over
+  # Renaissance_Customers, on the same shared water.google/ceo credential
+  # as company_finance above. Its one function, accounts, answers
+  # not_connected (see internal/connectors/google/gsheets/customers.go's
+  # ErrCustomersNotConfigured) until the owner uploads the spreadsheet as a
+  # native Google Sheet and this connector's placeholder spreadsheet id is
+  # hand-edited to the real one — expected, correct behavior today, not a
+  # bug.
+  - name: company_customers
+    functions:
+      - {name: accounts, level: R, rate: {max: 60, per: 1h}}
+  # display.show (internal/connectors/display) puts a short title and a
+  # plain-text body on the CEO's screen during a turn (the model calls it on
+  # voice when seeing beats hearing). No network, no credential, no side
+  # effect beyond the UI; the daemon sends it to the active turn as an
+  # artifact event. Model-initiated only: never on the auto allowlist.
+  - name: display
+    functions:
+      - {name: show, level: R, rate: {max: 30, per: 1h}}
+  # research.web (internal/connectors/research) answers a short plain-words
+  # question about live public information (weather, news, "latest",
+  # prices) with a summary and sources. It runs a separate, cold `claude
+  # --print` on the subscription with only WebSearch/WebFetch (the twin
+  # keeps --tools ""), no credential, no API key. Its output is untrusted
+  # web content (External), so a call taints the session. Model-initiated
+  # only: never on the auto allowlist. Each call is a subscription model
+  # call, hence the modest cap.
+  - name: research
+    functions:
+      - {name: web, level: R, rate: {max: 20, per: 1h}}
+  # requests.respond (internal/connectors/requests, docs/slices/UI.md Phase
+  # 1b, U15) records the CEO's answer to a person request (a budget
+  # reallocation ask, a signature ask, ...) once approved. No network, no
+  # credential, no outward call: approvals.Queue.ProposeRequest builds the
+  # envelope with the exact answer text already in its payload, so this only
+  # ever runs after the CEO approved that exact text word for word. Level A
+  # per U15's decision, so it always requires an approved envelope like any
+  # other outward-shaped action, even though nothing here actually goes out.
+  - name: requests
+    functions:
+      - {name: respond, level: A, rate: {max: 30, per: 1h}}
+
+# Only functions that read (never draft or act) may run unattended in the
+# background sync (internal/sync); get_message and the Drive functions stay
+# model- or CEO-initiated.
+auto_allowlist:
+  - gcal.list_events
+  - gmail.list_messages
+  - agentmail.list_messages

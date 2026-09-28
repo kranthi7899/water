@@ -19,7 +19,7 @@ type Provider interface {
 // ErrUnavailable is returned by the no-op provider.
 var ErrUnavailable = errors.New("voice provider is noop; set voice.provider to \"os\"")
 
-// Noop is the Phase 1 provider.
+// Noop is the disabled provider (voice.provider: noop).
 type Noop struct{}
 
 func (Noop) Name() string                           { return "noop" }
@@ -31,7 +31,9 @@ var providers = map[string]func() Provider{
 	"noop": func() Provider { return Noop{} },
 }
 
-// Register adds a provider (e.g. "os" in Phase 4).
+// Register adds a provider by name. Only providers that need no
+// configuration live here (noop, and a bare "os"); the configured OS voice and
+// the metered OpenAI voice are built directly by cli.voiceProvider.
 func Register(name string, f func() Provider) { providers[name] = f }
 
 // Open constructs the named provider.
@@ -53,13 +55,12 @@ func Names() []string {
 	return out
 }
 
-// Absence returns a clear explanation of why a provider cannot speak.
+// Absence returns a clear explanation of why a provider cannot speak. A
+// provider explains itself by implementing Absence() string; anything else
+// (noop) gets the generic "turn voice on" message.
 func Absence(p Provider) string {
-	if o, ok := p.(*OS); ok {
-		return o.Absence()
-	}
-	if o, ok := p.(*OpenAI); ok {
-		return o.Absence()
+	if a, ok := p.(interface{ Absence() string }); ok {
+		return a.Absence()
 	}
 	return ErrUnavailable.Error()
 }

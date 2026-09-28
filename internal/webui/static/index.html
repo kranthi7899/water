@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Water</title>
+<link rel="stylesheet" href="app.css">
+<script src="dom.js" defer></script>
+<script src="api.js" defer></script>
+<!-- app.js is the router/shared glue: it defines window.appShared and
+     window.views (the per-view registry below fills in), then boots once
+     every deferred script below has run (it waits for DOMContentLoaded
+     rather than calling boot() itself, so load order here does not
+     matter beyond "after api.js/dom.js, before nothing in particular"). -->
+<script src="app.js" defer></script>
+<script src="view_today.js" defer></script>
+<script src="view_decisions.js" defer></script>
+<script src="view_approvals.js" defer></script>
+<script src="view_drafts.js" defer></script>
+<script src="view_meetings.js" defer></script>
+<script src="view_threads.js" defer></script>
+<script src="view_dashboards.js" defer></script>
+<script src="view_workspaces.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <nav class="sidebar" aria-label="Sections">
+    <div class="brand">Water</div>
+    <button type="button" class="nav" data-view="today"><span class="nav-label">Today</span><span class="count" data-count="today"></span></button>
+    <button type="button" class="nav" data-view="decisions"><span class="nav-label">Decisions</span><span class="count" data-count="decisions"></span></button>
+    <button type="button" class="nav" data-view="approvals"><span class="nav-label">Approvals</span><span class="count" data-count="approvals"></span></button>
+    <button type="button" class="nav" data-view="drafts"><span class="nav-label">Drafts</span><span class="count" data-count="drafts"></span></button>
+    <button type="button" class="nav" data-view="meetings"><span class="nav-label">Meetings</span></button>
+    <button type="button" class="nav" data-view="threads"><span class="nav-label">Threads</span></button>
+    <div class="grp">Views</div>
+    <button type="button" class="nav" data-view="dashboards"><span class="nav-label">Dashboards</span></button>
+    <button type="button" class="nav" data-view="workspaces"><span class="nav-label">Workspaces</span></button>
+    <div class="grp">Projects</div>
+    <ul class="nav-sub" id="projects-nav-list"></ul>
+    <div class="grp">Domains</div>
+    <ul class="nav-sub" id="domains-nav-list"></ul>
+    <section class="recent" aria-label="Recent threads">
+      <h2 class="recent-head">Recent threads</h2>
+      <ul class="recent-list" id="recent-threads"></ul>
+    </section>
+    <div class="sidebar-foot">
+      <button type="button" class="ghost" id="refresh">Refresh</button>
+    </div>
+  </nav>
+  <div class="column">
+    <main class="main" id="main" tabindex="-1" aria-live="polite"></main>
+    <div class="bar" id="bar">
+      <div class="bar-target" id="bar-target"></div>
+      <div class="bar-row">
+        <textarea id="bar-input" rows="2" placeholder="Ask your twin…" aria-label="Message to your twin"></textarea>
+        <button type="button" class="mic" id="mic" hidden aria-label="Hold to talk">Hold to talk</button>
+        <button type="button" class="primary" id="bar-send">Send</button>
+        <button type="button" class="ghost" id="bar-stop" hidden>Stop</button>
+      </div>
+      <div class="bar-status" id="bar-status" role="status"></div>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

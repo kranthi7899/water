@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -13,7 +14,7 @@ import (
 	"water/internal/auth"
 	"water/internal/backend"
 	"water/internal/config"
-	"water/internal/surface"
+	"water/internal/gateway"
 )
 
 func (a *App) onboardCmd() *cobra.Command {
@@ -25,7 +26,7 @@ func (a *App) onboardCmd() *cobra.Command {
 	}
 	c.Flags().Bool("no-login", false, "never launch a login flow; only detect")
 	c.Flags().Bool("headless", false, "force the no-browser login path (setup-token / device code)")
-	c.Flags().Bool("no-picker", false, "do not open the agent picker after success")
+	c.Flags().Bool("no-picker", false, "do not open chat after success")
 	return c
 }
 
@@ -62,7 +63,7 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	}
 	probe()
 	if !a.jsonMode() {
-		fmt.Fprintln(os.Stderr, surface.StyleDim.Render(surface.Banner))
+		fmt.Fprintln(os.Stderr, styleDim.Render("water — a CEO digital twin"))
 		a.printBackends(rep)
 	}
 
@@ -84,7 +85,7 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 		if interactive && !auth.Confirm(os.Stdin, os.Stderr, fmt.Sprintf("  %s is installed but not logged in. Sign in now (%s)?", name, plan.Note), a.flags.yes) {
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "\n  %s %s\n\n", surface.StyleDim.Render("running"), joinCmd(plan.Command))
+		fmt.Fprintf(os.Stderr, "\n  %s %s\n\n", styleDim.Render("running"), joinCmd(plan.Command))
 		if _, lerr := auth.Login(ctx, nil, name, headless); lerr != nil {
 			rep.Warnings = append(rep.Warnings, lerr.Error())
 			continue
@@ -97,7 +98,16 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 		}
 	}
 
-	sel, selErr := backend.Select(ctx, backend.Default, backend.SelectConfig{Preferred: "auto", AllowMetered: false})
+	sel, selWarn, selErr := onboardSelect(ctx, backend.Default, a.flags.backend, cfg.Backend.Preferred)
+	if selErr != nil && isExplicitBackend(a.flags.backend) {
+		if a.jsonMode() {
+			_ = json.NewEncoder(os.Stdout).Encode(rep)
+		}
+		return exitWith(ExitBackend, selErr)
+	}
+	if selWarn != "" {
+		rep.Warnings = append(rep.Warnings, selWarn)
+	}
 	if selErr != nil {
 		msg := "no subscription CLI is installed and logged in.\n" +
 			"  install one and sign in with your plan:\n" +
@@ -117,12 +127,12 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 
 	// The gate: one clean real round trip.
 	if !a.jsonMode() {
-		fmt.Fprintf(os.Stderr, "\n  %s verifying %s with a real round trip…", surface.StyleDim.Render("check"), rep.Selected)
+		fmt.Fprintf(os.Stderr, "\n  %s verifying %s with a real round trip…", styleDim.Render("check"), rep.Selected)
 	}
 	resp, verr := auth.VerifyRoundTrip(ctx, sel.Backend, 2*time.Minute)
 	if verr != nil {
 		if !a.jsonMode() {
-			fmt.Fprintln(os.Stderr, " "+surface.StyleErr.Render("failed"))
+			fmt.Fprintln(os.Stderr, " "+styleErr.Render("failed"))
 		}
 		if a.jsonMode() {
 			_ = json.NewEncoder(os.Stdout).Encode(rep)
@@ -131,44 +141,88 @@ func (a *App) runOnboard(cmd *cobra.Command) error {
 	}
 	rep.Verified, rep.VerifyText = true, resp.Text
 	if !a.jsonMode() {
-		fmt.Fprintf(os.Stderr, " %s (%s, %s)\n", surface.StyleOK.Render("ok"), resp.Duration.Round(time.Millisecond), surface.StyleDim.Render("0 metered"))
+		fmt.Fprintf(os.Stderr, " %s (%s, %s)\n", styleOK.Render("ok"), resp.Duration.Round(time.Millisecond), styleDim.Render("0 metered"))
 	}
 
 	set := map[string]string{"backend.preferred": rep.Selected, "backend.allow_metered": "false", "onboard.verified_at": time.Now().UTC().Format(time.RFC3339)}
 	if err := config.Save(set); err != nil {
 		return err
 	}
-	for _, d := range []string{config.MemoryDir(), cfg.Telemetry.TraceDir, cfg.Orchestration.CheckpointDir} {
-		_ = os.MkdirAll(d, 0o755)
+	if err := os.MkdirAll(config.MemoryDir(), 0o755); err != nil {
+		return err
 	}
 	rep.Written = true
 
 	if a.jsonMode() {
 		return json.NewEncoder(os.Stdout).Encode(rep)
 	}
-	fmt.Fprintf(os.Stderr, "\n  %s %s\n", surface.StyleDim.Render("selected"), surface.StyleAccent.Render(rep.Selected))
-	fmt.Fprintf(os.Stderr, "  %s %s\n", surface.StyleDim.Render("config  "), rep.Config)
+	fmt.Fprintf(os.Stderr, "\n  %s %s\n", styleDim.Render("selected"), styleAccent.Render(rep.Selected))
+	fmt.Fprintf(os.Stderr, "  %s %s\n", styleDim.Render("config  "), rep.Config)
 	for _, w := range rep.Warnings {
-		fmt.Fprintf(os.Stderr, "\n  %s %s\n", surface.StyleWarn.Render("warning"), w)
+		fmt.Fprintf(os.Stderr, "\n  %s %s\n", styleWarn.Render("warning"), w)
 	}
-	fmt.Fprintf(os.Stderr, "\n  %s\n", surface.StyleDim.Render("next: water chat · water orchestrate \"<brief>\" · water status"))
+	fmt.Fprintf(os.Stderr, "\n  %s\n", styleDim.Render("next: water daemon · water chat · water ask \"<prompt>\" · water status"))
 	if interactive && !noPicker && isTTY(os.Stdout) {
-		a.cfg = nil
-		return a.runChat(ctx, "", "", true)
+		return a.chatAfterOnboard(ctx)
 	}
 	return nil
+}
+
+// chatAfterOnboard opens chat once setup is verified, but only when a daemon
+// is actually answering: chat is a daemon client, and on a first-run onboard
+// nothing has started one yet. Setup succeeded either way, so a missing
+// daemon is a next-step hint, not a failed exit.
+func (a *App) chatAfterOnboard(ctx context.Context) error {
+	sock := gateway.Paths{Home: config.Home()}.SocketPath()
+	if probeDaemon(sock) != daemonUp {
+		fmt.Fprintf(os.Stderr, "\n  %s start the daemon with `water daemon` (or `water daemon install`), then run `water` to chat\n", styleDim.Render("next"))
+		return nil
+	}
+	a.cfg = nil
+	return a.runChat(ctx)
+}
+
+func isExplicitBackend(v string) bool {
+	v = strings.TrimSpace(strings.ToLower(v))
+	return v != "" && v != "auto"
+}
+
+// onboardSelect picks the backend onboard verifies and then writes back to
+// backend.preferred. It never allows a metered backend. An explicit
+// --backend is honoured, and its failure returned as is. A stored
+// backend.preferred is honoured too, but when it is no longer usable onboard
+// (which is how a user repairs setup) falls back to auto and says so in the
+// returned warning.
+func onboardSelect(ctx context.Context, reg *backend.Registry, flag, preferred string) (backend.Selection, string, error) {
+	if isExplicitBackend(flag) {
+		sel, err := backend.Select(ctx, reg, backend.SelectConfig{Flag: flag, AllowMetered: false})
+		return sel, "", err
+	}
+	if !isExplicitBackend(preferred) {
+		sel, err := backend.Select(ctx, reg, backend.SelectConfig{Preferred: "auto", AllowMetered: false})
+		return sel, "", err
+	}
+	sel, err := backend.Select(ctx, reg, backend.SelectConfig{Preferred: preferred, AllowMetered: false})
+	if err == nil {
+		return sel, "", nil
+	}
+	sel, aerr := backend.Select(ctx, reg, backend.SelectConfig{Preferred: "auto", AllowMetered: false})
+	if aerr != nil {
+		return sel, "", aerr
+	}
+	return sel, fmt.Sprintf("%v; verified %s instead", err, sel.Backend.Name()), nil
 }
 
 func (a *App) printBackends(rep onboardReport) {
 	for _, name := range backend.Default.Names() {
 		av := rep.Backends[name]
-		mark := surface.StyleDim.Render("○")
+		mark := styleDim.Render("○")
 		if av.Usable() && !av.Metered {
-			mark = surface.StyleAccent.Render("●")
+			mark = styleAccent.Render("●")
 		} else if av.Usable() {
-			mark = surface.StyleWarn.Render("$")
+			mark = styleWarn.Render("$")
 		}
-		fmt.Fprintf(os.Stderr, "  %s %-20s %s\n", mark, name, surface.StyleDim.Render(av.Detail))
+		fmt.Fprintf(os.Stderr, "  %s %-20s %s\n", mark, name, styleDim.Render(av.Detail))
 	}
 }
 

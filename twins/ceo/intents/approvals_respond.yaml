@@ -1,0 +1,63 @@
+id: approvals.respond
+description: Answer yes or no to the one pending approval
+function: approvals.bind_pending
+requires_pending_approval: true
+templates:
+  - "yes"
+  - "no"
+  - "yeah"
+  - "nope"
+  - "yes approve it"
+  - "go ahead approve it"
+  - "no reject that"
+  - "approve it"
+  - "deny it"
+  - "yes that's fine"
+  - "no skip that"
+  - "yeah go ahead"
+  - "nope skip it"
+  - "sure approve that"
+  - "approved"
+  - "denied"
+  # Slice W (D5a): natural phrasings. Every affirmative one here must read as
+  # Yes under approvals.MatchPending with one pending (a test enforces it),
+  # because on the voice path anything that isn't Yes is applied as a denial.
+  - "i approve"
+  - "i approve it"
+  - "i approve the message"
+  - "approve the message"
+  - "approve the email"
+  - "yes send it"
+  - "send it"
+  - "go ahead"
+  - "do it"
+  - "go ahead and send it"
+  # D5b: stage two of the spoken send. Also a plain yes at stage one.
+  - "confirm send"
+  - "confirm send it"
+examples:
+  - "yeah"
+  - "nope"
+  - "approved"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "yeah", intent: approvals.respond, pending: 1}
+  - {utterance: "nope", intent: approvals.respond, pending: 1}
+  - {utterance: "approved", intent: approvals.respond, pending: 1}
+  - {utterance: "denied", intent: approvals.respond, pending: 1}
+  - {utterance: "yeah", intent: none, pending: 0}
+  - {utterance: "nope", intent: none, pending: 0}
+  - {utterance: "i approve the message", intent: approvals.respond, pending: 1}
+  - {utterance: "approve the email", intent: approvals.respond, pending: 1}
+  - {utterance: "yes send it", intent: approvals.respond, pending: 1}
+  - {utterance: "send it", intent: approvals.respond, pending: 1}
+  - {utterance: "go ahead", intent: approvals.respond, pending: 1}
+  - {utterance: "do it", intent: approvals.respond, pending: 1}
+  - {utterance: "go ahead and send it", intent: approvals.respond, pending: 1}
+  - {utterance: "confirm send", intent: approvals.respond, pending: 1}
+  - {utterance: "i approve the message", intent: none, pending: 0}
+  - {utterance: "send it", intent: none, pending: 0}
+  - {utterance: "go ahead", intent: none, pending: 0}
+  - {utterance: "do it", intent: none, pending: 0}
+  - {utterance: "confirm send", intent: none, pending: 0}

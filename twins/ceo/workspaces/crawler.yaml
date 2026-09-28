@@ -1,0 +1,7 @@
+# Project workspace: Crawler, twins/ceo/seed/people.yaml's "crawler" team,
+# Linear key CRA.
+id: crawler
+name: Crawler
+template: project
+source: linear_team:CRA
+teams: [CRA]

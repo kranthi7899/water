@@ -1,0 +1,27 @@
+id: mail.unread_count
+description: How much unread mail there is
+function: store.unread_count
+templates:
+  - "how many unread emails do i have"
+  - "what's [my] unread count"
+  - "how much unread mail do i have"
+  - "any unread emails"
+  - "how many emails haven't i read"
+  - "what's in [my] unread"
+  - "unread count [please]"
+  - "how many messages are unread"
+  - "do i have unread mail"
+  - "how many [new] unread emails"
+  - "what's [my] inbox unread count"
+  - "give me [my] unread [email] count"
+  - "check my unread mail"
+examples:
+  - "check my unread mail"
+  - "give me unread count"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "check my unread mail", intent: mail.unread_count}
+  - {utterance: "give me unread count", intent: mail.unread_count}
+  - {utterance: "how many unread emails", intent: mail.unread_count}
+  - {utterance: "what's the latest sports score", intent: none}

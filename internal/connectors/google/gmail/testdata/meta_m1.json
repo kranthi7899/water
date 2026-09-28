@@ -1,0 +1,14 @@
+{
+  "id": "m1",
+  "threadId": "t1",
+  "snippet": "Can you confirm the Q3 numbers?",
+  "internalDate": "1758623400000",
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "Dana Lee <dana@acme.com>"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "Q3 budget"},
+      {"name": "Date", "value": "Tue, 23 Sep 2026 09:30:00 -0400"}
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "m10",
+  "threadId": "t10",
+  "snippet": "New hire kickoff Monday.",
+  "internalDate": "1758700000000",
+  "historyId": "150",
+  "payload": {
+    "headers": [
+      {"name": "From", "value": "hr@acme.com"},
+      {"name": "To", "value": "ceo@water.dev"},
+      {"name": "Subject", "value": "New hire"},
+      {"name": "Date", "value": "Wed, 24 Sep 2026 08:00:00 -0400"}
+    ]
+  }
+}

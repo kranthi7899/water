@@ -1,0 +1,12 @@
+# Domain workspace: Marketing. Judgment call (Phase 1a): docs/slices/UI.md
+# Phase 5d describes Marketing's real data (trend tiles labelled by the
+# research run they came from, prospects from the customers sheet, public
+# reviews) as designed in a later phase, and internal/workspaces' closed
+# source list has no dedicated marketing source kind. company_customers is
+# the closest existing fit today (prospects come from the same customers
+# sheet clients.yaml already sources from) — a later phase should revisit
+# this once Marketing's own data model is designed. No membership rule yet.
+id: marketing
+name: Marketing
+template: marketing
+source: company_customers

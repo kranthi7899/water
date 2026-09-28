@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Water design reference</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Icons: Tabler (CDN here for viewing). In the app, vendor the SVGs locally; the app must work offline. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
+<style>
+/* ================= TOKENS (dark, matches the Water window) ================= */
+:root{
+  --bg:#0f0f10; --surface:#1a1a1c; --surface-2:#222225; --border:#2c2c30;
+  --text:#f0f0f2; --text-2:#a3a3ab; --text-3:#6f6f78;
+  --accent:#5b8cff; --accent-bg:#1c2a4d;
+  --warn:#e0a13a; --warn-bg:#3a2c10;
+  --danger:#ef6461; --danger-bg:#3d1a19;
+  --ok:#54b87a; --ok-bg:#15301f;
+  --radius:8px; --radius-lg:12px;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
+}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 var(--font);padding:32px;max-width:760px}
+h1{font-size:20px;margin:0 0 4px} h2.ref{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);margin:40px 0 10px;font-weight:500}
+p{margin:0}
+/* ================= PRIMITIVES ================= */
+.card{background:var(--surface);border:.5px solid var(--border);border-radius:var(--radius-lg);padding:20px}
+.list{background:var(--surface);border:.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:.5px solid var(--border)}
+.row:last-child{border-bottom:0} .row.sel{background:var(--surface-2)}
+.row.edge-danger{border-left:3px solid var(--danger)} .row.edge-warn{border-left:3px solid var(--warn)} .row.edge-none{border-left:3px solid var(--border)}
+.row .ico{font-size:18px;color:var(--text-2);flex-shrink:0} .row .body{flex:1;min-width:0}
+.title{font-size:13px;font-weight:500} .meta{font-size:12px;color:var(--text-3);margin-top:2px}
+.h{font-size:16px;font-weight:500} .sub{font-size:14px;color:var(--text-2)}
+.label{font-size:11px;color:var(--text-3);margin-bottom:8px}
+.badge{font-size:12px;padding:2px 10px;border-radius:var(--radius);background:var(--surface-2);color:var(--text-2);white-space:nowrap}
+.badge.warn{background:var(--warn-bg);color:var(--warn)} .badge.danger{background:var(--danger-bg);color:var(--danger)}
+.badge.ok{background:var(--ok-bg);color:var(--ok)} .badge.accent{background:var(--accent-bg);color:var(--accent)}
+.avatar{width:22px;height:22px;border-radius:50%;background:var(--accent-bg);color:var(--accent);font-size:10px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.avatar.warn{background:var(--warn-bg);color:var(--warn)}
+.btn{font:inherit;font-size:13px;color:var(--text);background:transparent;border:.5px solid var(--border);border-radius:var(--radius);padding:6px 14px;cursor:pointer}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff} .btn.block{width:100%}
+.btn-row{display:flex;gap:8px} .btn-row .btn{flex:1}
+.cols{display:grid;grid-template-columns:1fr 170px;gap:20px}
+.panel{background:var(--surface-2);border-radius:var(--radius);padding:10px 12px}
+.evidence div{font-size:13px;color:var(--text-2);line-height:1.9} .evidence i{font-size:14px;vertical-align:-2px;margin-right:6px}
+.divider{border-top:.5px solid var(--border);padding-top:12px;margin-top:14px}
+.action{display:flex;align-items:center;gap:10px;background:var(--surface-2);border-radius:var(--radius);padding:10px 12px;margin-top:8px}
+.action i{font-size:18px;color:var(--accent)} .action p{flex:1;font-size:13px}
+.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.metric{background:var(--surface-2);border-radius:var(--radius);padding:14px} .metric .k{font-size:13px;color:var(--text-2)} .metric .v{font-size:24px;font-weight:500}
+.bar{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:12px} .bar .n{width:96px} .bar .t{flex:1;height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden} .bar .t b{display:block;height:100%} .bar .x{width:52px;text-align:right;color:var(--text-2)}
+.trail{display:flex;align-items:center;border-top:.5px solid var(--border);padding-top:14px;margin-top:16px}
+.trail .s{flex:1;text-align:center;font-size:10px;color:var(--text-3)} .trail .s i{display:block;width:8px;height:8px;border-radius:50%;background:var(--border);margin:0 auto 6px} .trail .s.on{color:var(--accent)} .trail .s.on i{background:var(--accent)}
+.trail .l{flex:1;height:1px;background:var(--border);margin-bottom:16px}
+.pipeline{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.mini{background:var(--surface);border:.5px solid var(--border);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.nav{width:220px;background:var(--surface);border:.5px solid var(--border);border-radius:var(--radius-lg);padding:12px}
+.nav a{display:flex;justify-content:space-between;padding:7px 10px;border-radius:var(--radius);color:var(--text);font-size:14px;text-decoration:none}
+.nav a.on{background:var(--accent);color:#fff} .nav .grp{font-size:11px;color:var(--text-3);padding:10px 10px 4px;letter-spacing:.04em;text-transform:uppercase}
+.nav a.sub{padding-left:18px;color:var(--text-2)}
+textarea,input{font:inherit;font-size:13px;color:var(--text);background:var(--surface-2);border:.5px solid var(--border);border-radius:var(--radius);padding:8px 10px;width:100%}
+</style></head><body>
+
+<h1>Water design reference</h1>
+<p class="sub">Source of truth for the look of every screen. Copy these tokens and component styles. Do not invent new ones.</p>
+
+<h2 class="ref">Navigation (grouped; collapsed groups show counts)</h2>
+<div class="nav">
+  <a class="on"><span>Today</span><span class="badge accent">2</span></a><a><span>Decisions</span><span class="badge">2</span></a>
+  <a><span>Approvals</span></a><a><span>Drafts</span></a><a><span>Meetings</span></a><a><span>Threads</span></a>
+  <div class="grp">Views</div><a><span>Dashboards</span></a>
+  <div class="grp">Projects</div><a class="sub">Crawler</a><a class="sub">Econ-RAG</a><a class="sub">Kevin</a><a class="sub">Voice_text</a><a class="sub">Water</a><a class="sub">YT-Recamendo</a>
+  <div class="grp">Domains</div><a class="sub">Clients</a><a class="sub">Finance</a><a class="sub">Ideas</a><a class="sub">Marketing</a><a class="sub">People</a><a class="sub">Research</a>
+</div>
+
+<h2 class="ref">Decision card</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline"><p class="h">Meridian renewal at risk</p><span class="badge warn">Due Oct 15</span></div>
+  <p class="sub" style="margin:4px 0 16px">Renew as-is, or ask for a short extension first?</p>
+  <div class="cols">
+    <div class="evidence">
+      <div><i class="ti ti-report-money"></i>$9,000/mo · 65% of this product's revenue</div>
+      <div><i class="ti ti-mood-sad"></i>NPS 5 · duplicates called out by name</div>
+      <div><i class="ti ti-clock"></i>Fix lands Nov 1, two weeks after the deadline</div>
+    </div>
+    <div class="panel"><p class="label">Team signal</p>
+      <div style="splay:flex;gap:6px;margin-bottom:8px;font-size:12px"><span class="avatar">N</span>Nina: fix on track for Nov 1</div>
+      <div style="display:flex;gap:6px;font-size:12px"><span class="avatar warn">L</span>Lee: can't pull it earlier</div>
+    </div>
+  </div>
+  <div class="divider"><p style="font-size:13px"><span style="color:var(--text-2)">Recommendation: </span>ask for a three-month extension. The fix is close.</p></div>
+  <div class="action" style="margin-top:14px"><i class="ti ti-mail"></i><p>Email Meridian proposing the extension</p><button class="btn">Review</button></div>
+  <div class="action"><i class="ti ti-flag"></i><p>Bump the dedup fix to top priority</p><button class="btn">Review</button></div>
+  <button class="btn block" style="margin-top:12px"><i class="ti ti-paperclip"></i> View related data (4)</button>
+</div>
+<p class="meta" style="margin-top:8px">Rules: no options list on the card. No raw email text or addresses in evidence, one summarised line each with a source icon. External-content marker is a small icon with a tooltip, not a banner. When there is no recommendation, say "No recommendation yet: &lt;what is missing&gt;". Show the deadline badge only when there is a deadline.</p>
+
+<h2 class="ref">Approval card: agent draft</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline"><p class="h"><i class="ti ti-mail" style="color:var(--accent)"></i> Email to Meridian</p><span class="badge warn">Awaiting you</span></div>
+  <p class="meta" style="margin:4px 0 14px">From the Meridian renewal decision</p>
+  <div class="panel" style="margin-bottom:14px"><p class="title">Subject: Meridian renewal, a quick update</p><p class="sub" style="font-size:13px;margin-top:4px">Acknowledges the duplicate-tracks issue, confirms the fix date, and proposes a three-month extension.</p></div>
+  <p class="meta" style="margin-bottom:16px"><i class="ti ti-shield-half"></i> Medium risk · external recipient, new commitment</p>
+  <div class="btn-row"><button class="btn primar">Approve</button><button class="btn">Edit</button><button class="btn">Reject</button></div>
+  <div class="trail"><div class="s on"><i></i>Staged</div><div class="l"></div><div class="s"><i></i>Approved</div><div class="l"></div><div class="s"><i></i>Sent</div><div class="l"></div><div class="s"><i></i>Reply</div></div>
+</div>
+
+<h2 class="ref">Approval card: person's request</h2>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline"><p class="h"><i class="ti ti-report-money" style="color:var(--accent)"></i> Budget reallocation request</p><span class="badge warn">Awaiting you</span></div>
+  <p class="meta" style="margin:6px 0 14px;display:flex;align-items:center;gap:8px"><span class="avatar">L</span>Requested by Lee (simulated)</p>
+  <div class="panel" style="margin-bottom:14px"><p class="title">Move $3,000/mo from Ranking quality to Ingestion v2</p><p class="sub" style="font-size:13px;margin-top:4px">Current pace risks slipping past the Meridian renewal window.</p></div>
+  <div class="btn-row"><button class="btn primary">Approve</button><button class="btn" style="flex:1.4">Request changes</button><button class="btn">Reject</button></div>
+  <p class="meta" style="text-align:center;margin-top:6px">Sends your notes back to Lee</p>
+</div>
+
+<h2 class="ref">Approvals queue (dense rows, priority edge, sorted by priority)</h2>
+<div class="list">
+  <div class="row edge-danger"><i class="ti ti-mail ico"></i><div class="body"><p class="title">Email to Meridian, renewal extension</p><p class="meta">From the Meridian renewal decision · due today</p></div><span class="badge danger">Urgent</span></div>
+  <div class="row edge-warn"><i class="ti ti-report-money ico"></i><div class="body"><p class="title">Budget reallocation, Ranking quality to Ingestion v2</p><p class="meta">Requested by Lee · yesterday</p></div><span class="badge warn">High</span></div>
+  <div class="row edge-none"><i class="ti ti-signature ico"></i><div class="body"><p class="title">Lexicon Archive renewal agreent</p><p class="meta">Requested by Riley · due Nov 15</p></div><span class="badge">Normal</span></div>
+</div>
+<p class="meta" style="margin-top:8px">Empty state: "No approvals waiting. Anything the assistant wants to send or change will appear here." The "select an approval" prompt lives in the detail pane and only shows when the list is not empty.</p>
+
+<h2 class="ref">Meetings (list + recap)</h2>
+<div class="list" style="margin-bottom:12px">
+  <div class="row sel"><i class="ti ti-microphone ico"></i><div class="body"><p class="title">Kafka sync</p><p class="meta">Sep 22 · likely: Meridian renewal</p></div></div>
+  <div class="row"><i class="ti ti-microphone ico"></i><div class="body"><p class="title">Fenwick pilot check-in</p><p class="meta">Sep 23 · likely: Fenwick enterprise pilot</p></div></div>
+</div>
+<div class="card"><p class="label">Decisions made</p><p class="sub" style="font-size:13px;margin-bottom:12px">Prioritise the dedup fix over ranking work this sprint.</p>
+  <p class="label">Action items><div style="display:flex;gap:8px;font-size:13px;margin-bottom:6px"><span class="avatar">N</span>Nina: land the dedup fix by Nov 1</div>
+  <div style="display:flex;gap:8px;font-size:13px;margin-bottom:12px"><span class="avatar warn">L</span>Lee: find budget for one more hand on ingestion</div>
+  <p class="label">Open questions</p><p class="sub" style="font-size:13px;margin-bottom:12px">Would Meridian accept a short extension?</p>
+  <p class="label">FYI</p><p class="sub" style="font-size:13px">Atlas's monthly review moved to Oct 12.</p></div>
+
+<h2 class="ref">Threads</h2>
+<div class="list">
+  <div class="row sel"><i class="ti ti-message-circle ico"></i><div class="body"><p class="title">Meridian renewal</p><p class="meta">"Should we ask for a three-month extension?" · 2m ago</p></div><span class="badge"><i class="ti ti-scale"></i> Decision</span></div>
+  <div class="row"><i class="ti ti-message-circle ico"></i><div class="body"><p class="title">Quick chat</p><p class="meta">"What's on my calendar tomorrow?"· yesterday</p></div><span class="badge">Unanchored</span></div>
+</div>
+
+<h2 class="ref">Dashboard (3 metrics, one breakdown, one callout)</h2>
+<div class="metrics" style="margin-bottom:14px"><div class="metric"><p class="k">Cash</p><p class="v">$2.59M</p></div><div class="metric"><p class="k">Monthly burn</p><p class="v">$306k</p></div><div class="metric"><p class="k">Runway</p><p class="v">7.8 mo</p></div></div>
+<div class="card" style="margin-bottom:14px"><p class="label">Spend by application, September</p>
+  <div class="bar"><span class="n">Crawler</span><span class="t"><b style="width:100%;background:var(--danger)"></b></span><span class="x">$68k</span></div>
+  <div class="bar"><span class="n">Kevin</span><span class="t"><b style="width:46%;background:var(--danger)"></b></span><span class="x">$31k</span></div>
+  <div class="bar"><span class="n">YT-Recamendo</span><span class="t"><b style="width:41%;background:var(--warn)"></b></span><span class="x">$28k</span></div></div>
+<div class="card"><p style="fnt-size:13px"><i class="ti ti-alert-triangle" style="color:var(--warn)"></i> Crawler carries the deepest loss relative to its revenue.</p></div>
+
+<h2 class="ref">Workspace landing (project)</h2>
+<div class="card" style="margin-bottom:14px"><div style="display:flex;justify-content:space-between"><p class="h"><i class="ti ti-bug" style="color:var(--accent)"></i> Crawler</p><span class="badge danger">Off track</span></div>
+  <div style="height:8px;background:var(--surface-2);border-radius:4px;margin:12px 0 4px;overflow:hidden"><b style="display:block;width:29%;height:100%;background:var(--accent)"></b></div>
+  <div style="display:flex;justify-content:space-between" class="meta"><span>29% complete</span><span>Target Nov 15 (slipped from Oct 31)</span></div></div>
+<div class="metrics" style="margin-bottom:14px"><div class="metric"><p class="k"><i class="ti ti-git-pull-request"></i> Open PRs</p><p class="v">3</p></div><div class="metric"><p class="k"><i class="ti ti-git-merge"></i> Merged this week</p><p class="v">2</p></div><div class="metric"><p class="k"><i class="ti ti-lock"></i> Blocked</p><p class="v">1</p></div></div>
+<p class="label">Needs you, in Crawler</p>
+<div class="list"><div class="row edge-danger"><i class="ti ti-flag ico"></i><p class="title" style="flex:1">Bump the dedup fix to top priority</p><span class="badge danger">Urgent</span></div></div>
+
+<h2 class="ref">Research (three columns, cards)</h2>
+<div class="pipeline">
+  <div><p class="label">Queued · 1</p><div class="mini"><p class="title">Podcast discovery demand</p><p class="meta">From idea</p></div></div>
+  <div><p class="label">Running · 1</p><div class="mini" style="border-color:var(--accent)"><p class="title">Clinical dictation and HIPAA</p><div style="height:4px;background:var(--surface-2);border-radius:2px;margin:8px 0 4px"><b style="display:block;width:60%;height:100%;background:var(--accent)"></b></div><p class="meta">3 of 5 steps</p></div></div>
+  <div><p class="label">Finished · 2</p><div class="mini"><p class="title">Lexicon altatives</p><p class="meta" style="color:var(--ok)"><i class="ti ti-link"></i> In Lexicon decision</p></div></div>
+</div>
+
+<h2 class="ref">Ideas (single-row capture, grouped)</h2>
+<div class="card" style="display:flex;gap:8px;align-items:center;padding:10px 12px;margin-bottom:14px"><i class="ti ti-bulb" style="color:var(--accent);font-size:18px"></i><input placeholder="Jot an idea"><button class="btn">Add</button></div>
+<p class="label">Raw</p>
+<div class="list"><div class="row"><div class="body"><p class="title">Clinical dictation for hospitals</p><p class="meta">From the Brightwater lead · needs HIPAA</p></div><button class="btn">Start research</button></div></div>
+<h2 class="ref">Analytics kit (Marketing, and reusable in any workspace)</h2>
+<p class="meta" style="margin-bottom:10px">Design rules: one chart per question. Thin marks. No default chart legends; build a small HTML legend with a colour swatch AND a line style (solid, dashed, dotted) so it never relies on colour alone. One y-axis. Emphasis (one lue, the rest grey) beats a rainbow. Status is always icon plus text. Chart.js: vendor it locally, the app must work offline.</p>
+
+<div class="metrics" style="grid-template-columns:repeat(4,1fr);margin-bottom:12px">
+  <div class="metric"><p class="k"><i class="ti ti-star"></i> Public rating</p>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end"><p class="v">3.6</p>
+    <svg width="64" height="24" viewBox="0 0 64 24"><polyline points="2,10 18,20 34,10 50,15 62,4" fill="none" stroke="#5b8cff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/><circle cx="62" cy="4" r="3.5" fill="#5b8cff"/></svg></div>
+    <p class="meta">5 reviews, 6 weeks</p></div>
+  <div class="metric"><p class="k"><i class="ti ti-mood-smile"></i> Feedback score</p><p class="v">0</p><p class="meta">2 promoters, 2 detractors</p></div>
+  <div class="metric"><p class="k"><i class="ti ti-target-arrow"></i> Open prospects</p><p class="v">2</p><p class="meta">Lumen, Brightwater</p></div>
+  <div class="metric"><p class="k"><i class="ti ti-coin"></i> Cost per lead</p><p class="v">$1,250</p><p class="meta">Brand budget over 2 leads</p></div>
+</div>
+
+<div style="display:grid;grid-template-columns:1.7fr 1fr;gap:12px;margin-bottom:12px">
+  <div class="card" style="padding:16px 20px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><p class="title">Market interest, 12 weeks</p><span class="badge warn">Illustrative</span></div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-2);margin-bottom:8px">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:18px;border-top:2px solid #5b8cff"></span>On-device dictation</span>
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:18px;border-top:2px dashed #ef8a5a"></span>Podcast discovery</span>
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:18px;border-top:2px dotted #3fc294"></span>AI study tools</span></div>
+    <div style="position:relative;height:200px"><canvas id="trendChart" role="img" aria-label="Market interest over 12 weeks for three topics"></canvas></div>
+  </div>
+  <div class="card" style="padding:16px 20px">
+    <p class="title">What people mention</p><p class="meta" style="margin-bottom:14px">Reviews, tickets, feedback</p>
+    <div class="bar"><span class="n">Latency</span><span class="t"><b style="width:100%;background:var(--accent)"></b></span><span class="x">7</span></div>
+    <div class="bar"><span class="n">Works well</span><span class="t"><b style="width:86%;background:#6e7681"></b></span><span class="x">6</span></div>
+    <div class="bar"><span class="n">Custom words</span><span class="t"><b style="width:57%;background:#6e7681"></b></span><span class="x">4</span></div>
+    <div class="bar"><span class="n">Price</span><span class="t"><b style="width:14%;background:#6e7681"></b></span><span class="x">1</span></div>
+  </div>
+</div>
+
+<div class="card" style="padding:16px 20px;margin-bottom:12px">
+  <div style="display:flex;justify-content:space-between;margin-bottom:10px"><p class="title">Voice_text feedback mix</p><p class="meta">7 responses</p></div>
+  <div style="display:flex;gap:2px;height:28px;font-size:12px">
+    <div style="flex:2;background:#9FE1CB;color:#04342C;border-radius:4px 0 0 4px;display:flex;align-items:center;padding:0 10px">Promoters 2</div>
+    <div style="flex:3;background:#D3D1C7;color:#2C2C2A;display:flex;align-items:center;padding:0 10px">Passive 3</div>
+    <div style="flex:2;background:#F7C1C1;color:#501313;border-radius:0 4px 4px 0;display:flex;align-items:center;padding:0 10px">Detractors 2</div></div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+  <div class="card" style="padding:16px 20px"><p class="title" style="margin-bottom:12px">Post: personal AI and productivity</p>
+    <div class="trail" style="border:0;padding:0;margin:0"><div class="s on" style="color:var(--ok)"><i style="background:var(--ok)"></i>Drafted</div><div class="s on" style="color:var(--ok)"><i style="background:var(--ok)"></i>PR checked</div><div class="s on"><i></i>Your call</div><div class="s"><i></i>Published</div></div></div>
+  <div class="card" style="background:var(--accent-bg);border-color:transparent;padding:16px 20px;display:flex;gap:10px"><i class="ti ti-bulb" style="font-size:18px;color:var(--accent)"></i>
+    <div><p style="font-size:13px;color:var(--accent);margin-bottom:8px">Latency is the top complaint, 7 mentions. A post on on-device speed would speak to it.</p><button class="btn">Draft a post</button></div></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+<script>
+new Chart(document.getElementById('trendChart'),{type:'line',data:{labels:['W1','W2','W3','W4','W5','W6','W7','W8','W9','W10','W11','W12'],datasets:[
+{data:[22,24,25,29,31,36,38,43,47,52,58,64],borderColor:'#5b8cff',borderWidth:2,tension:.3,pointRadius:0,pointHoverRadius:4},
+{data:[40,41,39,42,43,42,44,43,45,44,46,47],borderColor:'#ef8a5a',borderWidth:2,borderDash:[6,4],tension:.3,pointRadius:0,pointHoverRadius:4},
+{data:[70,68,66,64,60,58,55,52,49,47,44,41],borderColor:'#3fc294',borderWidth:2,borderDash:[2,3],tension:.3,pointRadius:0,pointHoverRadius:4}]},
+options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false}},
+scales:{y:{min:0,max:100,ticks:{stepSize:25,color:'#6f6f78',font:{size:11}},grid:{color:'rgba(137,135,129,.18)'},border:{display:false}},
+x:{ticks:{color:'#6f6f78',font:{size:11},maxRotation:0},grid:{display:false},border:{color:'rgba(137,135,129,.35)'}}}}});
+</script>
+</body></html>

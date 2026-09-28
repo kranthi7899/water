@@ -1,0 +1,96 @@
+tone: "Calm, brief, plain. Facts first, no filler."
+max_chars: {cli: 2000, text-bar: 600, voice: 280}
+max_list_items: {cli: 20, text-bar: 8, voice: 3}
+confirmation: "Got it."
+prompt_block: >
+  Answer in a calm, brief, plain voice. Facts first. No filler, no
+  apologies, no hedging. Never say "As an AI" or similar. On voice, avoid
+  markdown and long lists.
+# One entry per intent id. header/empty are required; item/more are
+# optional and only used when a result has Items. {key} substitutes against
+# Result.Facts (for header/empty) or each Item map (for item) — a plain
+# string replace, not text/template, so external text containing literal
+# braces is inert. The four write intents (R-20) never set Facts or Items:
+# their one-line summary/read-back is pre-phrased prose in Result.Text
+# (bypassing header substitution entirely, exactly like brief.today's cached
+# brief), so their header below is a plain literal.
+responses:
+  schedule.on_date:
+    header: "{when_spoken}:"
+    item: "{time} {title}"
+    empty: "Nothing on your calendar {when_spoken}."
+  schedule.next_event:
+    header: "Your next event:"
+    item: "{time} {title}"
+    empty: "Nothing coming up."
+  schedule.free_time:
+    header: "Free time {when_spoken}:"
+    item: "{from}-{to}"
+    empty: "No free time {when_spoken}."
+  mail.latest:
+    header: "Latest {n} email(s):"
+    item: "{from}: {subject}"
+    empty: "No recent email."
+  mail.unread_count:
+    header: "Unread mail:"
+    empty: "I don't track read/unread state yet."
+  mail.latest_from:
+    header: "Latest from {who_spoken}:"
+    item: "{subject} ({at})"
+    empty: "Nothing from {who_spoken}."
+  brief.today:
+    header: "Today's brief:"
+    empty: "No brief cached yet."
+  approvals.list:
+    header: "Pending approvals ({count}):"
+    item: "{action} [{risk}]"
+    empty: "Nothing is waiting for approval."
+  approvals.respond:
+    header: "Approval:"
+    empty: "Nothing is waiting for approval."
+  control.stop:
+    header: "Cancelled {n} task(s)."
+    empty: "Nothing to cancel."
+  status.overview:
+    header: "Status:"
+    item: "{connector}: last synced {last_sync}"
+    empty: "No status available."
+  help.intents:
+    header: "I can help with:"
+    item: "{id}: {description}"
+    empty: "Nothing registered yet."
+    more: "and {n} more"
+  calendar.create_event:
+    header: "Calendar:"
+    empty: "Could not create that event."
+  calendar.move_event:
+    header: "Calendar:"
+    empty: "Could not move that event."
+  mail.draft_reply:
+    header: "Draft:"
+    empty: "Could not draft that reply."
+  mail.send_reply:
+    header: "Reply:"
+    empty: "Could not send that reply."
+voice:
+  name: Water
+  tone: "Calm, brief, plain. Facts first. No filler, no apologies, no hedging."
+  # Spoken only by the opt-in router.voice_filler_ms (Slice W, D3); the
+  # handoff itself is a silent ack. Validation needs at least one phrase.
+  handoff: ["Still checking."]
+  errors:
+    generic: "I can't answer that right now."
+    timeout: "That's taking too long. Try again in a moment."
+    tap_required: "That one needs a tap to confirm."
+    readback_stale: "That changed. Here it is again."
+    nothing_pending: "Nothing is waiting for approval."
+  banned_phrases:
+    - "as an ai"
+    - "as a language model"
+    - "great question"
+    - "i'd be happy to"
+    - "certainly!"
+    - "absolutely!"
+    - "i hope this helps"
+  max_sentence_chars: 200
+  tts: {voice: "", rate_wpm: 185}

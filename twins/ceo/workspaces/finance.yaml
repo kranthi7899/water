@@ -1,0 +1,13 @@
+# Domain workspace: Finance, sourced from the company_finance sheet
+# (internal/connectors/google/gsheets). vendors is left empty as a
+# placeholder rule for now — this workspace's membership will most
+# naturally grow to include roster vendor renewals once a later phase
+# needs "which vendor renewals belong under Finance" as a deterministic
+# check; today the Finance dashboard (twins/ceo/dashboards/finance.yaml)
+# and the sheet itself already scope this workspace's own data without
+# needing a membership rule.
+id: finance
+name: Finance
+template: finance
+source: company_finance
+vendors: []

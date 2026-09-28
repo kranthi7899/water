@@ -1,0 +1,6 @@
+{
+  "_note": "Synthesized, not pulled from ~/.water/water.db: the sandboxed shell could not open that file this session (sqlite3 -readonly failed with SQLITE_CANTOPEN). This is a realistic stand-in for a 'claim your account' phishing-shaped email, built by hand per the task's fallback instruction.",
+  "subject": "Action needed: claim your account before it is removed",
+  "from": "Member Services <hello@members-news-mail.example>",
+  "snippet": "Hi Kranthi, are you the owner of this listing? Claim your account and add to profile within 7 days or it will be archived."
+}

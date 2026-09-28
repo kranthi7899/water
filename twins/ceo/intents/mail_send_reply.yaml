@@ -1,0 +1,22 @@
+id: mail.send_reply
+description: Send a dictated reply to someone's latest message
+kind: write
+action: gmail.send_message
+proposer: mail.reply
+slots:
+  who: {type: person, required: true}
+  body: {type: text, required: true}
+templates:
+  - "send {who} a reply saying {body}"
+  - "reply to {who} and send it saying {body}"
+escalate_if: [slot_unresolved, ambiguous_match]
+reflex_eligible: true
+tests:
+  - {utterance: "send priya a reply saying sounds good see you then", intent: mail.send_reply, slots: {who: "priya nair <priya@example.com>", body: "sounds good see you then"}}
+  - {utterance: "reply to priya and send it saying sounds good see you then", intent: mail.send_reply, slots: {who: "priya nair <priya@example.com>", body: "sounds good see you then"}}
+  - {utterance: "what's the weather like", intent: "none"}
+---
+Same proposer as mail.draft_reply (mail.reply); this intent targets
+gmail.send_message instead, which the CEO twin grants at level A, so
+RequiresApproval is true (checkAction): a successful proposal is queued for
+approval and nothing executes without it.

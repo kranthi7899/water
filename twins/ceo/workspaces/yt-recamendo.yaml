@@ -1,0 +1,7 @@
+# Project workspace: YT-Recamendo, twins/ceo/seed/people.yaml's
+# "yt-recamendo" team, Linear key YTR.
+id: yt-recamendo
+name: YT-Recamendo
+template: project
+source: linear_team:YTR
+teams: [YTR]
