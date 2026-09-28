@@ -36,21 +36,21 @@
     const items = list(threads);
     S.renderRecent(items);
     if (!items.length) listPane.appendChild(S.empty('No threads yet.'));
-    const ul = h('ul', { class: 'rows' });
+    const box = h('div', { class: 'list' });
     for (const t of items) {
       const id = get(t, 'id');
       const at = get(t, 'anchor_type');
       const label = get(t, 'anchor_label') || (at ? at : 'Unanchored');
-      ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row' + (id === param ? ' selected' : ''), on: { click: () => S.go('threads', id) },
+      box.appendChild(h('button', {
+        type: 'button', class: 'row' + (id === param ? ' sel' : ''), on: { click: () => S.go('threads', id) },
       },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(t, 'title') || 'Untitled'),
-        h('span', { class: 'row-meta' },
-          S.badge(label, at && get(t, 'anchor_untrusted') ? 'warn' : ''),
-          h('span', { class: 'muted' }, fmtAgo(get(t, 'updated_at'))))))));
+      S.icon('message-circle'),
+      h('div', { class: 'body' },
+        h('div', { class: 'title' }, get(t, 'title') || 'Untitled'),
+        h('div', { class: 'meta' }, fmtAgo(get(t, 'updated_at')))),
+      S.badge(label, at && get(t, 'anchor_untrusted') ? 'warn' : '')));
     }
-    listPane.appendChild(ul);
+    listPane.appendChild(box);
   }
 
   async function renderThreadDetail(pane, id, gen) {

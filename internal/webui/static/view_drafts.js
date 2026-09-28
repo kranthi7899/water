@@ -27,15 +27,27 @@
 (function () {
   const { h, replace, get, list, fmtAgo } = window.dom;
 
+  // draftRow: a dense row per docs/slices/UI-polish.md's cross-cutting
+  // "dense rows over big bordered boxes" rule. template_label
+  // (internal/store/drafts.go's DraftTemplateLabel) is already one human
+  // line ("Reply", "Investor update section", ...), never the raw
+  // "Template: X · Source: Y" form -- that literal string lives only in
+  // view_workspaces.js (out of this file's scope), not here, so there was
+  // nothing to remove; this only adds the row-kind icon + row-line wrapper
+  // view_today.js and (now) view_approvals.js already use, for a consistent
+  // dense look across every list in the app. 'signature' (a pen glyph) is
+  // reused from the existing ICON_GLYPHS set (app.js) -- the closest match
+  // to "a message being drafted"; no new icon name is introduced.
   function draftRow(d, selected) {
     const id = get(d, 'id');
     const subject = get(d, 'subject');
+    const S = window.appShared;
     return h('li', null, h('button', {
-      type: 'button', class: 'row' + (selected ? ' selected' : ''), on: { click: () => window.appShared.go('drafts', id) },
-    }, h('span', { class: 'row-main' },
+      type: 'button', class: 'row' + (selected ? ' selected' : ''), on: { click: () => S.go('drafts', id) },
+    }, h('span', { class: 'row-line' }, S.icon('signature'), h('span', { class: 'row-main' },
       h('span', { class: 'row-title' }, subject || '(no subject)'),
       h('span', { class: 'row-sub muted' }, get(d, 'template_label') || ''),
-      h('span', { class: 'row-meta' }, h('span', { class: 'muted' }, fmtAgo(get(d, 'updated_at')))))));
+      h('span', { class: 'row-meta' }, h('span', { class: 'muted' }, fmtAgo(get(d, 'updated_at'))))))));
   }
 
   async function renderDraftDetail(pane, id, gen) {
@@ -114,7 +126,10 @@
     if (!S.current(gen)) return;
     S.setCount('drafts', items.length);
     if (!items.length) {
-      listPane.appendChild(S.empty('No drafts yet.'));
+      // Cross-cutting empty-state rule: one short useful line, not "Nothing
+      // here yet." -- says what will show up here, same as the header's own
+      // description just above.
+      listPane.appendChild(S.empty('No drafts yet. A reply, delegation or investor update lands here before it goes to Approvals.'));
     } else {
       const ul = h('ul', { class: 'rows' });
       for (const d of items) ul.appendChild(draftRow(d, get(d, 'id') === param));
@@ -123,8 +138,13 @@
 
     if (param) {
       await renderDraftDetail(detail, param, gen);
-    } else {
+    } else if (items.length) {
+      // Same ordering rule view_approvals.js now applies (docs/slices/
+      // UI-polish.md's Findings): the "select one" placeholder only makes
+      // sense when there is something to select.
       replace(detail, S.empty('Select a draft to edit it.'));
+    } else {
+      replace(detail, null);
     }
   }
 

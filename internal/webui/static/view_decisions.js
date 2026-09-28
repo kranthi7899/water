@@ -6,7 +6,7 @@
 'use strict';
 
 (function () {
-  const { h, replace, get, list } = window.dom;
+  const { h, replace, get, list, fmtDay } = window.dom;
   const api = window.api;
 
   // KIND_ICONS maps decisions.EvidenceKind's closed set (docs/slices/UI.md
@@ -57,7 +57,7 @@
       if (param && get(card, 'ID', 'id') === param) { el.classList.add('focus'); focus = el; }
       body.appendChild(el);
     }
-    replace(c, S.header('Decisions', 'Approving a card is two steps: stage it, read exactly what will happen, then confirm. Nothing is sent before you confirm.'), body);
+    replace(c, S.header('Decisions'), body);
     if (focus) focus.scrollIntoView({ block: 'start' });
   }
 
@@ -76,7 +76,9 @@
     const actionStates = get(card, 'action_states') || {};
 
     // Header: title + due badge, question underneath (docs/slices/UI.md
-    // Phase 3b).
+    // Phase 3b; badge.warn deadline chip per docs/design/design-reference.html,
+    // Slice UI-polish -- shown only when the card actually has a deadline).
+    const dueDay = deadline ? fmtDay(deadline) : '';
     const el = h('article', { class: 'card ' + S.decisionPriorityClass(sev, deadline) },
       h('header', { class: 'card-head' },
         h('h2', null, get(card, 'Lead', 'lead') || get(card, 'Question', 'question') || id),
@@ -84,61 +86,72 @@
           awaiting ? S.badge('Staged, awaiting your yes', 'status-pending') : null,
           readiness && readiness !== 'ready' ? h('span', { class: 'muted' }, S.readinessLabel(readiness)) : null,
           isUntrusted ? S.extGlyph() : null,
-          S.dueBadge(deadline))));
+          dueDay ? S.badge('Due ' + dueDay, 'warn') : null)));
 
     const question = get(card, 'Question', 'question');
     if (question) el.appendChild(h('p', { class: 'question' }, question));
 
-    // Left column: up to 3 evidence lines, icon only, no inline source (the
-    // source is reachable only through "View related data" below).
+    // Left column: up to 3 evidence lines, one summarised line each with a
+    // small source icon, no raw source text/addresses inline (the source is
+    // reachable only through "View related data" below) -- .evidence div
+    // structure per docs/design/design-reference.html, Slice UI-polish. The
+    // "includes external content" banner is gone; isUntrusted now shows only
+    // as a small icon+tooltip next to the "Evidence" heading (S.extGlyph,
+    // the same mechanism app.js already uses elsewhere) -- the taint field
+    // itself and its meaning are untouched, only this label changed.
     const evidence = list(get(card, 'Evidence', 'evidence'));
-    const evUl = h('ul', { class: 'evidence' });
-    if (!evidence.length) evUl.appendChild(h('li', { class: 'muted' }, 'None.'));
+    const evWrap = h('div', { class: 'evidence' });
+    if (!evidence.length) evWrap.appendChild(h('div', { class: 'muted' }, 'None.'));
     for (const ev of evidence.slice(0, 3)) {
       const kind = get(ev, 'Kind', 'kind') || '';
       const icon = kindIcon(kind);
-      evUl.appendChild(h('li', null,
-        icon ? h('span', { class: 'ev-icon', title: kind }, icon) : null,
-        h('span', { class: 'ev-text' }, get(ev, 'Text', 'text') || '')));
+      evWrap.appendChild(h('div', null,
+        icon ? h('i', { title: kind }, icon) : null,
+        get(ev, 'Text', 'text') || ''));
     }
-    const evidenceCol = h('div', { class: 'card-col evidence-col' + (isUntrusted ? ' untrusted-sec' : '') },
-      h('h3', null, isUntrusted ? 'Evidence (includes external content, shown as text)' : 'Evidence'), evUl);
+    const evidenceCol = h('div', { class: 'evidence-col' + (isUntrusted ? ' untrusted-sec' : '') },
+      h('h3', null, 'Evidence', isUntrusted ? S.extGlyph() : null), evWrap);
 
-    // Right column: Team signal, initials + status, "(simulated)" appended
-    // only when Signal.Simulated is true.
+    // Right column: a small .panel with Team signal, initials + status,
+    // "(simulated)" appended only when Signal.Simulated is true -- hidden
+    // entirely (no panel, no grid) when the card has no signals, per
+    // docs/slices/UI-polish.md.
     const signals = list(get(card, 'TeamSignal', 'team_signal'));
-    const teamUl = h('ul', { class: 'team-signal' });
-    if (!signals.length) teamUl.appendChild(h('li', { class: 'muted' }, 'No team signal.'));
-    for (const sig of signals) {
-      const person = get(sig, 'Person', 'person') || '';
-      const sigStatus = get(sig, 'Status', 'status') || '';
-      const simulated = Boolean(get(sig, 'Simulated', 'simulated'));
-      teamUl.appendChild(h('li', null,
-        h('span', { class: 'avatar', title: person }, initials(person)),
-        h('span', null, sigStatus + (simulated ? ' (simulated)' : ''))));
-    }
-    const teamCol = h('div', { class: 'card-col team-col' }, h('h3', null, 'Team signal'), teamUl);
-
-    el.appendChild(h('div', { class: 'card-columns' }, evidenceCol, teamCol));
-
-    const options = list(get(card, 'Options', 'options'));
-    if (options.length) {
-      const ul = h('ul', { class: 'options' });
-      for (const o of options) {
-        ul.appendChild(h('li', null, h('strong', null, get(o, 'Label', 'label') || ''),
-          get(o, 'Consequences', 'consequences') ? h('span', { class: 'muted' }, ' — ' + get(o, 'Consequences', 'consequences')) : null));
+    if (signals.length) {
+      const teamUl = h('ul', { class: 'team-signal' });
+      for (const sig of signals) {
+        const person = get(sig, 'Person', 'person') || '';
+        const sigStatus = get(sig, 'Status', 'status') || '';
+        const simulated = Boolean(get(sig, 'Simulated', 'simulated'));
+        teamUl.appendChild(h('li', null,
+          h('span', { class: 'avatar', title: person }, initials(person)),
+          h('span', null, sigStatus + (simulated ? ' (simulated)' : ''))));
       }
-      el.appendChild(h('section', { class: 'card-sec' }, h('h3', null, 'Options'), ul));
+      const teamCol = h('div', { class: 'panel' }, h('p', { class: 'label' }, 'Team signal'), teamUl);
+      el.appendChild(h('div', { class: 'cols' }, evidenceCol, teamCol));
+    } else {
+      el.appendChild(evidenceCol);
     }
 
-    // "Recommendation:" one line, the muted "Missing info: ..." line right
-    // after it, shown only when the card actually has gaps (U12) -- never
-    // an empty line when it doesn't.
+    // Options stay in the data (build.go / the API response) but are no
+    // longer rendered on the card, per docs/slices/UI-polish.md.
+
+    // "Recommendation:" one line. When the server sent no recommendation,
+    // show "No recommendation yet: <what is missing>" (docs/slices/UI-polish.md)
+    // built from the card's own already-computed Gaps -- the validation that
+    // decides whether a recommendation exists is server-side and untouched,
+    // this only changes the displayed string. The separate "Missing info: ..."
+    // line's own gating (U12, Phase 3b -- shown whenever gaps exist, a
+    // locked-in owner decision this slice doesn't reopen) is unchanged: it
+    // can read as repeating the no-recommendation sentence in the one case
+    // where both fire, which is an acceptable, pre-existing tradeoff U12
+    // already accepted, not something to silently change here.
+    const gaps = list(get(card, 'Gaps', 'gaps'));
     const rec = get(card, 'Recommendation', 'recommendation');
+    const noRecText = 'No recommendation yet: ' + (gaps.length ? gaps.map(String).join('; ') : 'more information is needed') + '.';
     el.appendChild(h('p', { class: 'recommendation' },
       h('strong', null, 'Recommendation: '),
-      rec || 'None: the evidence does not support one.'));
-    const gaps = list(get(card, 'Gaps', 'gaps'));
+      rec || noRecText));
     if (gaps.length) {
       el.appendChild(h('p', { class: 'muted missing-info' }, 'Missing info: ' + gaps.map(String).join('; ')));
     }
@@ -158,7 +171,7 @@
     // api.relatedDecision lists (docs/slices/UI.md Phase 3b).
     const sourceCount = list(get(card, 'SourceItemIDs', 'source_item_ids')).length + evidence.length;
     const relatedArea = h('div', { class: 'related-area' });
-    el.appendChild(S.button('View related data (' + sourceCount + ')', () => toggleRelated(id, relatedArea, gen), 'full-width'));
+    el.appendChild(S.button('View related data (' + sourceCount + ')', () => toggleRelated(id, relatedArea, gen), 'btn block'));
     el.appendChild(relatedArea);
 
     const stageArea = h('div', { class: 'stage-area' });
@@ -191,7 +204,9 @@
   // Review (or "already staged"/"not granted"), matching the whole card's
   // own awaiting/staged handling but scoped to this one action id, backed
   // by card_action_states (Phase 1c) through the per-action stage endpoint
-  // (Phase 3b) instead of the whole-card card_states row.
+  // (Phase 3b) instead of the whole-card card_states row. Markup is the
+  // reference's .action row (docs/design/design-reference.html, Slice
+  // UI-polish): icon, one-line sentence, "Review" button.
   function suggestionRow(cardId, sug, actionStates, gen) {
     const S = window.appShared;
     const actionId = get(sug, 'ID', 'id');
@@ -205,14 +220,14 @@
 
     const status = h('div', { class: 'card-status' });
     const stageArea = h('div', { class: 'stage-area' });
-    const line = h('div', { class: 'suggestion-line' },
-      icon ? h('span', { class: 'sugg-icon' }, icon) : null,
-      h('span', { class: 'sugg-sentence' }, sentence));
+    const line = h('div', { class: 'action' },
+      icon ? h('i', null, icon) : null,
+      h('p', null, sentence));
     if (!awaiting) {
       if (actionable) {
         line.appendChild(S.button('Review', () => {
           replace(stageArea, stageActionForm(cardId, sug, status, gen));
-        }, 'primary'));
+        }, 'btn'));
       } else {
         line.appendChild(h('span', { class: 'muted not-granted', title: 'The manifest does not grant this at level A yet' }, '(not granted)'));
       }

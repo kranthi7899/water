@@ -167,6 +167,38 @@
     return h('span', { class: 'ext-glyph', title: 'Built from an outside email' }, '⚠');
   }
 
+  // ---------- icons (Slice UI-polish, task 2) ----------
+  //
+  // docs/design/design-reference.html specifies Tabler icon-font classes
+  // (e.g. class="ti ti-mail") for about 20 glyphs. That could not be
+  // vendored: internal/webui's Handler only ever serves .html/.css/.js
+  // (contentTypes in webui.go is a hard allowlist -- a .woff2 font 404s
+  // regardless of what's embedded), and internal/webui/webui_test.go's
+  // TestShippedFilesUseNoUnsafeAPIs additionally bans a CSS "u.r.l("
+  // construct and any web-address-shaped text in every shipped file --
+  // which also rules out a JS-built inline SVG icon (createElementNS needs
+  // the SVG XML namespace address as a literal string). Both are
+  // pre-existing, intentional boundaries here (server-provided text --
+  // mail bodies, decision evidence -- flows into this UI, so nothing
+  // shipped may carry an address-shaped string or reach outside
+  // .html/.css/.js), out of scope for this slice to relax, and not
+  // something to route around some other way.
+  //
+  // ICON_GLYPHS instead extends this app's own existing pattern
+  // (kindGlyph/extGlyph above: a plain Unicode character, no markup, no
+  // file, no URL) to the reference's icon names, so a future view file can
+  // call icon('mail') wherever the reference shows <i class="ti ti-mail">.
+  const ICON_GLYPHS = {
+    'report-money': '$', mail: '✉', flag: '⚑', clock: '⏱', 'mood-sad': '☹',
+    paperclip: '📎', 'shield-half': '🛡', microphone: '🎤', 'message-circle': '💬',
+    scale: '⚖', 'alert-triangle': '⚠', bug: '🐛', 'git-pull-request': '⑂',
+    'git-merge': '⑃', lock: '🔒', link: '🔗', bulb: '💡', star: '★',
+    'mood-smile': '☺', 'target-arrow': '🎯', coin: '🪙', signature: '✎',
+  };
+  function icon(name, cls) {
+    return h('span', { class: 'ico' + (cls ? ' ' + cls : ''), 'aria-hidden': 'true' }, ICON_GLYPHS[name] || '•');
+  }
+
   // decisionPriorityClass mirrors internal/needsyou.DecisionPriority
   // (U14) client-side: the Decisions view's own card list carries Severity
   // and Deadline but not a server-computed Priority field in this phase —
@@ -295,6 +327,7 @@
     replace(main, container);
     container.appendChild(h('p', { class: 'loading' }, 'Loading…'));
     updateBarTarget();
+    renderWorkspaceNavGroups();
     const fn = window.views[view];
     if (typeof fn !== 'function') {
       replace(container, errorBox('Could not load ' + view, new Error('no view registered for ' + view)));
@@ -922,12 +955,77 @@
     try {
       // Phase 3c: the Drafts badge counts the drafts table's own rows
       // (api.drafts()), not pending outward envelopes -- U10-A retired that
-      // reading of "Drafts".
-      const [t, pending, drafts] = await Promise.all([api.today(), api.approvals('pending', 500), api.drafts()]);
+      // reading of "Drafts". Decisions is fetched here too (Slice
+      // UI-polish, task 4: "show counts on Decisions and Approvals" like
+      // the reference nav) so the badge is populated eagerly at boot,
+      // matching Approvals/Drafts/Today, instead of only after the
+      // Decisions view itself has been opened once (view_decisions.js
+      // already calls setCount('decisions', ...) on its own render, which
+      // still applies and simply re-confirms the same number).
+      const [t, pending, drafts, decisions] = await Promise.all(
+        [api.today(), api.approvals('pending', 500), api.drafts(), api.decisions()]);
       setCount('today', list(get(t, 'needs_you')).length);
       setCount('approvals', list(pending).length);
       setCount('drafts', list(drafts).length);
+      setCount('decisions', list(decisions).length);
     } catch (_) { /* counts are best-effort */ }
+  }
+
+  // ---------- Projects/Domains nav groups (Slice UI-polish, task 4) ----------
+  //
+  // The reference (docs/design/design-reference.html) groups the sidebar's
+  // workspace links into "Projects" and "Domains", not one flat "Workspaces"
+  // disclosure. Per docs/slices/UI-polish.md's own Findings section, this is
+  // pure frontend grouping: api.workspaces() already returns each
+  // workspace's `template` field (`project` for the six project workspaces;
+  // every other template name is a domain workspace), so no new server data
+  // is needed -- just splitting the one list client-side.
+  //
+  // This duplicates the shape of view_workspaces.js's own renderNavList
+  // (same .nav-sub-item markup, same goWorkspace navigation, same
+  // highlight-the-open-one rule) rather than editing that function, since
+  // view_workspaces.js is out of scope for this slice (six other agents own
+  // it next). That file's renderNavList still runs on every workspaces-view
+  // render and at boot (window.views._workspaceNav) exactly as before; it
+  // targets #workspaces-nav-list, an id index.html no longer has, so it is
+  // now a safe, guarded no-op (`if (!el) return;`), not an error.
+  let workspaceNavItems = null;
+
+  function navListItem(w, currentID) {
+    const id = get(w, 'id');
+    return h('li', null, h('button', {
+      type: 'button', class: 'nav-sub-item' + (id === currentID ? ' active' : ''),
+      title: get(w, 'name') || id,
+      on: { click: () => goWorkspace(id, DEFAULT_WORKSPACE_SUB) },
+    }, get(w, 'name') || id));
+  }
+
+  // renderWorkspaceNavGroups redraws #projects-nav-list/#domains-nav-list
+  // from the already-fetched list (cheap, no network call) -- called on
+  // every render() so the active highlight follows navigation the same way
+  // the old renderNavList did.
+  function renderWorkspaceNavGroups() {
+    const projectsEl = document.getElementById('projects-nav-list');
+    const domainsEl = document.getElementById('domains-nav-list');
+    if (!projectsEl || !domainsEl || !workspaceNavItems) return;
+    const currentID = state.view === 'workspaces' ? String(state.param || '').split('/')[0] : '';
+    const projects = workspaceNavItems.filter((w) => get(w, 'template') === 'project');
+    const domains = workspaceNavItems.filter((w) => get(w, 'template') !== 'project');
+    replace(projectsEl, projects.map((w) => navListItem(w, currentID)));
+    replace(domainsEl, domains.map((w) => navListItem(w, currentID)));
+    if (!projects.length) projectsEl.appendChild(h('li', { class: 'muted small' }, 'None yet'));
+    if (!domains.length) domainsEl.appendChild(h('li', { class: 'muted small' }, 'None yet'));
+  }
+
+  // loadWorkspaceNavGroups is boot's one-time, best-effort load (workspaces
+  // load once from YAML at daemon startup and rarely change, so unlike
+  // Recent threads this is not on the periodic refresh timer -- same
+  // reasoning as the old loadWorkspaceNav it replaces).
+  async function loadWorkspaceNavGroups() {
+    try {
+      workspaceNavItems = list(await api.workspaces());
+      renderWorkspaceNavGroups();
+    } catch (_) { /* best-effort */ }
   }
 
   function boot() {
@@ -941,11 +1039,7 @@
     render();
     refreshCounts();
     refreshRecent();
-    // view_workspaces.js registers this to populate the sidebar's
-    // Workspaces disclosure; it is loaded by the time boot runs (see the
-    // file header comment), but the guard keeps boot() safe even if a
-    // future build ever ships without that file.
-    if (typeof window.views._workspaceNav === 'function') window.views._workspaceNav();
+    loadWorkspaceNavGroups();
     setInterval(() => { refreshCounts(); refreshRecent(); }, 60000);
     // For the native shell: open a view (a tapped notification, the HUD's
     // Edit), or refresh after a held-mic voice turn finished.
@@ -977,7 +1071,7 @@
   window.appShared = {
     state, DEFAULT_WORKSPACE_SUB,
     toast, errText, errorBox, badge, armed, button, header, empty, setCount, current,
-    isOutward, statusLabel, statusBadge, riskLabel, actionLabel, dueBadge, extGlyph, kindGlyph,
+    isOutward, statusLabel, statusBadge, riskLabel, actionLabel, dueBadge, extGlyph, kindGlyph, icon,
     decisionPriorityClass, deadlineDays, priorityClass, readinessLabel,
     go, goWorkspace, render, openThreadAbout, openExternal,
     payloadFields, fieldsOf, kindOf, payloadInputs, editForm, decisionResult,

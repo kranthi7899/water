@@ -788,6 +788,29 @@ any daemon started from this binary unless a real send is intended.
   "Draft reply" only ever works from a manually-entered review id —
   there is nothing to browse or list until a real source is added.
 
+## Found in Slice UI-polish (2026-09-28)
+
+- **No icon font or Chart.js is vendored.** `internal/webui/webui.go`'s
+  `TestShippedFilesUseNoUnsafeAPIs` only allows `.html`/`.css`/`.js` to ship
+  in the embedded UI and bans any URL/address-shaped string in a shipped
+  file — a `.woff2` font 404s regardless of embedding, and Chart.js's own
+  license headers and `canvas.toDataURL()` call trip the same scanner. Both
+  are pre-existing, intentional boundaries (untrusted external content flows
+  into this UI), not something this slice worked around. Icons render as
+  plain Unicode glyphs instead (`app.js`'s `icon()`/`ICON_GLYPHS`, extending
+  the app's existing `kindGlyph`/`extGlyph` pattern); the Marketing
+  workspace's market-interest chart falls back to a labelled tile list
+  instead of a line graph. Revisit only if this scanner's constraint is
+  deliberately relaxed for a specific, reviewed vendored file.
+- **The Marketing analytics kit's rating/feedback-score/cost-per-lead/theme
+  tiles have no server-side computation behind them** — confirmed by
+  reading `workspace_detail.go`'s Marketing section in full; only
+  `marketingProspectsTile` (Type=Prospect accounts) is real. Every other
+  tile renders its honest `not_connected`/empty state. Wiring real reads
+  from the Customers sheet's Reviews/Feedback tabs is separate, unbuilt
+  scope (docs/slices/UI-polish.md's own Findings section flagged this
+  before any code was written).
+
 ## Carried over from A-series slices (still true)
 
 - Long-term memory (`internal/memory`) is not wired into the runtime, the

@@ -17,7 +17,7 @@
     const tabs = h('div', { class: 'head-actions' },
       S.button('Recent', () => { meetingsTab = 'recent'; viewMeetings(c, param, gen); }, meetingsTab === 'recent' ? 'primary' : 'secondary'),
       S.button('Upcoming', () => { meetingsTab = 'upcoming'; viewMeetings(c, param, gen); }, meetingsTab === 'upcoming' ? 'primary' : 'secondary'));
-    replace(c, S.header('Meetings', 'Recaps are phrased from meeting speech, so they are shown as quoted text.', tabs), h('div', { class: 'split' }, listPane, detail));
+    replace(c, S.header('Meetings', 'What was said and decided in your recent meetings.', tabs), h('div', { class: 'split' }, listPane, detail));
 
     if (meetingsTab === 'upcoming') {
       let events;
@@ -30,16 +30,16 @@
       if (!S.current(gen)) return;
       replace(detail, S.empty('Upcoming meetings come from your calendar; nothing to recap yet.'));
       if (!events.length) listPane.appendChild(S.empty('Nothing upcoming.'));
-      const ul = h('ul', { class: 'rows' });
+      const box = h('div', { class: 'list' });
       for (const e of events) {
-        ul.appendChild(h('li', null, h('span', { class: 'row' },
-          h('span', { class: 'row-main' },
-            h('span', { class: 'row-title' }, get(e, 'title') || 'Meeting'),
-            h('span', { class: 'row-meta' },
-              get(e, 'location') ? h('span', { class: 'muted' }, get(e, 'location')) : null,
-              h('span', { class: 'muted' }, fmtDate(get(e, 'start_at'))))))));
+        const meta = [get(e, 'location'), fmtDate(get(e, 'start_at'))].filter(Boolean).join(' · ');
+        box.appendChild(h('div', { class: 'row row-static' },
+          S.icon('microphone'),
+          h('div', { class: 'body' },
+            h('div', { class: 'title' }, get(e, 'title') || 'Meeting'),
+            h('div', { class: 'meta' }, meta))));
       }
-      listPane.appendChild(ul);
+      listPane.appendChild(box);
       return;
     }
 
@@ -50,20 +50,26 @@
     if (!S.current(gen)) return;
     const items = list(ms);
     if (!items.length) listPane.appendChild(S.empty('No meetings recorded yet.'));
-    const ul = h('ul', { class: 'rows' });
+    const box = h('div', { class: 'list' });
     for (const m of items) {
       const id = get(m, 'session_id');
-      ul.appendChild(h('li', null, h('button', {
-        type: 'button', class: 'row' + (id === param ? ' selected' : ''), on: { click: () => S.go('meetings', id) },
+      const guess = get(m, 'project_guess');
+      const metaBits = [fmtDate(get(m, 'started_at'))];
+      if (guess && get(guess, 'available')) metaBits.push(get(guess, 'label'));
+      const trailing = [];
+      if (get(m, 'live')) trailing.push(S.badge('Live', 'hot'));
+      const rb = recapBadge(get(m, 'recap'));
+      if (rb) trailing.push(rb);
+      box.appendChild(h('button', {
+        type: 'button', class: 'row' + (id === param ? ' sel' : ''), on: { click: () => S.go('meetings', id) },
       },
-      h('span', { class: 'row-main' },
-        h('span', { class: 'row-title' }, get(m, 'event_title') || 'Meeting'),
-        h('span', { class: 'row-meta' },
-          get(m, 'live') ? S.badge('Live', 'hot') : null,
-          recapBadge(get(m, 'recap')),
-          h('span', { class: 'muted' }, fmtDate(get(m, 'started_at'))))))));
+      S.icon('microphone'),
+      h('div', { class: 'body' },
+        h('div', { class: 'title' }, get(m, 'event_title') || 'Meeting'),
+        h('div', { class: 'meta' }, metaBits.join(' · '))),
+      trailing.length ? h('span', null, trailing) : null));
     }
-    listPane.appendChild(ul);
+    listPane.appendChild(box);
   }
 
   function recapBadge(r) {
@@ -112,7 +118,7 @@
       default:
         body = h('p', { class: 'muted' }, get(m, 'live') ? 'This meeting is still in progress.' : 'No recap for this meeting.');
     }
-    replace(pane, h('article', { class: 'meeting' },
+    replace(pane, h('article', { class: 'card' },
       h('header', { class: 'card-head' },
         h('h2', null, get(m, 'event_title') || 'Meeting'),
         h('div', { class: 'row-meta' },
@@ -146,7 +152,7 @@
 
   function recapSection(title, items) {
     return h('div', { class: 'recap-section' },
-      h('h3', null, title),
+      h('p', { class: 'label' }, title),
       items.length ? h('ul', { class: 'plain' }, items.map((it) => h('li', null, get(it, 'text')))) : h('p', { class: 'muted' }, 'None.'));
   }
 
@@ -156,7 +162,7 @@
   // shows as plain text, with no avatar.
   function recapActionItemsSection(items) {
     return h('div', { class: 'recap-section' },
-      h('h3', null, 'Action items'),
+      h('p', { class: 'label' }, 'Action items'),
       items.length ? h('ul', { class: 'plain' }, items.map((it) => {
         const owner = get(it, 'owner');
         const initials = get(it, 'owner_initials');

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; media-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types 'none'">
 <meta name="referrer" content="no-referrer">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Water</title>
 <link rel="stylesheet" href="app.css">
@@ -35,12 +35,13 @@
     <button type="button" class="nav" data-view="drafts"><span class="nav-label">Drafts</span><span class="count" data-count="drafts"></span></button>
     <button type="button" class="nav" data-view="meetings"><span class="nav-label">Meetings</span></button>
     <button type="button" class="nav" data-view="threads"><span class="nav-label">Threads</span></button>
-    <hr class="nav-divider">
+    <div class="grp">Views</div>
     <button type="button" class="nav" data-view="dashboards"><span class="nav-label">Dashboards</span></button>
-    <details class="nav-group" id="workspaces-group">
-      <summary class="nav" data-view="workspaces"><span class="nav-label">Workspaces</span></summary>
-      <ul class="nav-sub" id="workspaces-nav-list"></ul>
-    </details>
+    <button type="button" class="nav" data-view="workspaces"><span class="nav-label">Workspaces</span></button>
+    <div class="grp">Projects</div>
+    <ul class="nav-sub" id="projects-nav-list"></ul>
+    <div class="grp">Domains</div>
+    <ul class="nav-sub" id="domains-nav-list"></ul>
     <section class="recent" aria-label="Recent threads">
       <h2 class="recent-head">Recent threads</h2>
       <ul class="recent-list" id="recent-threads"></ul>

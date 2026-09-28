@@ -1,50 +1,49 @@
-/* Water workspace UI. Plain CSS, system fonts, no external resources. */
+/* Water workspace UI. No external resources at runtime (CSP is 'self'-only;
+   see index.html); the Tabler icon font and Chart.js are vendored locally
+   under static/fonts, static/tabler-icons.css and static/vendor.
+
+   Tokens and component classes below are merged from
+   docs/design/design-reference.html (Slice UI-polish, task 1) -- that file
+   is the visual source of truth; do not invent new colors or spacing here,
+   change the reference and re-merge instead. This app has no light mode
+   (color-scheme: dark, one :root block, no @media (prefers-color-scheme)
+   override) -- the reference's own tokens are already dark-only, so the
+   old light-default/dark-override pair this file used to have is collapsed
+   into the reference's single dark palette. A few pre-existing token names
+   the reference doesn't define (--muted, --accent-text, --ok-border,
+   --err-bg/--err-border, --quote-bg, --hot, --sidebar) are kept, reconciled
+   to the new palette, rather than renaming every call site that already
+   uses them correctly. */
 
 :root {
-  --bg: #f6f6f4;
-  --surface: #ffffff;
-  --surface-2: #f0f0ed;
-  --text: #1d1d1b;
-  --muted: #6b6b66;
-  --border: #e2e2dd;
-  --accent: #1f6feb;
+  --bg: #0f0f10;
+  --surface: #1a1a1c;
+  --surface-2: #222225;
+  --border: #2c2c30;
+  --text: #f0f0f2;
+  --text-2: #a3a3ab;
+  --text-3: #6f6f78;
+  --muted: var(--text-2);
+  --accent: #5b8cff;
+  --accent-bg: #1c2a4d;
   --accent-text: #ffffff;
-  --danger: #c0392b;
-  --ok-bg: #eaf6ee;
-  --ok-border: #9fd3ae;
-  --err-bg: #fdecea;
-  --err-border: #f1a9a0;
-  --warn: #9a6700;
-  --warn-bg: #fff6dc;
-  --warn-border: #e8c766;
-  --quote-bg: #fbf7ea;
-  --hot: #b42318;
+  --warn: #e0a13a;
+  --warn-bg: #3a2c10;
+  --warn-border: #6b5418;
+  --danger: #ef6461;
+  --danger-bg: #3d1a19;
+  --ok: #54b87a;
+  --ok-bg: #15301f;
+  --ok-border: #2f6b41;
+  --err-bg: #3d1a19;
+  --err-border: #7a2c24;
+  --quote-bg: #26231a;
+  --hot: #ff7b6b;
   --radius: 8px;
-  --sidebar: 200px;
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161615;
-    --surface: #1f1f1e;
-    --surface-2: #2a2a28;
-    --text: #ececea;
-    --muted: #9b9b95;
-    --border: #353532;
-    --accent: #4c8dff;
-    --accent-text: #0b0b0b;
-    --danger: #ff6b5b;
-    --ok-bg: #16301f;
-    --ok-border: #2f6b41;
-    --err-bg: #3a1714;
-    --err-border: #7a2c24;
-    --warn: #e3b341;
-    --warn-bg: #2f2710;
-    --warn-border: #6b5418;
-    --quote-bg: #26231a;
-    --hot: #ff7b6b;
-  }
+  --radius-lg: 12px;
+  --sidebar: 220px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -54,7 +53,7 @@ html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font: 14px/1.5 var(--font);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -110,6 +109,11 @@ body {
 /* ---------- nav divider and the Workspaces disclosure (Slice UI Phase 2) ---------- */
 
 .nav-divider { height: 1px; margin: 6px 4px; background: var(--border); border: 0; }
+
+/* .grp: a sidebar section label (docs/design/design-reference.html's
+   .nav .grp), reused as-is -- "Views", "Projects", "Domains" (Slice
+   UI-polish, task 4). No existing class had this name. */
+.grp { font-size: 11px; color: var(--text-3); padding: 10px 10px 4px; letter-spacing: .04em; text-transform: uppercase; }
 
 /* <details class="nav-group">: a native disclosure, so opening/closing it
    needs no JavaScript. Its <summary> reuses .nav's own look and the same
@@ -181,7 +185,9 @@ body {
   margin-bottom: 18px;
 }
 .view-head h1 { font-size: 22px; margin: 0; font-weight: 600; }
-.sub { margin: 4px 0 0; color: var(--muted); }
+/* .sub already existed (a muted subtitle line); font-size added to match
+   docs/design/design-reference.html's .sub exactly, same class, same job. */
+.sub { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
 
 h2 { font-size: 16px; margin: 0 0 10px; font-weight: 600; }
 h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
@@ -192,12 +198,26 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .loading { color: var(--muted); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 
-.panel, .card, .approval, .thread, .meeting {
+/* ---------- design reference primitives (docs/design/design-reference.html,
+   Slice UI-polish task 1) -- none of these four names existed in this file
+   before, so they're added verbatim, no rename/collision. ---------- */
+.title { font-size: 13px; font-weight: 500; }
+.meta { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+.h { font-size: 16px; font-weight: 500; }
+.label { font-size: 11px; color: var(--text-3); margin-bottom: 8px; }
+
+.panel, .approval, .thread, .meeting {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px 18px;
 }
+
+/* .card: docs/design/design-reference.html's own component, split out of
+   the shared rule above (this app's existing .panel/.approval/.thread/
+   .meeting keep their prior box; .card gets the reference's exact one --
+   same concept, a bordered surface box, just the current values). */
+.card { background: var(--surface); border: .5px solid var(--border); border-radius: var(--radius-lg); padding: 20px; }
 
 /* One column (docs/slices/V.md §7.4 V-ui2): Today's panels stack. */
 .stack { display: flex; flex-direction: column; gap: 16px; }
@@ -234,12 +254,68 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .row.row-static { cursor: default; }
 .row.row-static:hover { border-color: var(--border); }
 
+/* .list / dense .row (docs/design/design-reference.html, Slice UI-polish
+   task 1): a bordered container of flat, bottom-bordered rows -- the
+   Approvals queue, meetings/threads lists, etc. .row already exists in this
+   app as a self-contained bordered/rounded button box (above), used
+   standalone in many places this pass isn't touching; redefining .row's own
+   box model to the reference's flush-in-a-list version would regress every
+   one of those. Resolution: .list .row (scoped to a .list parent) gets the
+   reference's flat look; a standalone .row is unchanged. .sel and the
+   edge-* priority colours are plain additive modifiers, safe on either. */
+.list { background: var(--surface); border: .5px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.list .row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: auto;
+  border: 0;
+  border-bottom: .5px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  padding: 12px 16px;
+}
+.list .row:last-child { border-bottom: 0; }
+.list .row:hover { border-color: var(--border); box-shadow: none; }
+.row.sel, .list .row.sel { background: var(--surface-2); }
+.row.edge-danger { border-left: 3px solid var(--danger); }
+.row.edge-warn { border-left: 3px solid var(--warn); }
+.row.edge-none { border-left: 3px solid var(--border); }
+.row .ico { font-size: 18px; color: var(--text-2); flex-shrink: 0; }
+.row .body { flex: 1; min-width: 0; }
+
 /* Dashboards, Phase 4: one dashboard's metric tiles, in a wrapping row of
    equal-ish panels rather than a fixed column count, so it holds up from a
    narrow sidebar-open layout to a wide one. */
 .dashboard-tiles { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 .dashboard-tile { flex: 1 1 160px; min-width: 140px; }
 .dashboard-tile-value { font-size: 28px; font-weight: 600; margin: 4px 0; }
+
+/* .metrics / .metric / .pipeline / .mini: docs/design/design-reference.html,
+   added fresh. None of these four names existed before -- the current
+   dashboard stat-tile mechanism above (.dashboard-tiles/.dashboard-tile) is
+   untouched; a future dashboards pass can adopt .metrics/.metric instead. */
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.metric { background: var(--surface-2); border-radius: var(--radius); padding: 14px; }
+.metric .k { font-size: 13px; color: var(--text-2); }
+.metric .v { font-size: 24px; font-weight: 500; }
+.pipeline { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.mini { background: var(--surface); border: .5px solid var(--border); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 8px; }
+
+/* .dr-bar: docs/design/design-reference.html's own .bar -- a labelled
+   horizontal meter row (dashboard "spend by application", the Marketing
+   kit's "what people mention" ranked list). Named with a dr- prefix, not
+   bare .bar, because .bar already means the app's bottom message-input bar
+   (index.html #bar, styled below under "the bottom bar" -- a structural,
+   load-bearing layout class). Reusing .bar for this would silently break
+   that whole layout the moment both rules' base properties (display/
+   padding/border) collided. This is the other true rename/collision in
+   this merge, alongside .dr-panel above. */
+.dr-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 12px; }
+.dr-bar .n { width: 96px; }
+.dr-bar .t { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.dr-bar .t b { display: block; height: 100%; }
+.dr-bar .x { width: 52px; text-align: right; color: var(--text-2); }
 
 /* People workspace, Phase 5b: a team tile's border reads its computed
    strain (peopleStrain, internal/gateway/workspace_detail.go), and each
@@ -288,6 +364,12 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .badge.status-executed, .badge.status-approved, .badge.recap-ready { color: #1a7f37; border-color: #1a7f37; }
 .badge.status-denied, .badge.recap-failed { color: var(--danger); border-color: var(--danger); }
 .badge.status-pending { color: var(--accent); border-color: var(--accent); }
+/* docs/design/design-reference.html adds these three; .warn already existed
+   above with equivalent background+color (kept its extra border-color too,
+   consistent with every other modifier in this block). */
+.badge.danger { background: var(--danger-bg); color: var(--danger); border-color: var(--danger); }
+.badge.ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-border); }
+.badge.accent { background: var(--accent-bg); color: var(--accent); border-color: var(--accent); }
 
 /* ---------- priority (docs/slices/UI.md U14 / Phase 0b) ---------- */
 /* A 3px left-border cue on a needs-you row or decision card, replacing the
@@ -325,9 +407,37 @@ h3 { font-size: 12px; margin: 0 0 6px; font-weight: 600; text-transform: upperca
 .card-sec { margin: 12px 0; }
 .card-sec p { margin: 0; overflow-wrap: anywhere; }
 
+/* .evidence used to be grouped with .options/.gaps/.refs as one <ul>-style
+   list reset. docs/design/design-reference.html's .evidence is a <div>-based
+   icon+line list (.evidence div / .evidence i), not a bulleted <li> list, so
+   .evidence is split out here with padding-left: 0 -- .options/.gaps/.refs
+   keep the old list-reset unchanged. The old .evidence li rule is left in
+   place too (additive, harmless if nothing renders an <li> under .evidence
+   any more; view_decisions.js already builds evidence some other way per
+   docs/slices/UI-polish.md's own Findings -- not touched in this pass). */
 .evidence, .options, .gaps, .refs { margin: 0; padding-left: 18px; }
+.evidence { padding-left: 0; }
 .evidence li, .options li, .gaps li { margin: 4px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.evidence div { font-size: 13px; color: var(--text-2); line-height: 1.9; }
+.evidence i { font-size: 14px; vertical-align: -2px; margin-right: 6px; }
 .ev-source { display: block; color: var(--muted); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* .cols / .divider / .action: docs/design/design-reference.html, added
+   fresh -- none of these three names existed in this file before. */
+.cols { display: grid; grid-template-columns: 1fr 170px; gap: 20px; }
+.divider { border-top: .5px solid var(--border); padding-top: 12px; margin-top: 14px; }
+.action { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border-radius: var(--radius); padding: 10px 12px; margin-top: 8px; }
+.action i { font-size: 18px; color: var(--accent); }
+.action p { flex: 1; font-size: 13px; }
+
+/* .dr-panel: docs/design/design-reference.html's nested small box (e.g. the
+   decision card's "Team signal" panel). Named with a dr- prefix, not bare
+   .panel, because .panel already means something else in this file (the
+   top-level surface box shared with .approval/.thread/.meeting, used
+   throughout Today/Meetings/Threads -- redefining it to the reference's
+   surface-2, smaller-padding nested-box spec would regress every one of
+   those screens). This is the one true rename/collision in this merge. */
+.dr-panel { background: var(--surface-2); border-radius: var(--radius); padding: 10px 12px; }
 
 .untrusted-sec {
   border-left: 3px solid var(--warn-border);
@@ -429,21 +539,42 @@ details summary { cursor: pointer; color: var(--muted); }
 }
 .trail-step.current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
 
+/* .dr-trail: docs/design/design-reference.html's own .trail -- a dot-and-
+   line stepper, a different visual (and DOM shape: .s/.s.on/.l) from this
+   app's existing pill-row .trail/.trail-step above, which trailRow()
+   (app.js) actively renders on every approval detail pane today. Reusing
+   .trail's base rule for the reference's version would drop that existing
+   rule's gap/flex-wrap and add an unwanted top border/padding, regressing
+   Approvals. Named with a dr- prefix instead; a future pass can switch
+   trailRow() to this markup if it wants the reference's exact stepper. */
+.dr-trail { display: flex; align-items: center; border-top: .5px solid var(--border); padding-top: 14px; margin-top: 16px; }
+.dr-trail .s { flex: 1; text-align: center; font-size: 10px; color: var(--text-3); }
+.dr-trail .s i { display: block; width: 8px; height: 8px; border-radius: 50%; background: var(--border); margin: 0 auto 6px; }
+.dr-trail .s.on { color: var(--accent); }
+.dr-trail .s.on i { background: var(--accent); }
+.dr-trail .l { flex: 1; height: 1px; background: var(--border); margin-bottom: 16px; }
+
 /* The person-request card's initials avatar and "Requested by" line. */
 .requester { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+/* .avatar: docs/design/design-reference.html's exact spec (22px, accent
+   tint, no border). Note for whoever next touches the People workspace
+   (view_workspaces.js, out of scope here): .avatar.load-low/.load-high
+   only override color/border-color, assuming a neutral base -- they'll now
+   sit on an accent-tinted background instead of surface-2. Not fixed here. */
 .avatar {
   flex: none;
-  width: 28px;
-  height: 28px;
+  width: 22px;
+  height: 22px;
   border-radius: 50%;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  display: flex;
+  background: var(--accent-bg);
+  color: var(--accent);
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 500;
 }
+.avatar.warn { background: var(--warn-bg); color: var(--warn); }
 
 /* The agent-draft card's gist and risk phrase lines. */
 .gist { overflow-wrap: anywhere; }
@@ -462,6 +593,16 @@ ul.plain .avatar { width: 22px; height: 22px; font-size: 10px; }
 /* ---------- forms and buttons ---------- */
 
 .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 0; }
+
+/* .btn / .btn.primary / .btn.block / .btn-row: docs/design/design-reference.html's
+   button vocabulary, added fresh -- this app's existing buttons use
+   button.primary/.secondary/.ghost/.danger (an element+class pattern, not a
+   .btn class), so there is no name collision; both can coexist. */
+.btn { font: inherit; font-size: 13px; color: var(--text); background: transparent; border: .5px solid var(--border); border-radius: var(--radius); padding: 6px 14px; cursor: pointer; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.block { width: 100%; }
+.btn-row { display: flex; gap: 8px; }
+.btn-row .btn { flex: 1; }
 
 button.primary, button.secondary, button.ghost, button.danger {
   font: inherit;
@@ -487,13 +628,17 @@ button:focus-visible, .row:focus-visible, .nav:focus-visible, input:focus-visibl
 .form.inline input { flex: 1; }
 .form label { font-size: 12px; font-weight: 600; color: var(--muted); }
 
+/* Values match docs/design/design-reference.html's textarea/input rule
+   exactly; kept the existing input[type="text"] (not a bare `input`)
+   selector since that's what this app's markup already uses. */
 input[type="text"], textarea {
   font: inherit;
+  font-size: 13px;
   width: 100%;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface);
+  padding: 8px 10px;
+  border: .5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
   color: var(--text);
 }
 textarea { resize: vertical; }
