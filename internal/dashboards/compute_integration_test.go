@@ -174,11 +174,15 @@ func TestIntegrationDeliveryDashboardComputesExactNumbers(t *testing.T) {
 }
 
 // TestIntegrationClientsAccountsNotConnectedBeforeOwnerConfigures proves
-// the real, currently-shipping behavior docs/slices/UI.md U3-A describes:
-// company_customers, built for real today, answers not_connected until the
-// owner replaces the CONFIGURE_ME placeholder — verified here through the
-// actual gsheets.NewCustomers() production constructor (no test override),
-// so this exercises the exact code path a real daemon runs right now.
+// docs/slices/UI.md U3-A's pre-upload behavior: company_customers answers
+// not_connected while its spreadsheet id is still a CONFIGURE_ME
+// placeholder. The owner has since uploaded Renaissance_Customers.xlsx and
+// customersSpreadsheetID is now real (2026-09-27), so this test now builds
+// an explicitly-unconfigured instance via NewCustomersWithOptions rather
+// than the production gsheets.NewCustomers() constructor — using the real
+// constructor here would make a live network call to Google's OAuth
+// endpoint with a fabricated refresh token instead of hitting the
+// placeholder short-circuit, which is not what this test is for.
 func TestIntegrationClientsAccountsNotConnectedBeforeOwnerConfigures(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "water.db"))
@@ -192,7 +196,7 @@ func TestIntegrationClientsAccountsNotConnectedBeforeOwnerConfigures(t *testing.
 	}
 	defer log.Close()
 	q := approvals.NewQueue(st, log)
-	reg, err := connectors.NewRegistry(gsheets.NewCustomers())
+	reg, err := connectors.NewRegistry(gsheets.NewCustomersWithOptions("CONFIGURE_ME_test_placeholder", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +228,6 @@ connectors:
 	co := &Compute{Gate: g, Cache: &Cache{TTL: DefaultCacheTTL}, Now: fixedClock(now)}
 
 	if got := metricFuncs["accounts_at_risk"](context.Background(), co); got.State != TileNotConnected {
-		t.Fatalf("accounts_at_risk = %+v, want not_connected (the spreadsheet is still the CONFIGURE_ME placeholder)", got)
+		t.Fatalf("accounts_at_risk = %+v, want not_connected (spreadsheet id is an explicit CONFIGURE_ME placeholder)", got)
 	}
 }

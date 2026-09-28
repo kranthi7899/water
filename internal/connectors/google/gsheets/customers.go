@@ -7,24 +7,29 @@
 // values.get-by-tab/range pattern, R level only, rate-capped in
 // twins/ceo/twin.yaml exactly like every other read-only function here.
 //
-// The owner has not uploaded the spreadsheet yet (Renaissance_Customers.xlsx
-// as a native Google Sheet in the Water Google account). Until they do,
-// customersSpreadsheetID stays the CONFIGURE_ME placeholder below, and
-// Invoke refuses with ErrCustomersNotConfigured before ever making a Sheets
-// API call — the same "no repo configured" precedent
-// internal/connectors/github's own Invoke uses for githubRepo == "", and
-// the same CONFIGURE_ME_... placeholder shape budget_request.yaml's now-
-// retired internal://budget_request.compute_runway once used
-// (CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet). This is expected,
-// correct behavior today, not a bug: internal/dashboards/compute.go maps
-// this error (and a missing shared Google credential) to the Clients
-// dashboard's "not_connected" tile state.
+// The owner uploaded Renaissance_Customers.xlsx as a native Google Sheet,
+// shared it Viewer with water.google/ceo, and customersSpreadsheetID below
+// is now the real id (2026-09-27) — live read access was confirmed
+// directly against the Sheets API with Water's own stored credential
+// before this was filled in, both for reachability (Summary!A1:H12) and
+// for the exact production range (Accounts!A6:Q60, 10 real rows, matching
+// the source file exactly). If the spreadsheet id is ever reset to a
+// CONFIGURE_ME_-prefixed placeholder (e.g. in a test), Invoke refuses with
+// ErrCustomersNotConfigured before ever making a Sheets API call — the
+// same "no repo configured" precedent internal/connectors/github's own
+// Invoke uses for githubRepo == "", and the same CONFIGURE_ME_...
+// placeholder shape budget_request.yaml's now-retired
+// internal://budget_request.compute_runway once used
+// (CONFIGURE_ME_drive_file_id_of_the_runway_spreadsheet).
+// internal/dashboards/compute.go maps that error (and a missing shared
+// Google credential) to the Clients dashboard's "not_connected" tile state.
 //
 // Row schema (Accounts tab), corrected against the owner's actual
 // Renaissance_Customers.xlsx (2026-09-27) — the original schema above this
 // comment was this task's own unconfirmed guess and was wrong. Header row
 // is row 5 (rows 1-4 are a title/note/as-of-date block); data runs rows
-// 6-15 today. One row per customer, prospect or partner:
+// 6-15 today, hence customersLookup's "A6:Q60" (not "A5"). One row per
+// customer, prospect or partner:
 //
 //	A  account id (string, e.g. "meridian-records") — not used for display
 //	B  name (string) — the join key dashboards.go's accountColName reads
@@ -52,10 +57,9 @@
 //
 // The sheet's own dates render through gsheets.getRange's
 // dateTimeRenderOption=FORMATTED_STRING, which formats by the spreadsheet's
-// locale/cell format — not guaranteed to be "YYYY-MM-DD". Column M's actual
-// rendered format is unverified until this spreadsheet is live (tracked in
-// docs/known-gaps.md); compute.go's strict "2006-01-02" parse will need
-// adjusting then if the format differs.
+// locale/cell format. Confirmed live (2026-09-27): column M renders as
+// plain "YYYY-MM-DD" (e.g. "2026-09-24"), matching compute.go's strict
+// "2006-01-02" parse exactly — no adjustment needed.
 //
 // The real workbook also has Contacts, Interactions, Support tickets,
 // Feedback, Reviews and Vendors tabs — none read by this connector. Reviews
@@ -80,14 +84,12 @@ import (
 	"water/internal/twins"
 )
 
-// customersSpreadsheetID is a placeholder until the owner uploads
-// Renaissance_Customers.xlsx as a native Google Sheet and this constant is
-// hand-edited to its real id — exactly how gsheets.go's own spreadsheetID
-// const works, just not filled in yet. It is never a real Google
-// spreadsheet id (Google's ids don't start with "CONFIGURE_ME_"), so
-// Invoke below can recognize it and refuse cleanly instead of making a
-// doomed API call against it.
-const customersSpreadsheetID = "CONFIGURE_ME_company_customers_spreadsheet_id"
+// customersSpreadsheetID is Renaissance_Customers, uploaded by the owner as
+// a native Google Sheet and shared Viewer with water.google/ceo
+// (2026-09-27) — live read access confirmed directly against the Sheets API
+// with Water's own stored credential before this was filled in (Summary!
+// A1:H12, 12 rows).
+const customersSpreadsheetID = "1lfYCxuRw22yfqx75dUCFPQzlWCr84GI47XLBY8h19KU"
 
 // customersConfigurePrefix is the sentinel prefix Invoke checks for. A
 // test overrides customersSpreadsheetID (via NewCustomersWithOptions) to
@@ -99,7 +101,7 @@ const customersConfigurePrefix = "CONFIGURE_ME_"
 // same shape gsheets.go's own `lookup` type has (kept separate so this
 // file has no dependency on gsheets.go's lookups map, which is keyed by
 // company_finance's own function names).
-var customersLookup = lookup{tab: "Accounts", rangeA1: "A5:Q60"}
+var customersLookup = lookup{tab: "Accounts", rangeA1: "A6:Q60"}
 
 // ErrCustomersNotConfigured is returned by Customers.Invoke while
 // customersSpreadsheetID is still the CONFIGURE_ME placeholder — i.e., the
@@ -118,18 +120,19 @@ type Customers struct {
 	opts          *gapi.Options
 }
 
-// NewCustomers builds the production connector, always against the
-// CONFIGURE_ME placeholder until this file is hand-edited with the
-// owner's real spreadsheet id.
+// NewCustomers builds the production connector, against the owner's real
+// Renaissance_Customers spreadsheet id (customersSpreadsheetID, filled in
+// 2026-09-27).
 func NewCustomers() *Customers { return &Customers{spreadsheetID: customersSpreadsheetID} }
 
 // NewCustomersWithOptions builds a connector against a test double, and
-// optionally a non-placeholder spreadsheet id so a test can exercise the
-// "configured" path without waiting for the owner's real upload (an empty
-// id keeps the production placeholder, so a test can also exercise
-// ErrCustomersNotConfigured). This differs from gsheets.NewWithOptions,
-// which never needs to override spreadsheetID, because company_customers'
-// whole point right now is that its id isn't real yet.
+// optionally a spreadsheet id override so a test can exercise either path
+// (an empty id keeps whatever customersSpreadsheetID currently is; pass an
+// explicit "CONFIGURE_ME_..."-prefixed id to exercise
+// ErrCustomersNotConfigured instead, since the production constant is no
+// longer a placeholder). This differs from gsheets.NewWithOptions, which
+// never needs to override spreadsheetID, because that connector's id has
+// been real since it was written.
 func NewCustomersWithOptions(spreadsheetID string, o *gapi.Options) *Customers {
 	if spreadsheetID == "" {
 		spreadsheetID = customersSpreadsheetID

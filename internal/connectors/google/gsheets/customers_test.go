@@ -90,18 +90,21 @@ func (h *customersHarness) invoke(t *testing.T) (gate.Result, error) {
 // ---- not configured: the expected, current, correct state ----
 
 // TestAccountsWithPlaceholderSpreadsheetIsNotConfigured is docs/slices/UI.md
-// U3-A's own expected behavior: before the owner uploads
-// Renaissance_Customers.xlsx and this connector's placeholder is hand-
-// edited to the real spreadsheet id, every call fails clearly with
-// ErrCustomersNotConfigured — and never makes an HTTP request at all (the
-// server below fails the test if it ever receives one).
+// U3-A's own expected behavior *before* the owner uploads the real sheet:
+// with a still-CONFIGURE_ME-prefixed spreadsheet id, every call fails
+// clearly with ErrCustomersNotConfigured — and never makes an HTTP request
+// at all (the server below fails the test if it ever receives one). The
+// owner has since uploaded Renaissance_Customers.xlsx and this connector's
+// production customersSpreadsheetID is now the real id (2026-09-27), so
+// this test passes an explicit placeholder rather than relying on
+// NewCustomersWithOptions("", ...)'s fallback to the production constant.
 func TestAccountsWithPlaceholderSpreadsheetIsNotConfigured(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("no Sheets API request should ever be made while the spreadsheet id is still the CONFIGURE_ME placeholder")
 	}))
 	defer api.Close()
 	ts := newTokenServer(t)
-	sh := gsheets.NewCustomersWithOptions("", &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
+	sh := gsheets.NewCustomersWithOptions("CONFIGURE_ME_test_placeholder", &gapi.Options{BaseURL: api.URL, TokenURL: ts.URL, Sleep: noSleep})
 	h := newCustomersHarness(t, sh, true)
 
 	_, err := h.invoke(t)
@@ -150,8 +153,8 @@ func TestAccountsReadsEveryRowOnceConfigured(t *testing.T) {
 	if !res.Untrusted {
 		t.Fatal("company_customers.accounts must be marked untrusted (External)")
 	}
-	if *gotRange != "Accounts!A5:Q60" {
-		t.Fatalf("requested range = %q, want %q", *gotRange, "Accounts!A5:Q60")
+	if *gotRange != "Accounts!A6:Q60" {
+		t.Fatalf("requested range = %q, want %q", *gotRange, "Accounts!A6:Q60")
 	}
 	var out map[string]any
 	if err := json.Unmarshal(res.Output, &out); err != nil {
